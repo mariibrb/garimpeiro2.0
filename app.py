@@ -15,7 +15,7 @@ def aplicar_estilo_premium():
         with open("style.css", "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
-        st.error("Ficheiro style.css não encontrado.")
+        st.error("Ficheiro style.css não encontrado na pasta.")
 
 aplicar_estilo_premium()
 
@@ -53,10 +53,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         content_str = content_bytes[:45000].decode('utf-8', errors='ignore')
         tp_m = RE_TPNF.search(content_str)
         if tp_m: resumo["Operacao"] = "ENTRADA" if tp_m.group(1) == "0" else "SAIDA"
+
         resumo["CNPJ_Emit"] = RE_EMIT.search(content_str).group(1) if RE_EMIT.search(content_str) else ""
         resumo["Nome_Emit"] = RE_EMIT_NOME.search(content_str).group(1).upper() if RE_EMIT_NOME.search(content_str) else ""
         resumo["Doc_Dest"] = RE_DEST.search(content_str).group(1) if RE_DEST.search(content_str) else ""
         resumo["Nome_Dest"] = RE_DEST_NOME.search(content_str).group(1).upper() if RE_DEST_NOME.search(content_str) else ""
+        
         data_m = RE_DATA.search(content_str)
         if data_m: resumo["Data_Emissao"] = data_m.group(1)
 
@@ -81,18 +83,21 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
                 resumo["Série"] = str(int(resumo["Chave"][22:25]))
                 resumo["Número"] = int(resumo["Chave"][25:34])
                 if not resumo["Data_Emissao"]: resumo["Data_Emissao"] = f"{resumo['Ano']}-{resumo['Mes']}-01"
+
             tipo = "NF-e"
             if '<mod>65</mod>' in content_str: tipo = "NFC-e"
             elif '<mod>57</mod>' in content_str or '<infcte' in content_str: tipo = "CT-e"
             elif '<mod>58</mod>' in content_str or '<infmdfe' in content_str: tipo = "MDF-e"
+            
             status = "NORMAIS"
             if '110111' in content_str or '<cstat>101</cstat>' in content_str: status = "CANCELADOS"
             elif '110110' in content_str: status = "CARTA_CORRECAO"
             resumo["Tipo"], resumo["Status"] = tipo, status
+
             if status == "NORMAIS":
                 val_m = RE_VALOR.search(content_str)
                 resumo["Valor"] = float(val_m.group(1)) if val_m else 0.0
-        
+            
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
         resumo["Pasta"] = f"{'EMITIDOS_CLIENTE' if is_p else 'RECEBIDOS_TERCEIROS'}/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
         return resumo, is_p
@@ -109,7 +114,8 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
                     if sub_nome.lower().endswith('.zip'): itens.extend(extrair_recursivo(sub_conteudo, sub_nome))
                     elif sub_nome.lower().endswith('.xml'): itens.append((os.path.basename(sub_nome), sub_conteudo))
         except: pass
-    elif nome_arquivo.lower().endswith('.xml'): itens.append((os.path.basename(nome_arquivo), conteudo_bytes))
+    elif nome_arquivo.lower().endswith('.xml'):
+        itens.append((os.path.basename(nome_arquivo), conteudo_bytes))
     return itens
 
 # --- INTERFACE ---
@@ -120,31 +126,32 @@ with st.container():
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 Como usar o sistema (Passo a Passo)</h3>
+            <h3>📖 Instruções de Uso</h3>
             <ul>
-                <li><b>1. Identificar a Empresa:</b> No menu branco à esquerda, escreva o <b>CNPJ do seu cliente</b> e clique no botão para liberar o sistema.</li>
-                <li><b>2. Enviar as Notas:</b> No meio da tela, arraste a sua pasta de notas (pode ser em formato ZIP ou as notas XML soltas).</li>
+                <li><b>1. Identificar Empresa:</b> No menu à esquerda, escreva o <b>CNPJ do cliente</b> e clique no botão para liberar o sistema.</li>
+                <li><b>2. Enviar Notas:</b> Arraste para o campo central sua pasta de notas (ZIP ou XMLs soltos).</li>
                 <li><b>3. Analisar:</b> Clique no botão <b>"Iniciar Grande Garimpo"</b> e aguarde o fim da barra de progresso.</li>
-                <li><b>4. Conferir com o Governo:</b> Na Etapa 2 (final da página), envie a <b>Planilha de Autenticidade</b> da SEFAZ e clique em "Validar e Atualizar".</li>
-                <li><b>5. Guardar Resultados:</b> Use os botões coloridos para descarregar o <b>Relatório Master</b> e as notas organizadas.</li>
+                <li><b>4. Auditoria SEFAZ:</b> Na Etapa 2, envie a planilha de Autenticidade e clique em "Validar e Atualizar".</li>
+                <li><b>5. Concluir:</b> Use os botões no final para descarregar o <b>Excel Master</b> e as notas organizadas.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 O que o sistema faz por si</h3>
+            <h3>📊 Dados Obtidos</h3>
             <ul>
-                <li><b>Acha Notas Perdidas:</b> Identifica automaticamente saltos na numeração (ex: se falta a nota 5 entre a 4 e a 6).</li>
-                <li><b>Limpa Cancelamentos:</b> Detecta notas canceladas e as retira do valor total de faturamento.</li>
-                <li><b>Arruma a Casa:</b> Organiza tudo em pastas por Ano/Mês e renomeia os arquivos para fácil leitura.</li>
-                <li><b>Auditoria Cruzada:</b> Confronta o status do seu arquivo físico com o que consta no site da SEFAZ.</li>
+                <li><b>Relatório de Buracos:</b> Identifica saltos na numeração das notas enviadas.</li>
+                <li><b>Cálculo Contábil:</b> Notas canceladas são detectadas e o valor é zerado automaticamente.</li>
+                <li><b>Saneamento:</b> Protocolos de inutilização são expandidos para linhas individuais.</li>
+                <li><b>Organização:</b> XMLs movidos para pastas hierárquicas por Período e Status.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
 st.markdown("---")
 
+# INICIALIZAÇÃO DE ESTADO
 ks = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in ks:
     if k not in st.session_state:
@@ -163,6 +170,7 @@ with st.sidebar:
     if st.button("🗑️ RESETAR SISTEMA"):
         st.session_state.clear(); st.rerun()
 
+# --- BLOCO PRINCIPAL DE PROCESSAMENTO ---
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
         uploaded = st.file_uploader("Suba os arquivos aqui:", accept_multiple_files=True)
@@ -170,7 +178,7 @@ if st.session_state['confirmado']:
             lote_dict, dict_fisico = {}, {}
             buf_org, buf_todos = io.BytesIO(), io.BytesIO()
             with st.status("⛏️ Processando...") as status_box:
-                with zipfile.ZipFile(buf_org, "w") as z_org, zipfile.ZipFile(buf_todos, "w") as z_todos:
+                with zipfile.ZipFile(buf_org, "w", zipfile.ZIP_STORED) as z_org, zipfile.ZipFile(buf_todos, "w", zipfile.ZIP_STORED) as z_todos:
                     for f in uploaded:
                         xmls = extrair_recursivo(f.read(), f.name)
                         for n, d in xmls:
@@ -182,17 +190,14 @@ if st.session_state['confirmado']:
                                     lote_dict[res["Chave"]] = (res, is_p); caminho = f"{res['Pasta']}/{n}"
                                     z_org.writestr(caminho, d); z_todos.writestr(n, d); dict_fisico[caminho] = d
             
-            # --- LÓGICA DE ANÁLISE INICIAL (AQUI ESTÁ O CÉREBRO) ---
+            # --- AGREGADOR DE ANÁLISES (O CÉREBRO) ---
             rel, audit, c_l, i_l, a_l, g_l = [], {}, [], [], [], []
             for k, (res, is_p) in lote_dict.items():
                 rel.append(res); origem = f"{'PRÓPRIA' if is_p else 'TERCEIROS'}"
                 base = {"Origem": origem, "Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Data": res["Data_Emissao"], "Chave": k, "Status": res["Status"], "Valor": res["Valor"]}
-                
                 if res["Status"] == "INUTILIZADOS":
-                    for num in range(res["Range"][0], res["Range"][1]+1): 
-                        g_l.append({**base, "Nota": num, "Valor": 0.0})
+                    for num in range(res["Range"][0], res["Range"][1]+1): g_l.append({**base, "Nota": num, "Valor": 0.0})
                 else: g_l.append(base)
-                
                 if is_p:
                     sk = (res["Tipo"], res["Série"]); audit.setdefault(sk, {"nums": set(), "valor": 0.0})
                     if res["Status"] == "INUTILIZADOS":
@@ -206,17 +211,15 @@ if st.session_state['confirmado']:
             for (t, s), d in audit.items():
                 ns = sorted(list(d["nums"]))
                 if ns:
-                    rf_f.append({"Modelo": t, "Série": s, "Início": ns[0], "Fim": ns[-1], "Qtd": len(ns), "Valor": round(d["valor"], 2)})
+                    rf_f.append({"Modelo": t, "Série": s, "Início": ns[0], "Fim": ns[-1], "Qtd": len(ns), "Valor Contábil": round(d["valor"], 2)})
                     for b in sorted(list(set(range(ns[0], ns[-1]+1)) - set(ns))): ff_f.append({"Modelo": t, "Série": s, "Buraco": b})
             
             st.session_state.update({'relatorio': rel, 'dict_arquivos': dict_fisico, 'df_resumo': pd.DataFrame(rf_f), 'df_faltantes': pd.DataFrame(ff_f), 'df_canceladas': pd.DataFrame(c_l), 'df_inutilizadas': pd.DataFrame(i_l), 'df_autorizadas': pd.DataFrame(a_l), 'df_geral': pd.DataFrame(g_l), 'st_counts': {"CANCELADOS": len(c_l), "INUTILIZADOS": len(i_l), "AUTORIZADAS": len(a_l)}, 'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 'garimpo_ok': True}); st.rerun()
     else:
-        # --- EXIBIÇÃO DE RESULTADOS ---
+        # --- EXIBIÇÃO DE RESULTADOS E ETAPA 2 ---
         sc = st.session_state['st_counts']
         c1, c2, c3 = st.columns(3)
-        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"])
-        c2.metric("❌ CANCELADAS", sc["CANCELADOS"])
-        c3.metric("🚫 INUTILIZADAS", sc["INUTILIZADOS"])
+        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADAS", sc["INUTILIZADOS"])
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
         
         st.divider()
@@ -235,15 +238,15 @@ if st.session_state['confirmado']:
             else: st.info("ℹ️ Nada")
 
         st.divider()
-        # --- LÓGICA DE AUDITORIA CRUZADA (ETAPA 2) ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR SEFAZ")
         auth_up = st.file_uploader("Suba o Excel de Autenticidade:", type=["xlsx"])
         if auth_up and st.button("🔄 VALIDAR E ATUALIZAR"):
             try:
                 df_a = pd.read_excel(auth_up); a_d = {str(r.iloc[0]).strip(): str(r.iloc[5]).upper() for _, r in df_a.iterrows()}
+                st.info(f"📊 Cruzando {len(a_d)} chaves...")
                 l_rec = {}
                 for i in st.session_state['relatorio']:
-                    k = i["Chave"]; isp = "EMITIDOS" in i["Pasta"]
+                    k, isp = i["Chave"], "EMITIDOS" in i["Pasta"]
                     if k in l_rec:
                         if i["Status"] in ["CANCELADOS", "INUTILIZADOS"]: l_rec[k] = (i, isp)
                     else: l_rec[k] = (i, isp)
@@ -254,12 +257,10 @@ if st.session_state['confirmado']:
                     if k in a_d and "CANCEL" in a_d[k]:
                         st_f = "CANCELADOS"
                         if res["Status"] == "NORMAIS": d_l.append({"Chave": k, "Nota": res["Número"], "Aviso": "Divergência SEFAZ"})
-                    
                     reg = {"Origem": f"{'PRÓPRIA' if isp else 'TERCEIROS'}", "Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Data": res["Data_Emissao"], "Chave": k, "Status": st_f, "Valor": 0.0 if st_f == "CANCELADOS" else res["Valor"]}
                     if st_f == "INUTILIZADOS":
                         for n in range(res["Range"][0], res["Range"][1]+1): g_l.append({**reg, "Nota": n})
                     else: g_l.append(reg)
-                    
                     if isp:
                         sk = (res["Tipo"], res["Série"]); a_m.setdefault(sk, {"nums": set(), "valor": 0.0})
                         if st_f == "INUTILIZADOS":
@@ -269,7 +270,6 @@ if st.session_state['confirmado']:
                             if st_f == "CANCELADOS": c_l.append(reg)
                             else: au_l.append(reg); a_m[sk]["valor"] += res["Valor"]
                 
-                # --- RECÁLCULO FINAL APÓS AUDITORIA ---
                 rf_f, ff_f = [], []
                 for (t, s), d in a_m.items():
                     ns = sorted(list(d["nums"]))
@@ -281,7 +281,7 @@ if st.session_state['confirmado']:
                 st.success("✅ Auditoria Finalizada!"); st.balloons(); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
-        # --- GERAÇÃO DO EXCEL MASTER ---
+        # --- EXPORTAÇÃO FINAL ---
         st.divider()
         buf_ex = io.BytesIO()
         with pd.ExcelWriter(buf_ex, engine='xlsxwriter') as wr:
@@ -294,5 +294,3 @@ if st.session_state['confirmado']:
         c_d1.download_button("📂 ZIP ORGANIZADO", st.session_state['z_org'], "garimpo.zip", use_container_width=True)
         c_d2.download_button("📦 SÓ XMLS", st.session_state['z_todos'], "todos.zip", use_container_width=True)
         c_d3.download_button("📊 EXCEL MASTER", buf_ex.getvalue(), "relatorio.xlsx", use_container_width=True)
-        
-        if st.button("⛏️ NOVO GARIMPO"): st.session_state.clear(); st.rerun()
