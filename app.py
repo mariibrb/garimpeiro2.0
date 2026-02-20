@@ -112,12 +112,10 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         tag_l = content_str.lower()
         if '<?xml' not in tag_l and '<inf' not in tag_l and '<inut' not in tag_l and '<retinut' not in tag_l: return None, False
         
-        # Identificação de tpNF (0=Entrada, 1=Saída)
         tp_nf_match = re.search(r'<tpnf>([01])</tpnf>', tag_l)
         if tp_nf_match:
             resumo["Operacao"] = "ENTRADA" if tp_nf_match.group(1) == "0" else "SAIDA"
 
-        # 1. IDENTIFICAÇÃO DE INUTILIZADAS
         if '<inutnfe' in tag_l or '<retinutnfe' in tag_l or '<procinut' in tag_l:
             resumo["Status"], resumo["Tipo"] = "INUTILIZADOS", "NF-e"
             if '<mod>65</mod>' in tag_l: resumo["Tipo"] = "NFC-e"
@@ -170,7 +168,6 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         
         is_p = (cnpj_emit == client_cnpj_clean)
         
-        # --- HIERARQUIA RIGOROSA DE PASTAS ---
         if is_p:
             resumo["Pasta"] = f"EMITIDOS_CLIENTE/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
         else:
@@ -220,21 +217,20 @@ with st.container():
             <ul>
                 <li><b>Garimpo Profundo:</b> Abre recursivamente ZIP dentro de ZIP.</li>
                 <li><b>Geral Completo:</b> Aba no Excel com TODOS os arquivos lidos.</li>
-                <li><b>Downloads Seletivos:</b> Agora você pode baixar pastas específicas.</li>
+                <li><b>Auditoria Cruzada:</b> Validação final com Excel externo.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
 st.markdown("---")
 
-# Acrescentada a chave 'dict_arquivos' para gerenciar downloads seletivos
 keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
         elif 'z_' in k: st.session_state[k] = None
         elif k == 'relatorio': st.session_state[k] = []
-        elif k == 'dict_arquivos': st.session_state[k] = {} # Dicionário de caminhos e bytes
+        elif k == 'dict_arquivos': st.session_state[k] = {} 
         elif k == 'st_counts': st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
         else: st.session_state[k] = False
 
@@ -254,7 +250,7 @@ if st.session_state['confirmado']:
         uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
             lote_dict = {}
-            dict_fisico = {} # Novo dicionário para downloads seletivos
+            dict_fisico = {} 
             buf_org, buf_todos = io.BytesIO(), io.BytesIO()
             
             progresso_bar = st.progress(0)
@@ -267,7 +263,6 @@ if st.session_state['confirmado']:
                     
                     for i, f in enumerate(uploaded_files):
                         if i % 50 == 0: gc.collect()
-                        
                         if total_arquivos > 0 and i % max(1, int(total_arquivos * 0.02)) == 0:
                             progresso_bar.progress((i + 1) / total_arquivos)
                             status_text.text(f"⛏️ Processando arquivo {i+1}/{total_arquivos}: {f.name}")
@@ -289,7 +284,6 @@ if st.session_state['confirmado']:
                                         caminho_completo = f"{res['Pasta']}/{name}"
                                         z_org.writestr(caminho_completo, xml_data)
                                         z_todos.writestr(name, xml_data)
-                                        # Popula o dicionário físico para download seletivo
                                         dict_fisico[caminho_completo] = xml_data
                             del todos_xmls
                         except: continue
@@ -300,7 +294,6 @@ if st.session_state['confirmado']:
             rel_list, audit_map, canc_list, inut_list, aut_list, geral_list = [], {}, [], [], [], []
             for k, (res, is_p) in lote_dict.items():
                 rel_list.append(res)
-                
                 origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
                 if res["Status"] == "INUTILIZADOS":
                     r = res.get("Range", (res["Número"], res["Número"]))
@@ -312,19 +305,15 @@ if st.session_state['confirmado']:
                 if is_p:
                     sk = (res["Tipo"], res["Série"])
                     if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
-                    
                     if res["Status"] == "INUTILIZADOS":
                         r = res.get("Range", (res["Número"], res["Número"]))
                         for n in range(r[0], r[1] + 1):
-                            audit_map[sk]["nums"].add(n)
-                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                            audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
                     else:
                         if res["Número"] > 0:
                             audit_map[sk]["nums"].add(res["Número"])
-                            if res["Status"] == "CANCELADOS":
-                                canc_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Chave": res["Chave"]})
-                            elif res["Status"] == "NORMAIS":
-                                aut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Valor": res["Valor"], "Chave": res["Chave"]})
+                            if res["Status"] == "CANCELADOS": canc_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Chave": res["Chave"]})
+                            elif res["Status"] == "NORMAIS": aut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Valor": res["Valor"], "Chave": res["Chave"]})
                             audit_map[sk]["valor"] += res["Valor"]
 
             res_final, fal_final = [], []
@@ -339,121 +328,14 @@ if st.session_state['confirmado']:
             st.session_state.update({
                 'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 
                 'relatorio': rel_list, 'dict_arquivos': dict_fisico,
-                'df_resumo': pd.DataFrame(res_final), 
-                'df_faltantes': pd.DataFrame(fal_final), 
-                'df_canceladas': pd.DataFrame(canc_list), 
-                'df_inutilizadas': pd.DataFrame(inut_list), 
-                'df_autorizadas': pd.DataFrame(aut_list),
-                'df_geral': pd.DataFrame(geral_list),
+                'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final), 
+                'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 
+                'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
                 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}, 
                 'garimpo_ok': True
             })
             st.rerun()
     else:
-        # --- NOVO: FUNCIONALIDADE DE DOWNLOAD SELETIVO ---
-        st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
-        with st.expander("Clique aqui para baixar apenas uma parte da hierarquia", expanded=False):
-            # Obtém todas as pastas únicas presentes no dicionário de arquivos
-            todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
-            
-            if todas_pastas:
-                pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
-                
-                if pasta_selecionada != "--- SELECIONE ---":
-                    buf_seletivo = io.BytesIO()
-                    cont_selecionados = 0
-                    with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_STORED) as z_sel:
-                        for caminho, dados in st.session_state['dict_arquivos'].items():
-                            if caminho.startswith(pasta_selecionada):
-                                # Salva mantendo o nome do arquivo original
-                                z_sel.writestr(os.path.basename(caminho), dados)
-                                cont_selecionados += 1
-                    
-                    nome_zip = pasta_selecionada.replace("/", "_") + ".zip"
-                    st.download_button(
-                        f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", 
-                        buf_seletivo.getvalue(), 
-                        nome_zip, 
-                        use_container_width=True
-                    )
-            else:
-                st.info("Nenhum arquivo disponível para download seletivo.")
-
-        st.divider()
-
-        # --- FUNCIONALIDADE DE ADICIONAR ARQUIVOS (CUMULATIVO) ---
-        st.markdown("### ➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)")
-        with st.expander("Clique aqui para adicionar XMLs ou ZIPs encontrados posteriormente"):
-            extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
-            if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
-                with st.spinner("Adicionando e recalculando..."):
-                    for f in extra_files:
-                        try:
-                            content = f.read()
-                            todos_xmls = extrair_recursivo(content, f.name)
-                            for name, xml_data in todos_xmls:
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res:
-                                    st.session_state['relatorio'].append(res)
-                                    # Atualiza também o dicionário físico para o download seletivo
-                                    st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = xml_data
-                        except: continue
-                    
-                    # RECALCULO GERAL (Mantido conforme original)
-                    lote_recalc = {}
-                    for item in st.session_state['relatorio']:
-                        key = item["Chave"]
-                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                        if key in lote_recalc:
-                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
-                        else: lote_recalc[key] = (item, is_p)
-                    
-                    audit_map, canc_list, inut_list, aut_list, geral_list = {}, [], [], [], []
-                    for k, (res, is_p) in lote_recalc.items():
-                        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
-                        if res["Status"] == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            for n in range(r[0], r[1] + 1):
-                                geral_list.append({"Origem": origem_label, "Modelo": res["Tipo"], "Série": res["Série"], "Nota": n, "Chave": res["Chave"], "Status Final": "INUTILIZADA", "Valor": 0.0})
-                        else:
-                            geral_list.append({"Origem": origem_label, "Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]})
-
-                        if is_p:
-                            sk = (res["Tipo"], res["Série"])
-                            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
-                            if res["Status"] == "INUTILIZADOS":
-                                r = res.get("Range", (res["Número"], res["Número"]))
-                                for n in range(r[0], r[1] + 1):
-                                    audit_map[sk]["nums"].add(n)
-                                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                            else:
-                                if res["Número"] > 0:
-                                    audit_map[sk]["nums"].add(res["Número"])
-                                    if res["Status"] == "CANCELADOS":
-                                        canc_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Chave": res["Chave"]})
-                                    elif res["Status"] == "NORMAIS":
-                                        aut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": res["Número"], "Valor": res["Valor"], "Chave": res["Chave"]})
-                                    audit_map[sk]["valor"] += res["Valor"]
-
-                    res_final, fal_final = [], []
-                    for (t, s), dados in audit_map.items():
-                        ns = sorted(list(dados["nums"]))
-                        if ns:
-                            n_min, n_max = ns[0], ns[-1]
-                            res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
-                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                                fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-
-                    st.session_state.update({
-                        'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final), 
-                        'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 
-                        'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
-                        'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
-                    })
-                    st.rerun()
-
-        st.divider()
-
         # --- RESULTADOS ---
         sc = st.session_state['st_counts']
         c1, c2, c3 = st.columns(3)
@@ -536,6 +418,27 @@ if st.session_state['confirmado']:
                     st.rerun()
                 except Exception as e: st.error(f"Erro: {e}")
 
+        st.divider()
+
+        # --- ADICIONAR ARQUIVOS ---
+        with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
+            extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
+            if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
+                with st.spinner("Adicionando..."):
+                    for f in extra_files:
+                        try:
+                            content = f.read()
+                            todos_xmls = extrair_recursivo(content, f.name)
+                            for name, xml_data in todos_xmls:
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    st.session_state['relatorio'].append(res)
+                                    st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = xml_data
+                        except: continue
+                    st.rerun()
+
+        st.divider()
+
         # --- EXCEL FINAL ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
@@ -551,6 +454,23 @@ if st.session_state['confirmado']:
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo_organizado.zip", use_container_width=True)
         with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos_xml.zip", use_container_width=True)
         with col3: st.download_button("📊 RELATÓRIO EXCEL FINAL", buffer_excel.getvalue(), "relatorio_auditoria_completo.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
+
+        st.divider()
+
+        # --- DOWNLOAD SELETIVO ---
+        st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
+        todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
+        if todas_pastas:
+            pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
+            if pasta_selecionada != "--- SELECIONE ---":
+                buf_seletivo = io.BytesIO()
+                cont_selecionados = 0
+                with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_STORED) as z_sel:
+                    for caminho, dados in st.session_state['dict_arquivos'].items():
+                        if caminho.startswith(pasta_selecionada):
+                            z_sel.writestr(os.path.basename(caminho), dados)
+                            cont_selecionados += 1
+                st.download_button(f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", buf_seletivo.getvalue(), f"{pasta_selecionada.replace('/', '_')}.zip", use_container_width=True)
         
         if st.button("⛏️ NOVO GARIMPO"):
             st.session_state.clear(); st.rerun()
