@@ -15,7 +15,7 @@ def aplicar_estilo_premium():
         with open("style.css", "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
-        st.error("Ficheiro style.css não encontrado na pasta.")
+        st.error("Ficheiro style.css não encontrado.")
 
 aplicar_estilo_premium()
 
@@ -181,7 +181,8 @@ with st.sidebar:
     if len(cnpj_limpo) == 14:
         if st.button("✅ LIBERAR OPERAÇÃO"): st.session_state['confirmado'] = True
     st.divider()
-    if st.button("🗑️ RESETAR SISTEMA"): st.session_state.clear(); st.rerun()
+    if st.button("🗑️ RESETAR SISTEMA"):
+        st.session_state.clear(); st.rerun()
 
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
@@ -239,7 +240,7 @@ if st.session_state['confirmado']:
             st.session_state.update({'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 'relatorio': rel_list, 'dict_arquivos': dict_fisico, 'df_resumo': pd.DataFrame(rf), 'df_faltantes': pd.DataFrame(ff), 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}, 'garimpo_ok': True}); st.rerun()
     else:
         sc = st.session_state['st_counts']; c1, c2, c3 = st.columns(3)
-        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADAS", sc["INUTILIZADOS"])
+        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADOS", sc["INUTILIZADOS"])
         st.markdown("### 📊 RESUMO POR SÉRIE"); st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
         
         st.divider()
@@ -258,12 +259,16 @@ if st.session_state['confirmado']:
             else: st.info("ℹ️ Nada.")
         
         st.divider()
+        # --- ETAPA 2: VALIDAR SEFAZ COM FEEDBACK ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÓRIO DE AUTENTICIDADE")
         with st.expander("Suba o Excel e cruze os dados"):
             auth_file = st.file_uploader("Arquivo (.xlsx)", type=["xlsx"])
             if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
                 try:
                     df_a = pd.read_excel(auth_file); a_d = {str(r.iloc[0]).strip(): str(r.iloc[5]).strip().upper() for _, r in df_a.iterrows()}
+                    # FEEDBACK 1: Contagem de chaves lidas no Excel
+                    st.info(f"📊 Lidas {len(a_d)} chaves do ficheiro Excel.")
+
                     l_recalc = {}
                     for item in st.session_state['relatorio']:
                         k, isp = item["Chave"], "EMITIDOS_CLIENTE" in item["Pasta"]
@@ -298,7 +303,15 @@ if st.session_state['confirmado']:
                         if ns:
                             n_min, n_max = ns[0], ns[-1]; rf.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(d["valor"], 2)})
                             for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): ff.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-                    st.session_state.update({'df_canceladas': pd.DataFrame(c_l), 'df_autorizadas': pd.DataFrame(au_l), 'df_inutilizadas': pd.DataFrame(i_l), 'df_geral': pd.DataFrame(g_l), 'df_resumo': pd.DataFrame(rf), 'df_faltantes': pd.DataFrame(ff), 'df_divergencias': pd.DataFrame(d_l), 'st_counts': {"CANCELADOS": len(c_l), "INUTILIZADOS": len(i_l), "AUTORIZADAS": len(au_l)}}); st.rerun()
+                    
+                    st.session_state.update({'df_canceladas': pd.DataFrame(c_l), 'df_autorizadas': pd.DataFrame(au_l), 'df_inutilizadas': pd.DataFrame(i_l), 'df_geral': pd.DataFrame(g_l), 'df_resumo': pd.DataFrame(rf), 'df_faltantes': pd.DataFrame(ff), 'df_divergencias': pd.DataFrame(d_l), 'st_counts': {"CANCELADOS": len(c_l), "INUTILIZADOS": len(i_l), "AUTORIZADAS": len(au_l)}})
+                    
+                    # FEEDBACK 2 & 3: Mensagem de sucesso e aviso de divergências
+                    st.success("✅ Auditoria SEFAZ concluída com sucesso!")
+                    if d_l: st.warning(f"⚠️ Atenção: Foram detetadas {len(d_l)} divergências de status. Consulte o Relatório Master.")
+                    else: st.success("💎 Nenhuma divergência encontrada entre XML e Excel.")
+                    st.balloons()
+                    st.rerun()
                 except Exception as e: st.error(f"Erro: {e}")
 
         st.divider()
