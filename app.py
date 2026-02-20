@@ -15,11 +15,11 @@ def aplicar_estilo_premium():
         with open("style.css", "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
-        st.error("Ficheiro style.css não encontrado.")
+        st.error("Ficheiro style.css não encontrado na pasta.")
 
 aplicar_estilo_premium()
 
-# --- MOTOR DE IDENTIFICAÇÃO (INTEGRAL E SEM CORTES) ---
+# --- MOTOR DE IDENTIFICAÇÃO (MANTIDO 100% ORIGINAL) ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
     client_cnpj_clean = "".join(filter(str.isdigit, str(client_cnpj))) if client_cnpj else ""
     nome_puro = os.path.basename(file_name)
@@ -113,36 +113,39 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
+# MANUAL POP COMPLETO PARA LEIGOS (ESTRUTURADO E SEM CORTES)
 with st.container():
     m_col1, m_col2 = st.columns(2)
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 Instruções de Uso & Factos de Cancelamento</h3>
+            <h3>📖 MANUAL DE OPERAÇÃO PADRÃO (POP)</h3>
+            <p>Siga rigorosamente estes passos para garantir a precisão da auditoria:</p>
             <ul>
-                <li><b>Etapa 1 (Mapeamento):</b> Suba os XMLs para obter o raio-x inicial e identificar buracos na sequência numérica.</li>
-                <li><b>Facto sobre Canceladas (XML):</b> O motor lê automaticamente as tags de cancelamento. Notas canceladas são movidas para pastas próprias e têm o <b>valor contábil zerado</b> no resumo.</li>
-                <li><b>Adicionar Arquivos:</b> Utilize a barra abaixo dos resultados para incluir novos lotes sem perder o processamento atual.</li>
-                <li><b>Etapa 2 (Auditoria SEFAZ):</b> Suba o relatório Excel de Autenticidade. O sistema cruza as chaves e <b>reclassifica como canceladas</b> as notas que o XML físico indica como autorizadas.</li>
+                <li><b>PASSO 1 (IDENTIFICAÇÃO):</b> No menu à esquerda, digite o <b>CNPJ do seu Cliente</b>. Sem este dado, o sistema não saberá separar o que ele emitiu do que ele recebeu. Clique no botão "Liberar Operação".</li>
+                <li><b>PASSO 2 (GARIMPO INICIAL):</b> No campo central, arraste todos os arquivos XML ou ficheiros ZIP. O sistema abre automaticamente ZIPs dentro de outros ZIPs. Clique em <b>"Iniciar Grande Garimpo"</b>.</li>
+                <li><b>PASSO 3 (AUDITORIA DE CANCELADAS):</b> Após o garimpo, vá até à "Etapa 2" no fim da página. Suba o relatório Excel de Autenticidade da SEFAZ. O sistema cruzará os dados e marcará como <b>Cancelada</b> qualquer nota que o XML físico diga estar autorizada.</li>
+                <li><b>PASSO 4 (FACTO SOBRE CANCELADAS):</b> O sistema zera automaticamente o valor de notas canceladas para o cálculo de impostos não ser maior do que o real. Todas as canceladas são listadas numa aba exclusiva no relatório final.</li>
+                <li><b>PASSO 5 (RELATÓRIOS):</b> No final, baixe o "Excel Master". Ele contém todas as análises de buracos, cancelamentos e erros detetados.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 O que será obtido?</h3>
+            <h3>📊 ANÁLISES E INTELIGÊNCIAS GERADAS</h3>
+            <p>O que o sistema faz por si enquanto você espera:</p>
             <ul>
-                <li><b>Garimpo Profundo:</b> Abertura recursiva infinita de ficheiros ZIP.</li>
-                <li><b>Relatório de Divergências:</b> Aba específica no Excel para notas com status conflitante entre XML e SEFAZ.</li>
-                <li><b>Tratamento de Canceladas:</b> Tabela consolidada de notas canceladas para evitar bitributação.</li>
-                <li><b>Relatório Master:</b> Planilha completa com abas de Buracos, Inutilizadas, Autorizadas e Geral.</li>
+                <li><b>Caça aos "Buracos":</b> O motor analisa as séries fiscais e avisa se houver saltos na numeração (ex: nota 10, nota 12 -> o sistema aponta que a nota 11 sumiu).</li>
+                <li><b>Saneamento de Inutilizações:</b> Se o cliente inutilizou um bloco de notas (ex: 50 a 100), o sistema expande isso para linhas individuais para que cada número seja auditado.</li>
+                <li><b>Relatório de Divergências:</b> Uma lista clara de notas onde o status do arquivo físico é diferente do status real na base da SEFAZ.</li>
+                <li><b>Organização Automática:</b> Gera um arquivo ZIP onde todos os seus XMLs bagunçados são renomeados e movidos para pastas: <i>Operação > Tipo > Status > Ano > Mês</i>.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
 st.markdown("---")
 
-# INICIALIZAÇÃO DE ESTADO E LOGICA DE 500+ LINHAS (MANTIDA INTEGRALMENTE)
 keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in keys_to_init:
     if k not in st.session_state:
@@ -154,7 +157,7 @@ for k in keys_to_init:
         else: st.session_state[k] = False
 
 with st.sidebar:
-    st.markdown("### 🔍 Configuração")
+    st.markdown("### 🔍 Configuração Principal")
     cnpj_input = st.text_input("CNPJ DO CLIENTE", placeholder="00.000.000/0001-00")
     cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
     if cnpj_input and len(cnpj_limpo) != 14: st.error("⚠️ CNPJ Inválido.")
@@ -328,7 +331,7 @@ if st.session_state['confirmado']:
                         for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
                 st.session_state.update({'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}}); st.rerun()
 
-        # --- EXCEL FINAL (INTEGRAL COM TODAS AS ABAS) ---
+        # --- EXCEL FINAL (COMPLETO) ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
             st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo', index=False)
@@ -343,7 +346,6 @@ if st.session_state['confirmado']:
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo.zip", use_container_width=True)
         with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos.zip", use_container_width=True)
         with col3: st.download_button("📊 EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
-
         st.divider()
         # --- DOWNLOAD SELETIVO ---
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
