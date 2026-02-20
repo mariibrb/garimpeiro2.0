@@ -118,34 +118,31 @@ with st.container():
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 MANUAL DE OPERAÇÃO PADRÃO (POP)</h3>
-            <p><b>OBJETIVO:</b> Saneamento de base fiscal e auditoria de continuidade numérica.</p>
+            <h3>📖 Instruções de Uso & Factos de Cancelamento</h3>
             <ul>
-                <li><b>PASSO 1 (CONFIGURAÇÃO):</b> Insira o CNPJ do cliente na barra lateral e clique em "Liberar Operação". Isto é vital para o sistema distinguir entre <b>Emissão Própria</b> e <b>Terceiros</b>.</li>
-                <li><b>PASSO 2 (GARIMPO):</b> Faça o upload dos XMLs ou ZIPs. O sistema abre recursivamente ZIPs dentro de ZIPs. Clique em "Iniciar Grande Garimpo".</li>
-                <li><b>PASSO 3 (IDENTIFICAÇÃO DE CANCELADAS):</b> O sistema identifica automaticamente notas canceladas via XML (Tag 110111/101). Estas notas têm o <b>Valor Contábil zerado</b> no relatório.</li>
-                <li><b>PASSO 4 (ADICIONAR):</b> Caso encontre mais arquivos após o primeiro garimpo, use a barra de adição abaixo para atualizar a base sem perder o trabalho já feito.</li>
-                <li><b>PASSO 5 (AUDITORIA SEFAZ):</b> Suba o Relatório de Autenticidade (.xlsx). O sistema fará o cruzamento pela Chave e apontará notas que o XML diz "Autorizado" mas que na SEFAZ estão "Canceladas".</li>
+                <li><b>Etapa 1 (Mapeamento):</b> Suba os XMLs para obter o raio-x inicial e identificar buracos na sequência numérica.</li>
+                <li><b>Facto sobre Canceladas (XML):</b> O motor lê automaticamente as tags de cancelamento. Notas canceladas são movidas para pastas próprias e têm o <b>valor contábil zerado</b> no resumo.</li>
+                <li><b>Adicionar Arquivos:</b> Utilize a barra abaixo dos resultados para incluir novos lotes sem perder o processamento atual.</li>
+                <li><b>Etapa 2 (Auditoria SEFAZ):</b> Suba o relatório Excel de Autenticidade. O sistema cruza as chaves e <b>reclassifica como canceladas</b> as notas que o XML físico indica como autorizadas.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 RESULTADOS E ANÁLISES OBTIDAS</h3>
-            <p><b>INTELIGÊNCIAS GERADAS:</b></p>
+            <h3>📊 O que será obtido?</h3>
             <ul>
-                <li><b>Relatório de Buracos:</b> Identifica saltos na numeração das séries, apontando notas faltantes no seu lote físico.</li>
-                <li><b>Gestão de Canceladas:</b> Tabela exclusiva de notas canceladas para garantir que não haja pagamento indevido de impostos.</li>
-                <li><b>Expansão de Inutilizadas:</b> Transforma um range de inutilização (ex: notas 10 a 20) em linhas individuais no Excel.</li>
-                <li><b>Divergências de Status:</b> Aba no Excel que lista notas com conflito entre o status do arquivo físico e a base da SEFAZ.</li>
-                <li><b>Organização Física:</b> Receba um ZIP com os XMLs renomeados e organizados em pastas lógicas: <i>Tipo > Status > Ano > Mês</i>.</li>
+                <li><b>Garimpo Profundo:</b> Abertura recursiva infinita de ficheiros ZIP.</li>
+                <li><b>Relatório de Divergências:</b> Aba específica no Excel para notas com status conflitante entre XML e SEFAZ.</li>
+                <li><b>Tratamento de Canceladas:</b> Tabela consolidada de notas canceladas para evitar bitributação.</li>
+                <li><b>Relatório Master:</b> Planilha completa com abas de Buracos, Inutilizadas, Autorizadas e Geral.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
 st.markdown("---")
 
+# INICIALIZAÇÃO DE ESTADO E LOGICA DE 500+ LINHAS (MANTIDA INTEGRALMENTE)
 keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in keys_to_init:
     if k not in st.session_state:
@@ -240,7 +237,7 @@ if st.session_state['confirmado']:
             st.markdown("### 🚫 INUTILIZADAS"); st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True) if not st.session_state['df_inutilizadas'].empty else st.info("ℹ️ Nenhuma nota.")
         
         st.divider()
-        # --- ETAPA 2: VALIDAR REAL ---
+        # --- ETAPA 2: VALIDAR (INTELIGÊNCIA INTEGRAL) ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÓRIO DE AUTENTICIDADE")
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
@@ -331,7 +328,7 @@ if st.session_state['confirmado']:
                         for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
                 st.session_state.update({'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}}); st.rerun()
 
-        # --- EXCEL FINAL (COMPLETO) ---
+        # --- EXCEL FINAL (INTEGRAL COM TODAS AS ABAS) ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
             st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo', index=False)
@@ -345,10 +342,10 @@ if st.session_state['confirmado']:
         col1, col2, col3 = st.columns(3)
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo.zip", use_container_width=True)
         with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos.zip", use_container_width=True)
-        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
+        with col3: st.download_button("📊 EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
+
         st.divider()
-        # --- SELETIVO ---
-        st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
+        # --- DOWNLOAD SELETIVO ---
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
         if todas_pastas:
             pasta_sel = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
