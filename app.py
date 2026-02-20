@@ -7,19 +7,19 @@ import pandas as pd
 import random
 import gc
 
-# --- CONFIGURAÇÃO ---
+# --- CONFIGURAÇÃO E ESTILO ---
 st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
 
-def carregar_css_externo():
+def aplicar_estilo_externo():
     try:
         with open("style.css", "r", encoding="utf-8") as f:
             st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
     except FileNotFoundError:
-        st.error("⚠️ Ficheiro style.css não encontrado! Garanta que ele está na mesma pasta que o app.py.")
+        st.error("Ficheiro style.css não encontrado.")
 
-carregar_css_externo()
+aplicar_estilo_externo()
 
-# --- MOTOR DE IDENTIFICAÇÃO (Fiel ao original) ---
+# --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
     client_cnpj_clean = "".join(filter(str.isdigit, str(client_cnpj))) if client_cnpj else ""
     nome_puro = os.path.basename(file_name)
@@ -115,76 +115,15 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
         itens.append((os.path.basename(nome_arquivo), conteudo_bytes))
     return itens
 
-# --- LÓGICA DE RECALCULO (Mantém a integridade de todas as abas) ---
-def recalcular_tudo(lista_relatorio, auth_dict=None):
-    lote_recalc = {}
-    for item in lista_relatorio:
-        key = item["Chave"]
-        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-        if key in lote_recalc:
-            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
-        else: lote_recalc[key] = (item, is_p)
-
-    audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
-    for k, (res, is_p) in lote_recalc.items():
-        status_final = res["Status"]
-        if auth_dict and res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
-            status_final = "CANCELADOS"
-            if res["Status"] == "NORMAIS":
-                div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
-
-        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
-        registro_base = {
-            "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
-            "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
-            "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
-            "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
-            "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
-        }
-
-        if status_final == "INUTILIZADOS":
-            r = res.get("Range", (res["Número"], res["Número"]))
-            for n in range(r[0], r[1] + 1):
-                item_inut = registro_base.copy()
-                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                geral_list.append(item_inut)
-        else: geral_list.append(registro_base)
-
-        if is_p:
-            sk = (res["Tipo"], res["Série"])
-            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
-            if status_final == "INUTILIZADOS":
-                r = res.get("Range", (res["Número"], res["Número"]))
-                for n in range(r[0], r[1] + 1):
-                    audit_map[sk]["nums"].add(n)
-                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-            else:
-                if res["Número"] > 0:
-                    audit_map[sk]["nums"].add(res["Número"])
-                    if status_final == "CANCELADOS": canc_list.append(registro_base)
-                    elif status_final == "NORMAIS": aut_list.append(registro_base)
-                    audit_map[sk]["valor"] += res["Valor"]
-
-    res_final, fal_final = [], []
-    for (t, s), dados in audit_map.items():
-        ns = sorted(list(dados["nums"]))
-        if ns:
-            n_min, n_max = ns[0], ns[-1]
-            res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
-            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-
-    return pd.DataFrame(res_final), pd.DataFrame(fal_final), pd.DataFrame(canc_list), pd.DataFrame(inut_list), pd.DataFrame(aut_list), pd.DataFrame(geral_list), pd.DataFrame(div_list), {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
-
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
     with m_col1:
-        st.markdown('<div class="instrucoes-card"><h3>📖 Instruções de Uso</h3><ul><li><b>Etapa 1:</b> Suba os XMLs.</li><li><b>Adicionar Arquivos:</b> Use a barra abaixo dos resultados.</li><li><b>Etapa 2:</b> Suba o relatório Excel.</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="instrucoes-card"><h3>📖 Instruções de Uso</h3><ul><li><b>Etapa 1:</b> Suba os XMLs para obter o raio-x inicial e achar buracos.</li><li><b>Adicionar Arquivos:</b> Use a barra de adição abaixo dos resultados para incluir arquivos sem resetar.</li><li><b>Etapa 2:</b> Suba o relatório Excel de Autenticidade para validar o status real.</li></ul></div>', unsafe_allow_html=True)
     with m_col2:
-        st.markdown('<div class="instrucoes-card"><h3>📊 O que será obtido?</h3><ul><li><b>Garimpo Profundo:</b> Abre recursivamente ZIP.</li><li><b>Relatório Master:</b> Planilha Excel completa.</li><li><b>Auditoria Cruzada:</b> Validação final.</li></ul></div>', unsafe_allow_html=True)
+        st.markdown('<div class="instrucoes-card"><h3>📊 O que será obtido?</h3><ul><li><b>Garimpo Profundo:</b> Abre recursivamente ZIP dentro de ZIP.</li><li><b>Relatório Master:</b> Planilha Excel com todos os dados de Emitente e Destinatário.</li><li><b>Auditoria Cruzada:</b> Validação final com Excel externo.</li></ul></div>', unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -213,6 +152,8 @@ if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
         uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
+            lote_dict = {}
+            dict_fisico = {}
             buf_org, buf_todos = io.BytesIO(), io.BytesIO()
             progresso_bar = st.progress(0)
             status_text = st.empty()
@@ -222,8 +163,9 @@ if st.session_state['confirmado']:
                 with zipfile.ZipFile(buf_org, "w", zipfile.ZIP_STORED) as z_org, zipfile.ZipFile(buf_todos, "w", zipfile.ZIP_STORED) as z_todos:
                     for i, f in enumerate(uploaded_files):
                         if i % 50 == 0: gc.collect()
-                        progresso_bar.progress((i + 1) / total_arquivos)
-                        status_text.text(f"⛏️ Processando: {f.name}")
+                        if total_arquivos > 0 and i % max(1, int(total_arquivos * 0.02)) == 0:
+                            progresso_bar.progress((i + 1) / total_arquivos)
+                            status_text.text(f"⛏️ Processando arquivo {i+1}/{total_arquivos}: {f.name}")
                         
                         try:
                             f.seek(0)
@@ -232,17 +174,69 @@ if st.session_state['confirmado']:
                             for name, xml_data in todos_xmls:
                                 res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                 if res:
-                                    st.session_state['relatorio'].append(res)
-                                    caminho = f"{res['Pasta']}/{name}"
-                                    z_org.writestr(caminho, xml_data)
-                                    z_todos.writestr(name, xml_data)
-                                    st.session_state['dict_arquivos'][caminho] = xml_data
+                                    key = res["Chave"]
+                                    if key in lote_dict:
+                                        if res["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_dict[key] = (res, is_p)
+                                    else:
+                                        lote_dict[key] = (res, is_p)
+                                        caminho_completo = f"{res['Pasta']}/{name}"
+                                        z_org.writestr(caminho_completo, xml_data)
+                                        z_todos.writestr(name, xml_data)
+                                        dict_fisico[caminho_completo] = xml_data
                         except: continue
                 
-            st.session_state.update({'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 'garimpo_ok': True})
-            # Chama o recálculo centralizado
-            r_res, r_fal, r_can, r_inu, r_aut, r_ger, r_div, r_cnt = recalcular_tudo(st.session_state['relatorio'])
-            st.session_state.update({'df_resumo': r_res, 'df_faltantes': r_fal, 'df_canceladas': r_can, 'df_inutilizadas': r_inu, 'df_autorizadas': r_aut, 'df_geral': r_ger, 'df_divergencias': r_div, 'st_counts': r_cnt})
+                status_box.update(label="✅ Concluído!", state="complete", expanded=False)
+                progresso_bar.empty(); status_text.empty()
+
+            rel_list, audit_map, canc_list, inut_list, aut_list, geral_list = [], {}, [], [], [], []
+            for k, (res, is_p) in lote_dict.items():
+                rel_list.append(res)
+                origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                registro_base = {
+                    "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                    "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                    "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                    "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                    "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
+                }
+                if res["Status"] == "INUTILIZADOS":
+                    r = res.get("Range", (res["Número"], res["Número"]))
+                    for n in range(r[0], r[1] + 1):
+                        item_inut = registro_base.copy()
+                        item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                        geral_list.append(item_inut)
+                else: geral_list.append(registro_base)
+
+                if is_p:
+                    sk = (res["Tipo"], res["Série"])
+                    if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                    if res["Status"] == "INUTILIZADOS":
+                        r = res.get("Range", (res["Número"], res["Número"]))
+                        for n in range(r[0], r[1] + 1):
+                            audit_map[sk]["nums"].add(n)
+                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                    else:
+                        if res["Número"] > 0:
+                            audit_map[sk]["nums"].add(res["Número"])
+                            if res["Status"] == "CANCELADOS": canc_list.append(registro_base)
+                            elif res["Status"] == "NORMAIS": aut_list.append(registro_base)
+                            audit_map[sk]["valor"] += res["Valor"]
+
+            res_final, fal_final = [], []
+            for (t, s), dados in audit_map.items():
+                ns = sorted(list(dados["nums"]))
+                if ns:
+                    n_min, n_max = ns[0], ns[-1]
+                    res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
+                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                        fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+            st.session_state.update({
+                'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 'relatorio': rel_list, 'dict_arquivos': dict_fisico,
+                'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final), 'df_canceladas': pd.DataFrame(canc_list),
+                'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
+                'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}, 'garimpo_ok': True
+            })
             st.rerun()
     else:
         # --- RESULTADOS ---
@@ -277,35 +271,152 @@ if st.session_state['confirmado']:
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
             if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
-                df_auth = pd.read_excel(auth_file)
-                auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
-                r_res, r_fal, r_can, r_inu, r_aut, r_ger, r_div, r_cnt = recalcular_tudo(st.session_state['relatorio'], auth_dict)
-                st.session_state.update({'df_resumo': r_res, 'df_faltantes': r_fal, 'df_canceladas': r_can, 'df_inutilizadas': r_inu, 'df_autorizadas': r_aut, 'df_geral': r_ger, 'df_divergencias': r_div, 'st_counts': r_cnt})
-                st.rerun()
+                try:
+                    df_auth = pd.read_excel(auth_file)
+                    auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
+                    
+                    lote_recalc = {}
+                    for item in st.session_state['relatorio']:
+                        key = item["Chave"]
+                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+                        if key in lote_recalc:
+                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
+                        else: lote_recalc[key] = (item, is_p)
+
+                    audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
+                    for k, (res, is_p) in lote_recalc.items():
+                        status_final = res["Status"]
+                        if res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
+                            status_final = "CANCELADOS"
+                            if res["Status"] == "NORMAIS":
+                                div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
+
+                        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                        registro_detalhado = {
+                            "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                            "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                            "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                            "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                            "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
+                        }
+
+                        if status_final == "INUTILIZADOS":
+                            r = res.get("Range", (res["Número"], res["Número"]))
+                            for n in range(r[0], r[1] + 1):
+                                item_inut = registro_detalhado.copy()
+                                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                                geral_list.append(item_inut)
+                        else: geral_list.append(registro_detalhado)
+
+                        if is_p:
+                            sk = (res["Tipo"], res["Série"])
+                            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                            if status_final == "INUTILIZADOS":
+                                r = res.get("Range", (res["Número"], res["Número"]))
+                                for n in range(r[0], r[1] + 1):
+                                    audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                            else:
+                                if res["Número"] > 0:
+                                    audit_map[sk]["nums"].add(res["Número"])
+                                    if status_final == "CANCELADOS": canc_list.append(registro_detalhado)
+                                    elif status_final == "NORMAIS": aut_list.append(registro_detalhado)
+                                    audit_map[sk]["valor"] += res["Valor"]
+
+                    res_f, fal_f = [], []
+                    for (t, s), d in audit_map.items():
+                        ns = sorted(list(d["nums"]))
+                        if ns:
+                            n_min, n_max = ns[0], ns[-1]
+                            res_f.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(d["valor"], 2)})
+                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                                fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+                    st.session_state.update({
+                        'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list),
+                        'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list),
+                        'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f),
+                        'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
+                    })
+                    st.rerun()
+                except Exception as e: st.error(f"Erro: {e}")
 
         st.divider()
 
         # --- ADICIONAR ARQUIVOS ---
         with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
-            extra_files = st.file_uploader("Adicionar arquivos:", accept_multiple_files=True, key="extra_files")
+            extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
-                for f in extra_files:
-                    try:
-                        content = f.read()
-                        xmls = extrair_recursivo(content, f.name)
-                        for name, data in xmls:
-                            res, is_p = identify_xml_info(data, cnpj_limpo, name)
-                            if res:
-                                st.session_state['relatorio'].append(res)
-                                st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = data
-                    except: continue
-                r_res, r_fal, r_can, r_inu, r_aut, r_ger, r_div, r_cnt = recalcular_tudo(st.session_state['relatorio'])
-                st.session_state.update({'df_resumo': r_res, 'df_faltantes': r_fal, 'df_canceladas': r_can, 'df_inutilizadas': r_inu, 'df_autorizadas': r_aut, 'df_geral': r_ger, 'df_divergencias': r_div, 'st_counts': r_cnt})
-                st.rerun()
+                with st.spinner("Adicionando..."):
+                    for f in extra_files:
+                        try:
+                            content = f.read()
+                            todos_xmls = extrair_recursivo(content, f.name)
+                            for name, xml_data in todos_xmls:
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    st.session_state['relatorio'].append(res)
+                                    st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = xml_data
+                        except: continue
+                    
+                    # RECALCULO COMPLETO
+                    lote_recalc = {}
+                    for item in st.session_state['relatorio']:
+                        key = item["Chave"]
+                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+                        if key in lote_recalc:
+                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
+                        else: lote_recalc[key] = (item, is_p)
+                    
+                    audit_map, canc_list, inut_list, aut_list, geral_list = {}, [], [], [], []
+                    for k, (res, is_p) in lote_recalc.items():
+                        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                        reg_det = {
+                            "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                            "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                            "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                            "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                            "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
+                        }
+                        if res["Status"] == "INUTILIZADOS":
+                            r = res.get("Range", (res["Número"], res["Número"]))
+                            for n in range(r[0], r[1] + 1):
+                                item_inut = reg_det.copy(); item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0}); geral_list.append(item_inut)
+                        else: geral_list.append(reg_det)
+
+                        if is_p:
+                            sk = (res["Tipo"], res["Série"])
+                            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                            if res["Status"] == "INUTILIZADOS":
+                                r = res.get("Range", (res["Número"], res["Número"]))
+                                for n in range(r[0], r[1] + 1):
+                                    audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                            else:
+                                if res["Número"] > 0:
+                                    audit_map[sk]["nums"].add(res["Número"])
+                                    if res["Status"] == "CANCELADOS": canc_list.append(reg_det)
+                                    elif res["Status"] == "NORMAIS": aut_list.append(reg_det)
+                                    audit_map[sk]["valor"] += res["Valor"]
+
+                    res_f, fal_f = [], []
+                    for (t, s), d in audit_map.items():
+                        ns = sorted(list(d["nums"]))
+                        if ns:
+                            n_min, n_max = ns[0], ns[-1]
+                            res_f.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(d["valor"], 2)})
+                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                                fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+                    st.session_state.update({
+                        'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 
+                        'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 
+                        'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
+                        'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
+                    })
+                    st.rerun()
 
         st.divider()
 
-        # --- EXCEL FINAL ---
+        # --- EXCEL FINAL COM DOWNLOAD ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
             st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo', index=False)
@@ -319,7 +430,7 @@ if st.session_state['confirmado']:
         col1, col2, col3 = st.columns(3)
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo_organizado.zip", use_container_width=True)
         with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos_xml.zip", use_container_width=True)
-        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
+        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
         st.divider()
 
@@ -327,14 +438,16 @@ if st.session_state['confirmado']:
         st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
         if todas_pastas:
-            pasta_selecionada = st.selectbox("Escolha a pasta:", ["--- SELECIONE ---"] + todas_pastas)
+            pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
             if pasta_selecionada != "--- SELECIONE ---":
-                buf_sel = io.BytesIO()
-                with zipfile.ZipFile(buf_sel, "w") as z_sel:
+                buf_seletivo = io.BytesIO()
+                cont_selecionados = 0
+                with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_STORED) as z_sel:
                     for caminho, dados in st.session_state['dict_arquivos'].items():
                         if caminho.startswith(pasta_selecionada):
                             z_sel.writestr(os.path.basename(caminho), dados)
-                st.download_button(f"📥 BAIXAR PASTA SELECIONADA", buf_sel.getvalue(), "pasta_seletiva.zip", use_container_width=True)
+                            cont_selecionados += 1
+                st.download_button(f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", buf_seletivo.getvalue(), f"{pasta_selecionada.replace('/', '_')}.zip", use_container_width=True)
         
         if st.button("⛏️ NOVO GARIMPO"):
             st.session_state.clear(); st.rerun()
