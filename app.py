@@ -19,7 +19,7 @@ def aplicar_estilo_premium():
 
 aplicar_estilo_premium()
 
-# --- MOTOR DE IDENTIFICAÇÃO (INTEGRAL) ---
+# --- MOTOR DE IDENTIFICAÇÃO (INTELIGÊNCIA COMPLETA) ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
     client_cnpj_clean = "".join(filter(str.isdigit, str(client_cnpj))) if client_cnpj else ""
     nome_puro = os.path.basename(file_name)
@@ -76,10 +76,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             if '<mod>65</mod>' in tag_l: tipo = "NFC-e"
             elif '<mod>57</mod>' in tag_l or '<infcte' in tag_l: tipo = "CT-e"
             elif '<mod>58</mod>' in tag_l or '<infmdfe' in tag_l: tipo = "MDF-e"
+            
             status = "NORMAIS"
             if '110111' in tag_l or '<cstat>101</cstat>' in tag_l: status = "CANCELADOS"
             elif '110110' in tag_l: status = "CARTA_CORRECAO"
             resumo["Tipo"], resumo["Status"] = tipo, status
+
             if status == "NORMAIS":
                 v_match = re.search(r'<(?:vnf|vtprest|vreceb)>([\d.]+)</', tag_l)
                 resumo["Valor"] = float(v_match.group(1)) if v_match else 0.0
@@ -92,10 +94,10 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             resumo["Pasta"] = f"EMITIDOS_CLIENTE/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
         else:
             resumo["Pasta"] = f"RECEBIDOS_TERCEIROS/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Ano']}/{resumo['Mes']}"
+            
         return resumo, is_p
     except: return None, False
 
-# --- FUNÇÃO RECURSIVA ---
 def extrair_recursivo(conteudo_bytes, nome_arquivo):
     itens = []
     if nome_arquivo.lower().endswith('.zip'):
@@ -114,7 +116,7 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
-# O POP QUE TU AMASTE RESTAURADO
+# MANUAL POP COMPLETO (INTEGRAL COMO PEDISTE)
 with st.container():
     m_col1, m_col2 = st.columns(2)
     with m_col1:
@@ -142,6 +144,7 @@ with st.container():
 
 st.markdown("---")
 
+# INICIALIZAÇÃO DE ESTADO
 keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in keys_to_init:
     if k not in st.session_state:
@@ -163,6 +166,7 @@ with st.sidebar:
     if st.button("🗑️ RESETAR SISTEMA"):
         st.session_state.clear(); st.rerun()
 
+# --- LÓGICA DE EXECUÇÃO (INTELIGÊNCIA INTEGRAL) ---
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
         uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
@@ -222,9 +226,9 @@ if st.session_state['confirmado']:
                     for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
             st.session_state.update({'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 'relatorio': rel_list, 'dict_arquivos': dict_fisico, 'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}, 'garimpo_ok': True}); st.rerun()
     else:
-        # --- EXIBIÇÃO RESULTADOS ---
+        # --- EXIBIÇÃO ---
         sc = st.session_state['st_counts']; c1, c2, c3 = st.columns(3)
-        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADOS", sc["INUTILIZADOS"])
+        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADAS", sc["INUTILIZADOS"])
         st.markdown("### 📊 RESUMO POR SÉRIE"); st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
@@ -241,7 +245,7 @@ if st.session_state['confirmado']:
             if not st.session_state['df_inutilizadas'].empty: st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True)
             else: st.info("ℹ️ Nenhuma nota.")
         st.divider()
-        # --- ETAPA 2: VALIDAÇÃO REAL ---
+        # --- ETAPA 2: VALIDAR (INTELIGÊNCIA RESTAURADA) ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÓRIO DE AUTENTICIDADE")
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
@@ -287,7 +291,7 @@ if st.session_state['confirmado']:
                     st.session_state.update({'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list), 'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}}); st.rerun()
                 except Exception as e: st.error(f"Erro: {e}")
         st.divider()
-        # --- ADICIONAR SEM RESET ---
+        # --- ADICIONAR SEM RESET (INTELIGÊNCIA RESTAURADA) ---
         with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
@@ -333,7 +337,7 @@ if st.session_state['confirmado']:
                             for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): fal_f.append({"Tipo": t, "Série": s, "Nº Faltante": b})
                     st.session_state.update({'df_resumo': pd.DataFrame(res_f), 'df_faltantes': pd.DataFrame(fal_f), 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}}); st.rerun()
 
-        # --- EXCEL FINAL ---
+        # --- EXCEL MASTER (ABAS RESTAURADAS) ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
             st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo', index=False)
@@ -346,12 +350,10 @@ if st.session_state['confirmado']:
 
         col1, col2, col3 = st.columns(3)
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "organizado.zip", use_container_width=True)
-        with col2: st.download_button("📦 SÓ XMLs", st.session_state['z_todos'], "xmls.zip", use_container_width=True)
-        with col3: st.download_button("📊 EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
-
+        with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos_xml.zip", use_container_width=True)
+        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
         st.divider()
-
-        # --- DOWNLOAD SELETIVO ---
+        # --- SELETIVO ---
         st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
         if todas_pastas:
@@ -362,7 +364,6 @@ if st.session_state['confirmado']:
                     for caminho, dados in st.session_state['dict_arquivos'].items():
                         if caminho.startswith(pasta_selecionada): z_sel.writestr(os.path.basename(caminho), dados)
                 st.download_button(f"📥 BAIXAR PASTA", buf_sel.getvalue(), "pasta.zip", use_container_width=True)
-        
         if st.button("⛏️ NOVO GARIMPO"): st.session_state.clear(); st.rerun()
 else:
     st.warning("👈 Insira o CNPJ na barra lateral para começar.")
