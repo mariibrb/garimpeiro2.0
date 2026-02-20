@@ -119,7 +119,7 @@ with st.container():
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 MANUAL DE OPERAÇÃO PADRÃO (POP)</h3>
+            <h3>📖 MANUAL DE OPERAÇÃO PADRÃO</h3>
             <ul>
                 <li><b>PASSO 1:</b> Digite o CNPJ do cliente na barra lateral à esquerda e clique em <b>"Liberar Operação"</b>.</li>
                 <li><b>PASSO 2:</b> No campo "Arraste seus arquivos", suba os XMLs ou ZIPs e clique em <b>"Iniciar Grande Garimpo"</b>.</li>
