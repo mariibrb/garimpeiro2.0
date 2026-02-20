@@ -45,6 +45,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         content_str = content_bytes[:45000].decode('utf-8', errors='ignore')
         tag_l = content_str.lower()
         
+        # --- MELHORIA: IDENTIFICAÇÃO DE ENTRADA/SAÍDA ---
+        tp_nf_match = re.search(r'<tpnf>([01])</tpnf>', tag_l)
+        tp_nf_txt = ""
+        if tp_nf_match:
+            tp_nf_txt = "SAIDA" if tp_nf_match.group(1) == "1" else "ENTRADA"
+
         # Identificação de Inutilizadas (Campos específicos da SEFAZ)
         if any(x in tag_l for x in ['<inutnfe', '<retinutnfe', '<procinut']):
             resumo["Status"], resumo["Tipo"] = "INUTILIZADOS", "NF-e"
@@ -83,7 +89,13 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             cnpj_emit = resumo["Chave"][6:20]
         
         is_p = (cnpj_emit == client_cnpj_clean)
-        resumo["Pasta"] = f"EMITIDOS_CLIENTE/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}" if is_p else f"RECEBIDOS_TERCEIROS/{resumo['Tipo']}/{resumo['Ano']}/{resumo['Mes']}"
+        
+        # --- MELHORIA: APLICAÇÃO DA PASTA COM TIPO (ENTRADA/SAÍDA) ---
+        if is_p:
+            resumo["Pasta"] = f"EMITIDOS_CLIENTE/{resumo['Tipo']}/{tp_nf_txt}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
+        else:
+            resumo["Pasta"] = f"RECEBIDOS_TERCEIROS/{resumo['Tipo']}/{resumo['Ano']}/{resumo['Mes']}"
+            
         return resumo, is_p
     except: return None, False
 
