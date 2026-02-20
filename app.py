@@ -114,25 +114,28 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
+# O POP QUE TU AMASTE RESTAURADO
 with st.container():
     m_col1, m_col2 = st.columns(2)
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📋 PROCEDIMENTO PADRÃO (POP)</h3>
-            <p><b>FASE 1:</b> Insira o CNPJ e suba os XMLs/ZIPs para mapear a sequência numérica e achar buracos.</p>
-            <p><b>FASE 2:</b> Suba o relatório Excel de Autenticidade para validar o status real perante a SEFAZ.</p>
-            <p><b>ADICIONAR:</b> Use o campo abaixo dos resultados para incluir novos lotes sem resetar o sistema.</p>
+            <h3>📖 Instruções de Uso</h3>
+            <ul>
+                <li><b>Etapa 1:</b> Suba os XMLs para obter o raio-x inicial e achar buracos.</li>
+                <li><b>Adicionar Arquivos:</b> Use a barra de adição abaixo dos resultados para incluir arquivos sem resetar.</li>
+                <li><b>Etapa 2:</b> Suba o relatório Excel de Autenticidade para validar o status real.</li>
+            </ul>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 O QUE SERÁ OBTIDO?</h3>
+            <h3>📊 O que será obtido?</h3>
             <ul>
-                <li><b>Garimpo Profundo:</b> Abertura recursiva de ZIP dentro de ZIP.</li>
+                <li><b>Garimpo Profundo:</b> Abre recursivamente ZIP dentro de ZIP.</li>
                 <li><b>Relatório Master:</b> Planilha Excel com todos os dados de Emitente e Destinatário.</li>
-                <li><b>Auditoria Cruzada:</b> Validação de conformidade com Excel externo.</li>
+                <li><b>Auditoria Cruzada:</b> Validação final com Excel externo.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -221,7 +224,7 @@ if st.session_state['confirmado']:
     else:
         # --- EXIBIÇÃO RESULTADOS ---
         sc = st.session_state['st_counts']; c1, c2, c3 = st.columns(3)
-        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADAS", sc["INUTILIZADOS"])
+        c1.metric("📦 AUTORIZADAS", sc["AUTORIZADAS"]); c2.metric("❌ CANCELADAS", sc["CANCELADOS"]); c3.metric("🚫 INUTILIZADOS", sc["INUTILIZADOS"])
         st.markdown("### 📊 RESUMO POR SÉRIE"); st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
@@ -342,11 +345,13 @@ if st.session_state['confirmado']:
             if not st.session_state['df_divergencias'].empty: st.session_state['df_divergencias'].to_excel(writer, sheet_name='Divergencias', index=False)
 
         col1, col2, col3 = st.columns(3)
-        with col1: st.download_button("📂 ZIP ORGANIZADO", st.session_state['z_org'], "organizado.zip", use_container_width=True)
-        with col2: st.download_button("📦 SÓ XMLs", st.session_state['z_todos'], "todos_xml.zip", use_container_width=True)
+        with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "organizado.zip", use_container_width=True)
+        with col2: st.download_button("📦 SÓ XMLs", st.session_state['z_todos'], "xmls.zip", use_container_width=True)
         with col3: st.download_button("📊 EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
+
         st.divider()
-        # --- SELETIVO ---
+
+        # --- DOWNLOAD SELETIVO ---
         st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
         if todas_pastas:
@@ -357,6 +362,7 @@ if st.session_state['confirmado']:
                     for caminho, dados in st.session_state['dict_arquivos'].items():
                         if caminho.startswith(pasta_selecionada): z_sel.writestr(os.path.basename(caminho), dados)
                 st.download_button(f"📥 BAIXAR PASTA", buf_sel.getvalue(), "pasta.zip", use_container_width=True)
+        
         if st.button("⛏️ NOVO GARIMPO"): st.session_state.clear(); st.rerun()
 else:
     st.warning("👈 Insira o CNPJ na barra lateral para começar.")
