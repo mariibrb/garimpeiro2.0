@@ -238,7 +238,8 @@ with st.container():
 
 st.markdown("---")
 
-keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos', 'show_success']
+# Adicionei 'validation_done' para controlar o painel fixo
+keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos', 'validation_done']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
@@ -364,16 +365,31 @@ if st.session_state['confirmado']:
             })
             st.rerun()
     else:
-        # FEEDBACK DA ETAPA 2 (Apenas aparece quando o sinal show_success estiver ativado)
-        if st.session_state.get('show_success', False):
-            if not st.session_state['df_divergencias'].empty:
-                st.warning(f"⚠️ **Auditoria Concluída!** Foram detetadas {len(st.session_state['df_divergencias'])} divergências com o portal da SEFAZ. Consulte o Relatório Master.")
-            else:
-                st.success("✅ **Auditoria Concluída com Sucesso!** O status de todas as notas físicas bate perfeitamente com a SEFAZ.")
-            st.balloons()
-            st.session_state['show_success'] = False
-
         # --- RESULTADOS ---
+        
+        # NOVA ÁREA DE STATUS CORPORATIVO FIXO (SUBSTITUI OS BALÕES)
+        if st.session_state.get('validation_done'):
+            n_divergencias = len(st.session_state['df_divergencias'])
+            if n_divergencias > 0:
+                st.markdown(f"""
+                <div style="background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 15px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h4 style="color: #856404; margin: 0; font-family: 'Montserrat', sans-serif;">⚠️ STATUS DA AUDITORIA SEFAZ: CONCLUÍDA COM RESSALVAS</h4>
+                    <p style="color: #856404; margin: 5px 0 0 0; font-family: 'Plus Jakarta Sans', sans-serif;">
+                        Foram identificadas <b>{n_divergencias} divergências</b> entre os XMLs físicos e o status real na SEFAZ. 
+                        Os dados foram corrigidos automaticamente. Verifique a aba "Divergencias" no Relatório Excel Master para detalhes.
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div style="background-color: #d4edda; border-left: 5px solid #28a745; padding: 15px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h4 style="color: #155724; margin: 0; font-family: 'Montserrat', sans-serif;">✅ STATUS DA AUDITORIA SEFAZ: CONCLUÍDA COM SUCESSO</h4>
+                    <p style="color: #155724; margin: 5px 0 0 0; font-family: 'Plus Jakarta Sans', sans-serif;">
+                        O status de todos os arquivos físicos (XML) está 100% alinhado com o relatório de autenticidade da SEFAZ. Nenhuma divergência encontrada.
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
         sc = st.session_state['st_counts']
         c1, c2, c3 = st.columns(3)
         c1.metric("📦 AUTORIZADAS", sc.get("AUTORIZADAS", 0))
@@ -385,18 +401,21 @@ if st.session_state['confirmado']:
         
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
+        
         with col_audit:
             st.markdown("### ⚠️ BURACOS")
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else:
                 st.info("✅ Tudo em ordem.")
+                
         with col_canc:
             st.markdown("### ❌ CANCELADAS")
             if not st.session_state['df_canceladas'].empty:
                 st.dataframe(st.session_state['df_canceladas'], use_container_width=True, hide_index=True)
             else:
                 st.info("ℹ️ Nenhuma nota.")
+                
         with col_inut:
             st.markdown("### 🚫 INUTILIZADAS")
             if not st.session_state['df_inutilizadas'].empty:
@@ -411,79 +430,80 @@ if st.session_state['confirmado']:
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
             if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
-                try:
-                    df_auth = pd.read_excel(auth_file)
-                    auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
-                    
-                    lote_recalc = {}
-                    for item in st.session_state['relatorio']:
-                        key = item["Chave"]
-                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                        if key in lote_recalc:
-                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
-                        else: lote_recalc[key] = (item, is_p)
-
-                    audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
-                    for k, (res, is_p) in lote_recalc.items():
-                        status_final = res["Status"]
-                        if res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
-                            status_final = "CANCELADOS"
-                            if res["Status"] == "NORMAIS":
-                                div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
-
-                        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                with st.spinner("Cruzando dados com a SEFAZ..."):
+                    try:
+                        df_auth = pd.read_excel(auth_file)
+                        auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
                         
-                        registro_detalhado = {
-                            "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
-                            "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
-                            "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
-                            "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
-                            "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
-                        }
+                        lote_recalc = {}
+                        for item in st.session_state['relatorio']:
+                            key = item["Chave"]
+                            is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+                            if key in lote_recalc:
+                                if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
+                            else: lote_recalc[key] = (item, is_p)
 
-                        if status_final == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            for n in range(r[0], r[1] + 1):
-                                item_inut = registro_detalhado.copy()
-                                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                geral_list.append(item_inut)
-                        else:
-                            geral_list.append(registro_detalhado)
+                        audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
+                        for k, (res, is_p) in lote_recalc.items():
+                            status_final = res["Status"]
+                            if res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
+                                status_final = "CANCELADOS"
+                                if res["Status"] == "NORMAIS":
+                                    div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
 
-                        if is_p:
-                            sk = (res["Tipo"], res["Série"])
-                            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                            
+                            registro_detalhado = {
+                                "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                                "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                                "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                                "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                                "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
+                            }
+
                             if status_final == "INUTILIZADOS":
                                 r = res.get("Range", (res["Número"], res["Número"]))
                                 for n in range(r[0], r[1] + 1):
-                                    audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                                    item_inut = registro_detalhado.copy()
+                                    item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                                    geral_list.append(item_inut)
                             else:
-                                if res["Número"] > 0:
-                                    audit_map[sk]["nums"].add(res["Número"])
-                                    if status_final == "CANCELADOS":
-                                        canc_list.append(registro_detalhado)
-                                    elif status_final == "NORMAIS":
-                                        aut_list.append(registro_detalhado)
-                                    audit_map[sk]["valor"] += res["Valor"]
+                                geral_list.append(registro_detalhado)
 
-                    res_final, fal_final = [], []
-                    for (t, s), dados in audit_map.items():
-                        ns = sorted(list(dados["nums"]))
-                        if ns:
-                            n_min, n_max = ns[0], ns[-1]
-                            res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
-                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                                fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+                            if is_p:
+                                sk = (res["Tipo"], res["Série"])
+                                if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                                if status_final == "INUTILIZADOS":
+                                    r = res.get("Range", (res["Número"], res["Número"]))
+                                    for n in range(r[0], r[1] + 1):
+                                        audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                                else:
+                                    if res["Número"] > 0:
+                                        audit_map[sk]["nums"].add(res["Número"])
+                                        if status_final == "CANCELADOS":
+                                            canc_list.append(registro_detalhado)
+                                        elif status_final == "NORMAIS":
+                                            aut_list.append(registro_detalhado)
+                                        audit_map[sk]["valor"] += res["Valor"]
 
-                    st.session_state.update({
-                        'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list),
-                        'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list),
-                        'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final),
-                        'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)},
-                        'show_success': True # Bandeira para dar o aviso visual após atualizar!
-                    })
-                    st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
+                        res_final, fal_final = [], []
+                        for (t, s), dados in audit_map.items():
+                            ns = sorted(list(dados["nums"]))
+                            if ns:
+                                n_min, n_max = ns[0], ns[-1]
+                                res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
+                                for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                                    fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+                        st.session_state.update({
+                            'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list),
+                            'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list),
+                            'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final),
+                            'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)},
+                            'validation_done': True # Ativa o painel fixo
+                        })
+                        st.rerun()
+                    except Exception as e: st.error(f"Erro: {e}")
 
         st.divider()
 
