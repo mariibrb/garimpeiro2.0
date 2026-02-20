@@ -93,7 +93,22 @@ def aplicar_estilo_premium():
 
 aplicar_estilo_premium()
 
-# --- MOTOR DE IDENTIFICAÇÃO (ENRIQUECIDO COM MAIS DADOS) ---
+# --- MOTOR DE ALTA PERFORMANCE (REGEX PRÉ-COMPILADOS) ---
+RE_TPNF = re.compile(r'<tpnf>([01])</tpnf>', re.I)
+RE_EMIT = re.compile(r'<emit>.*?<cnpj>(\d+)</cnpj>', re.S | re.I)
+RE_EMIT_NOME = re.compile(r'<emit>.*?<xnome>(.*?)</xnome>', re.S | re.I)
+RE_DEST = re.compile(r'<dest>.*?<(?:cnpj|cpf)>(.*?)</(?:cnpj|cpf)>', re.S | re.I)
+RE_DEST_NOME = re.compile(r'<dest>.*?<xnome>(.*?)</xnome>', re.S | re.I)
+RE_DATA = re.compile(r'<(?:dhemi|demi|dhregevento)>(\d{4}-\d{2}-\d{2})', re.I)
+RE_CHAVE = re.compile(r'<(?:chnfe|chcte|chmdfe)>(\d{44})</|id=["\'](?:nfe|cte|mdfe)?(\d{44})["\']', re.I)
+RE_VALOR = re.compile(r'<(?:vnf|vtprest|vreceb)>([\d.]+)</', re.I)
+RE_SERIE = re.compile(r'<serie>(\d+)</', re.I)
+RE_NNFINI = re.compile(r'<nnfini>(\d+)</', re.I)
+RE_NNFFIN = re.compile(r'<nnffin>(\d+)</', re.I)
+RE_ANO = re.compile(r'<ano>(\d+)</', re.I)
+RE_MOD = re.compile(r'<mod>(\d+)</', re.I)
+
+# --- MOTOR DE IDENTIFICAÇÃO (INTEGRAL) ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
     client_cnpj_clean = "".join(filter(str.isdigit, str(client_cnpj))) if client_cnpj else ""
     nome_puro = os.path.basename(file_name)
@@ -110,80 +125,50 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
     
     try:
         content_str = content_bytes[:45000].decode('utf-8', errors='ignore')
-        tag_l = content_str.lower()
-        if '<?xml' not in tag_l and '<inf' not in tag_l and '<inut' not in tag_l and '<retinut' not in tag_l: return None, False
-        
-        # Identificação de tpNF (0=Entrada, 1=Saída)
-        tp_nf_match = re.search(r'<tpnf>([01])</tpnf>', tag_l)
-        if tp_nf_match:
-            resumo["Operacao"] = "ENTRADA" if tp_nf_match.group(1) == "0" else "SAIDA"
+        tp_m = RE_TPNF.search(content_str)
+        if tp_m: resumo["Operacao"] = "ENTRADA" if tp_m.group(1) == "0" else "SAIDA"
+        resumo["CNPJ_Emit"] = RE_EMIT.search(content_str).group(1) if RE_EMIT.search(content_str) else ""
+        resumo["Nome_Emit"] = RE_EMIT_NOME.search(content_str).group(1).upper() if RE_EMIT_NOME.search(content_str) else ""
+        resumo["Doc_Dest"] = RE_DEST.search(content_str).group(1) if RE_DEST.search(content_str) else ""
+        resumo["Nome_Dest"] = RE_DEST_NOME.search(content_str).group(1).upper() if RE_DEST_NOME.search(content_str) else ""
+        data_m = RE_DATA.search(content_str)
+        if data_m: resumo["Data_Emissao"] = data_m.group(1)
 
-        # Extração de Dados das Partes (Emitente e Destinatário)
-        resumo["CNPJ_Emit"] = re.search(r'<emit>.*?<cnpj>(\d+)</cnpj>', tag_l, re.S).group(1) if re.search(r'<emit>.*?<cnpj>(\d+)</cnpj>', tag_l, re.S) else ""
-        resumo["Nome_Emit"] = re.search(r'<emit>.*?<xnome>(.*?)</xnome>', tag_l, re.S).group(1).upper() if re.search(r'<emit>.*?<xnome>(.*?)</xnome>', tag_l, re.S) else ""
-        
-        resumo["Doc_Dest"] = re.search(r'<dest>.*?<(?:cnpj|cpf)>(.*?)</(?:cnpj|cpf)>', tag_l, re.S).group(1) if re.search(r'<dest>.*?<(?:cnpj|cpf)>(.*?)</(?:cnpj|cpf)>', tag_l, re.S) else ""
-        resumo["Nome_Dest"] = re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S).group(1).upper() if re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S) else ""
-
-        # Identificação de Data de Emissão
-        data_match = re.search(r'<(?:dhemi|demi|dhregevento)>(\d{4}-\d{2}-\d{2})', tag_l)
-        if data_match: resumo["Data_Emissao"] = data_match.group(1)
-
-        # 1. IDENTIFICAÇÃO DE INUTILIZADAS
-        if '<inutnfe' in tag_l or '<retinutnfe' in tag_l or '<procinut' in tag_l:
+        if any(tag in content_str.lower() for tag in ['<inutnfe', '<retinutnfe', '<procinut']):
             resumo["Status"], resumo["Tipo"] = "INUTILIZADOS", "NF-e"
-            if '<mod>65</mod>' in tag_l: resumo["Tipo"] = "NFC-e"
-            elif '<mod>57</mod>' in tag_l: resumo["Tipo"] = "CT-e"
-            
-            resumo["Série"] = re.search(r'<serie>(\d+)</', tag_l).group(1) if re.search(r'<serie>(\d+)</', tag_l) else "0"
-            ini = re.search(r'<nnfini>(\d+)</', tag_l).group(1) if re.search(r'<nnfini>(\d+)</', tag_l) else "0"
-            fin = re.search(r'<nnffin>(\d+)</', tag_l).group(1) if re.search(r'<nnffin>(\d+)</', tag_l) else ini
-            
-            resumo["Número"] = int(ini)
-            resumo["Range"] = (int(ini), int(fin))
-            resumo["Ano"] = "20" + re.search(r'<ano>(\d+)</', tag_l).group(1)[-2:] if re.search(r'<ano>(\d+)</', tag_l) else "0000"
+            mod_m = RE_MOD.search(content_str)
+            if mod_m:
+                if mod_m.group(1) == '65': resumo["Tipo"] = "NFC-e"
+                elif mod_m.group(1) == '57': resumo["Tipo"] = "CT-e"
+            resumo["Série"] = RE_SERIE.search(content_str).group(1) if RE_SERIE.search(content_str) else "0"
+            ini = RE_NNFINI.search(content_str).group(1) if RE_NNFINI.search(content_str) else "0"
+            fin = RE_NNFFIN.search(content_str).group(1) if RE_NNFFIN.search(content_str) else ini
+            resumo["Número"], resumo["Range"] = int(ini), (int(ini), int(fin))
+            ano_m = RE_ANO.search(content_str)
+            resumo["Ano"] = "20" + ano_m.group(1)[-2:] if ano_m else "0000"
             resumo["Chave"] = f"INUT_{resumo['Série']}_{ini}"
-
         else:
-            match_ch = re.search(r'<(?:chnfe|chcte|chmdfe)>(\d{44})</', tag_l)
-            if not match_ch:
-                match_ch = re.search(r'id=["\'](?:nfe|cte|mdfe)?(\d{44})["\']', tag_l)
-                resumo["Chave"] = match_ch.group(1) if match_ch else ""
-            else:
-                resumo["Chave"] = match_ch.group(1)
-
+            ch_m = RE_CHAVE.search(content_str)
+            resumo["Chave"] = (ch_m.group(1) or ch_m.group(2)) if ch_m else ""
             if resumo["Chave"]:
                 resumo["Ano"], resumo["Mes"] = "20" + resumo["Chave"][2:4], resumo["Chave"][4:6]
                 resumo["Série"] = str(int(resumo["Chave"][22:25]))
                 resumo["Número"] = int(resumo["Chave"][25:34])
                 if not resumo["Data_Emissao"]: resumo["Data_Emissao"] = f"{resumo['Ano']}-{resumo['Mes']}-01"
-
             tipo = "NF-e"
-            if '<mod>65</mod>' in tag_l: tipo = "NFC-e"
-            elif '<mod>57</mod>' in tag_l or '<infcte' in tag_l: tipo = "CT-e"
-            elif '<mod>58</mod>' in tag_l or '<infmdfe' in tag_l: tipo = "MDF-e"
-            
+            if '<mod>65</mod>' in content_str: tipo = "NFC-e"
+            elif '<mod>57</mod>' in content_str or '<infcte' in content_str: tipo = "CT-e"
+            elif '<mod>58</mod>' in content_str or '<infmdfe' in content_str: tipo = "MDF-e"
             status = "NORMAIS"
-            if '110111' in tag_l or '<cstat>101</cstat>' in tag_l: 
-                status = "CANCELADOS"
-            elif '110110' in tag_l: status = "CARTA_CORRECAO"
-                
+            if '110111' in content_str or '<cstat>101</cstat>' in content_str: status = "CANCELADOS"
+            elif '110110' in content_str: status = "CARTA_CORRECAO"
             resumo["Tipo"], resumo["Status"] = tipo, status
-
             if status == "NORMAIS":
-                v_match = re.search(r'<(?:vnf|vtprest|vreceb)>([\d.]+)</', tag_l)
-                resumo["Valor"] = float(v_match.group(1)) if v_match else 0.0
-            
-        if not resumo["CNPJ_Emit"] and resumo["Chave"] and not resumo["Chave"].startswith("INUT_"): 
-            resumo["CNPJ_Emit"] = resumo["Chave"][6:20]
+                val_m = RE_VALOR.search(content_str)
+                resumo["Valor"] = float(val_m.group(1)) if val_m else 0.0
         
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
-        
-        if is_p:
-            resumo["Pasta"] = f"EMITIDOS_CLIENTE/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
-        else:
-            resumo["Pasta"] = f"RECEBIDOS_TERCEIROS/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Ano']}/{resumo['Mes']}"
-            
+        resumo["Pasta"] = f"{'EMITIDOS_CLIENTE' if is_p else 'RECEBIDOS_TERCEIROS'}/{resumo['Operacao']}/{resumo['Tipo']}/{resumo['Status']}/{resumo['Ano']}/{resumo['Mes']}/Serie_{resumo['Série']}"
         return resumo, is_p
     except: return None, False
 
@@ -238,7 +223,8 @@ with st.container():
 
 st.markdown("---")
 
-keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
+# ADICIONEI O 'auditoria_sucesso' AQUI NA LISTA DE INICIALIZAÇÃO
+keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos', 'auditoria_sucesso']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
@@ -364,6 +350,17 @@ if st.session_state['confirmado']:
             })
             st.rerun()
     else:
+        # --- AQUI É ONDE O FEEDBACK DA ETAPA 2 APARECE DEPOIS DO RERUN ---
+        if st.session_state.get('auditoria_sucesso'):
+            # Verifica se encontrou alguma divergência para mudar o tom do aviso
+            if not st.session_state['df_divergencias'].empty:
+                st.warning(f"⚠️ **Auditoria Concluída!** Encontramos {len(st.session_state['df_divergencias'])} notas com status divergentes na SEFAZ. Os dados foram corrigidos. Consulte o Excel Master.")
+            else:
+                st.success("✅ **Auditoria Concluída com Sucesso!** O status dos seus XMLs bate perfeitamente com a SEFAZ.")
+            
+            st.balloons()  # Celebração de sucesso
+            st.session_state['auditoria_sucesso'] = False  # Desliga a bandeira para não piscar novamente
+            
         # --- RESULTADOS ---
         sc = st.session_state['st_counts']
         c1, c2, c3 = st.columns(3)
@@ -405,78 +402,81 @@ if st.session_state['confirmado']:
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
             if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
-                try:
-                    df_auth = pd.read_excel(auth_file)
-                    auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
-                    
-                    lote_recalc = {}
-                    for item in st.session_state['relatorio']:
-                        key = item["Chave"]
-                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                        if key in lote_recalc:
-                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
-                        else: lote_recalc[key] = (item, is_p)
-
-                    audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
-                    for k, (res, is_p) in lote_recalc.items():
-                        status_final = res["Status"]
-                        if res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
-                            status_final = "CANCELADOS"
-                            if res["Status"] == "NORMAIS":
-                                div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
-
-                        origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                with st.spinner("Cruzando dados com a SEFAZ..."):
+                    try:
+                        df_auth = pd.read_excel(auth_file)
+                        auth_dict = {str(row.iloc[0]).strip(): str(row.iloc[5]).strip().upper() for _, row in df_auth.iterrows() if len(str(row.iloc[0]).strip()) == 44}
                         
-                        registro_detalhado = {
-                            "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
-                            "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
-                            "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
-                            "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
-                            "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
-                        }
+                        lote_recalc = {}
+                        for item in st.session_state['relatorio']:
+                            key = item["Chave"]
+                            is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+                            if key in lote_recalc:
+                                if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
+                            else: lote_recalc[key] = (item, is_p)
 
-                        if status_final == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            for n in range(r[0], r[1] + 1):
-                                item_inut = registro_detalhado.copy()
-                                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                geral_list.append(item_inut)
-                        else:
-                            geral_list.append(registro_detalhado)
+                        audit_map, canc_list, inut_list, aut_list, geral_list, div_list = {}, [], [], [], [], []
+                        for k, (res, is_p) in lote_recalc.items():
+                            status_final = res["Status"]
+                            if res["Chave"] in auth_dict and "CANCEL" in auth_dict[res["Chave"]]:
+                                status_final = "CANCELADOS"
+                                if res["Status"] == "NORMAIS":
+                                    div_list.append({"Chave": res["Chave"], "Nota": res["Número"], "Status XML": "AUTORIZADA", "Status Real": "CANCELADA"})
 
-                        if is_p:
-                            sk = (res["Tipo"], res["Série"])
-                            if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                            
+                            registro_detalhado = {
+                                "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                                "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                                "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                                "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                                "Chave": res["Chave"], "Status Final": status_final, "Valor": res["Valor"]
+                            }
+
                             if status_final == "INUTILIZADOS":
                                 r = res.get("Range", (res["Número"], res["Número"]))
                                 for n in range(r[0], r[1] + 1):
-                                    audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                                    item_inut = registro_detalhado.copy()
+                                    item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                                    geral_list.append(item_inut)
                             else:
-                                if res["Número"] > 0:
-                                    audit_map[sk]["nums"].add(res["Número"])
-                                    if status_final == "CANCELADOS":
-                                        canc_list.append(registro_detalhado)
-                                    elif status_final == "NORMAIS":
-                                        aut_list.append(registro_detalhado)
-                                    audit_map[sk]["valor"] += res["Valor"]
+                                geral_list.append(registro_detalhado)
 
-                    res_final, fal_final = [], []
-                    for (t, s), dados in audit_map.items():
-                        ns = sorted(list(dados["nums"]))
-                        if ns:
-                            n_min, n_max = ns[0], ns[-1]
-                            res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
-                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                                fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+                            if is_p:
+                                sk = (res["Tipo"], res["Série"])
+                                if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                                if status_final == "INUTILIZADOS":
+                                    r = res.get("Range", (res["Número"], res["Número"]))
+                                    for n in range(r[0], r[1] + 1):
+                                        audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                                else:
+                                    if res["Número"] > 0:
+                                        audit_map[sk]["nums"].add(res["Número"])
+                                        if status_final == "CANCELADOS":
+                                            canc_list.append(registro_detalhado)
+                                        elif status_final == "NORMAIS":
+                                            aut_list.append(registro_detalhado)
+                                        audit_map[sk]["valor"] += res["Valor"]
 
-                    st.session_state.update({
-                        'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list),
-                        'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list),
-                        'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final),
-                        'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
-                    })
-                    st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
+                        res_final, fal_final = [], []
+                        for (t, s), dados in audit_map.items():
+                            ns = sorted(list(dados["nums"]))
+                            if ns:
+                                n_min, n_max = ns[0], ns[-1]
+                                res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
+                                for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                                    fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+                        # ADICIONADO A 'auditoria_sucesso' NA ATUALIZAÇÃO
+                        st.session_state.update({
+                            'df_canceladas': pd.DataFrame(canc_list), 'df_autorizadas': pd.DataFrame(aut_list),
+                            'df_inutilizadas': pd.DataFrame(inut_list), 'df_geral': pd.DataFrame(geral_list),
+                            'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final),
+                            'df_divergencias': pd.DataFrame(div_list), 'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)},
+                            'auditoria_sucesso': True
+                        })
+                        st.rerun()
+                    except Exception as e: st.error(f"Erro: {e}")
 
         st.divider()
 
