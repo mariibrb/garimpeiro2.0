@@ -1,7 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;800&family=Plus+Jakarta+Sans:wght@400;700&display=swap');
 
 header, [data-testid="stHeader"] { display: none !important; }
-
 .stApp { 
     background: radial-gradient(circle at top right, #FFDEEF 0%, #F8F9FA 100%) !important; 
 }
