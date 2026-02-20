@@ -121,33 +121,31 @@ with st.container():
             <h3>📖 MANUAL DE OPERAÇÃO PADRÃO (POP)</h3>
             <p><b>OBJETIVO:</b> Saneamento de base fiscal e auditoria de continuidade numérica.</p>
             <ul>
-                <li><b>PASSO 1 (IDENTIFICAÇÃO):</b> Insira o CNPJ do cliente na barra lateral. Isso define quais XMLs são de emissão própria e quais são de terceiros. Sem isso, o motor não separa as pastas corretamente.</li>
-                <li><b>PASSO 2 (CAPTAÇÃO):</b> Faça o upload do acervo bruto (XMLs ou ZIPs). O sistema possui tecnologia de <b>Garimpo Profundo</b>, abrindo recursivamente pastas dentro de ZIPs sem limite de camada.</li>
-                <li><b>PASSO 3 (MINERAÇÃO):</b> Clique em "Iniciar Grande Garimpo". O sistema extrairá dados de Emitente, Destinatário, Valores e identificará <b>Gaps (Buracos)</b> na sequência numérica das notas.</li>
-                <li><b>PASSO 4 (AUDITORIA):</b> Na Etapa 2, suba o relatório Excel de Autenticidade da SEFAZ. O sistema fará um <b>Cross-Check automático</b> pela chave de acesso para identificar notas canceladas que o XML não reporta.</li>
-                <li><b>PASSO 5 (ENTREGA):</b> Exporte o ZIP organizado por pastas fiscais e o Relatório Excel Master com as abas de Divergência e Buracos.</li>
+                <li><b>PASSO 1 (CONFIGURAÇÃO):</b> Insira o CNPJ do cliente na barra lateral e clique em "Liberar Operação". Isto é vital para o sistema distinguir entre <b>Emissão Própria</b> e <b>Terceiros</b>.</li>
+                <li><b>PASSO 2 (GARIMPO):</b> Faça o upload dos XMLs ou ZIPs. O sistema abre recursivamente ZIPs dentro de ZIPs. Clique em "Iniciar Grande Garimpo".</li>
+                <li><b>PASSO 3 (IDENTIFICAÇÃO DE CANCELADAS):</b> O sistema identifica automaticamente notas canceladas via XML (Tag 110111/101). Estas notas têm o <b>Valor Contábil zerado</b> no relatório.</li>
+                <li><b>PASSO 4 (ADICIONAR):</b> Caso encontre mais arquivos após o primeiro garimpo, use a barra de adição abaixo para atualizar a base sem perder o trabalho já feito.</li>
+                <li><b>PASSO 5 (AUDITORIA SEFAZ):</b> Suba o Relatório de Autenticidade (.xlsx). O sistema fará o cruzamento pela Chave e apontará notas que o XML diz "Autorizado" mas que na SEFAZ estão "Canceladas".</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 RESULTADOS DO PROCESSAMENTO</h3>
-            <p><b>INTELIGÊNCIAS GERADAS PELO SISTEMA:</b></p>
+            <h3>📊 RESULTADOS E ANÁLISES OBTIDAS</h3>
+            <p><b>INTELIGÊNCIAS GERADAS:</b></p>
             <ul>
-                <li><b>Resumo por Série:</b> Visão executiva consolidada com início, fim, quantidade e valor contábil por série fiscal.</li>
-                <li><b>Relatório de Buracos:</b> Identificação automática de notas fiscais faltantes que podem gerar multas por omissão.</li>
-                <li><b>Expansão de Inutilizadas:</b> Transformação de protocolos de inutilização em linhas individuais para auditoria 1:1.</li>
-                <li><b>Análise de Status Real:</b> Reclassificação de status (Autorizado vs Cancelado) cruzando XML com base de dados externa.</li>
-                <li><b>Árvore Fiscal:</b> Organização física dos arquivos XML em pastas estruturadas: Operação > Modelo > Status > Ano > Mês.</li>
-                <li><b>Excel Master:</b> Documento com múltiplas abas separando Canceladas, Autorizadas, Inutilizadas e Divergências SEFAZ.</li>
+                <li><b>Relatório de Buracos:</b> Identifica saltos na numeração das séries, apontando notas faltantes no seu lote físico.</li>
+                <li><b>Gestão de Canceladas:</b> Tabela exclusiva de notas canceladas para garantir que não haja pagamento indevido de impostos.</li>
+                <li><b>Expansão de Inutilizadas:</b> Transforma um range de inutilização (ex: notas 10 a 20) em linhas individuais no Excel.</li>
+                <li><b>Divergências de Status:</b> Aba no Excel que lista notas com conflito entre o status do arquivo físico e a base da SEFAZ.</li>
+                <li><b>Organização Física:</b> Receba um ZIP com os XMLs renomeados e organizados em pastas lógicas: <i>Tipo > Status > Ano > Mês</i>.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
 
 st.markdown("---")
 
-# INICIALIZAÇÃO DE ESTADO
 keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos']
 for k in keys_to_init:
     if k not in st.session_state:
@@ -242,7 +240,7 @@ if st.session_state['confirmado']:
             st.markdown("### 🚫 INUTILIZADAS"); st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True) if not st.session_state['df_inutilizadas'].empty else st.info("ℹ️ Nenhuma nota.")
         
         st.divider()
-        # --- ETAPA 2: VALIDAR (INTELIGÊNCIA INTEGRAL) ---
+        # --- ETAPA 2: VALIDAR REAL ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÓRIO DE AUTENTICIDADE")
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
@@ -288,7 +286,7 @@ if st.session_state['confirmado']:
                 except Exception as e: st.error(f"Erro: {e}")
         
         st.divider()
-        # --- ADICIONAR SEM RESET (INTEGRAL) ---
+        # --- ADICIONAR SEM RESET ---
         with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
@@ -299,7 +297,6 @@ if st.session_state['confirmado']:
                             res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                             if res: st.session_state['relatorio'].append(res); st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = xml_data
                     except: continue
-                # Recalculo completo
                 lote_recalc = {}
                 for item in st.session_state['relatorio']:
                     key = item["Chave"]; is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
@@ -348,10 +345,10 @@ if st.session_state['confirmado']:
         col1, col2, col3 = st.columns(3)
         with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo.zip", use_container_width=True)
         with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos.zip", use_container_width=True)
-        with col3: st.download_button("📊 EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
-
+        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True)
         st.divider()
-        # --- DOWNLOAD SELETIVO ---
+        # --- SELETIVO ---
+        st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
         todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
         if todas_pastas:
             pasta_sel = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
