@@ -98,7 +98,7 @@ aplicar_estilo_premium()
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 WORKSPACE_DIR = "garimpo_workspace"
 
-# --- MOTOR DE IDENTIFICAÇÃO (ENRIQUECIDO COM MAIS DADOS) ---
+# --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
     client_cnpj_clean = "".join(filter(str.isdigit, str(client_cnpj))) if client_cnpj else ""
     nome_puro = os.path.basename(file_name)
@@ -118,26 +118,21 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         tag_l = content_str.lower()
         if '<?xml' not in tag_l and '<inf' not in tag_l and '<inut' not in tag_l and '<retinut' not in tag_l: return None, False
         
-        # Identificação de tpNF (0=Entrada, 1=Saída)
         tp_nf_match = re.search(r'<tpnf>([01])</tpnf>', tag_l)
         if tp_nf_match:
             resumo["Operacao"] = "ENTRADA" if tp_nf_match.group(1) == "0" else "SAIDA"
 
-        # Extração de Dados das Partes (Emitente e Destinatário)
         resumo["CNPJ_Emit"] = re.search(r'<emit>.*?<cnpj>(\d+)</cnpj>', tag_l, re.S).group(1) if re.search(r'<emit>.*?<cnpj>(\d+)</cnpj>', tag_l, re.S) else ""
         resumo["Nome_Emit"] = re.search(r'<emit>.*?<xnome>(.*?)</xnome>', tag_l, re.S).group(1).upper() if re.search(r'<emit>.*?<xnome>(.*?)</xnome>', tag_l, re.S) else ""
-        
         resumo["Doc_Dest"] = re.search(r'<dest>.*?<(?:cnpj|cpf)>(.*?)</(?:cnpj|cpf)>', tag_l, re.S).group(1) if re.search(r'<dest>.*?<(?:cnpj|cpf)>(.*?)</(?:cnpj|cpf)>', tag_l, re.S) else ""
         resumo["Nome_Dest"] = re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S).group(1).upper() if re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S) else ""
 
-        # Identificação de Data de Emissão
         data_match = re.search(r'<(?:dhemi|demi|dhregevento|dhrecbto)>(\d{4})-(\d{2})-(\d{2})', tag_l)
         if data_match: 
             resumo["Data_Emissao"] = f"{data_match.group(1)}-{data_match.group(2)}-{data_match.group(3)}"
             resumo["Ano"] = data_match.group(1)
             resumo["Mes"] = data_match.group(2)
 
-        # 1. IDENTIFICAÇÃO DE INUTILIZADAS
         if '<inutnfe' in tag_l or '<retinutnfe' in tag_l or '<procinut' in tag_l:
             resumo["Status"], resumo["Tipo"] = "INUTILIZADOS", "NF-e"
             if '<mod>65</mod>' in tag_l: resumo["Tipo"] = "NFC-e"
@@ -152,11 +147,8 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             
             if resumo["Ano"] == "0000":
                 ano_match = re.search(r'<ano>(\d+)</', tag_l)
-                if ano_match:
-                    resumo["Ano"] = "20" + ano_match.group(1)[-2:]
-
+                if ano_match: resumo["Ano"] = "20" + ano_match.group(1)[-2:]
             resumo["Chave"] = f"INUT_{resumo['Série']}_{ini}"
-
         else:
             match_ch = re.search(r'<(?:chnfe|chcte|chmdfe)>(\d{44})</', tag_l)
             if not match_ch:
@@ -178,8 +170,7 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             elif '<mod>58</mod>' in tag_l or '<infmdfe' in tag_l: tipo = "MDF-e"
             
             status = "NORMAIS"
-            if '110111' in tag_l or '<cstat>101</cstat>' in tag_l: 
-                status = "CANCELADOS"
+            if '110111' in tag_l or '<cstat>101</cstat>' in tag_l: status = "CANCELADOS"
             elif '110110' in tag_l: status = "CARTA_CORRECAO"
                 
             resumo["Tipo"], resumo["Status"] = tipo, status
@@ -204,10 +195,9 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         return resumo, is_p
     except: return None, False
 
-# --- FUNÇÃO RECURSIVA BLINDADA (EXTRAÇÃO PARA DISCO PARA SALVAR MEMÓRIA) ---
+# --- FUNÇÃO RECURSIVA BLINDADA ---
 def extrair_recursivo(conteudo_ou_file, nome_arquivo):
-    if not os.path.exists(TEMP_EXTRACT_DIR):
-        os.makedirs(TEMP_EXTRACT_DIR)
+    if not os.path.exists(TEMP_EXTRACT_DIR): os.makedirs(TEMP_EXTRACT_DIR)
         
     if nome_arquivo.lower().endswith('.zip'):
         try:
@@ -215,7 +205,6 @@ def extrair_recursivo(conteudo_ou_file, nome_arquivo):
             with zipfile.ZipFile(file_obj) as z:
                 for sub_nome in z.namelist():
                     if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): continue
-                    
                     if sub_nome.lower().endswith('.zip'):
                         temp_path = z.extract(sub_nome, path=TEMP_EXTRACT_DIR)
                         with open(temp_path, 'rb') as f_temp:
@@ -226,23 +215,13 @@ def extrair_recursivo(conteudo_ou_file, nome_arquivo):
                         yield (os.path.basename(sub_nome), z.read(sub_nome))
         except: pass
     elif nome_arquivo.lower().endswith('.xml'):
-        if hasattr(conteudo_ou_file, 'read'):
-            yield (os.path.basename(nome_arquivo), conteudo_ou_file.read())
-        else:
-            yield (os.path.basename(nome_arquivo), conteudo_ou_file)
+        if hasattr(conteudo_ou_file, 'read'): yield (os.path.basename(nome_arquivo), conteudo_ou_file.read())
+        else: yield (os.path.basename(nome_arquivo), conteudo_ou_file)
 
-# --- LIMPEZA DE ARQUIVOS TEMPORÁRIOS ---
+# --- LIMPEZA TOTAL ---
 def limpar_arquivos_temp():
-    if os.path.exists('garimpo_organizado.zip'): os.remove('garimpo_organizado.zip')
-    if os.path.exists('todos_xml.zip'): os.remove('todos_xml.zip')
-    for f in os.listdir('.'):
-        if f.startswith('garimpo_') and f.endswith('.zip'):
-            try: os.remove(f)
-            except: pass
-    if os.path.exists(TEMP_EXTRACT_DIR):
-        shutil.rmtree(TEMP_EXTRACT_DIR, ignore_errors=True)
-    if os.path.exists(WORKSPACE_DIR):
-        shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
+    if os.path.exists(TEMP_EXTRACT_DIR): shutil.rmtree(TEMP_EXTRACT_DIR, ignore_errors=True)
+    if os.path.exists(WORKSPACE_DIR): shutil.rmtree(WORKSPACE_DIR, ignore_errors=True)
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
@@ -277,13 +256,12 @@ with st.container():
 
 st.markdown("---")
 
-keys_to_init = ['garimpo_ok', 'confirmado', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'validation_done', 'zip_pronto']
+keys_to_init = ['garimpo_ok', 'confirmado', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'validation_done']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
         elif k == 'relatorio': st.session_state[k] = []
         elif k == 'st_counts': st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
-        elif k == 'zip_pronto': st.session_state[k] = None
         else: st.session_state[k] = False
 
 with st.sidebar:
@@ -300,7 +278,7 @@ with st.sidebar:
 
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
-        uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
+        uploaded_files = st.file_uploader("Arraste seus arquivos aqui (Suporta +300MB):", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
             limpar_arquivos_temp() 
             os.makedirs(WORKSPACE_DIR, exist_ok=True)
@@ -311,46 +289,50 @@ if st.session_state['confirmado']:
             total_arquivos = len(uploaded_files)
             
             with st.status("⛏️ Minerando...", expanded=True) as status_box:
-                for i, f in enumerate(uploaded_files):
-                    if i % 50 == 0: gc.collect()
-                    if total_arquivos > 0 and i % max(1, int(total_arquivos * 0.02)) == 0:
-                        progresso_bar.progress((i + 1) / total_arquivos)
-                        status_text.text(f"⛏️ Lendo arquivo {i+1}/{total_arquivos}: {f.name}")
-                    
-                    try:
-                        f.seek(0)
-                        todos_xmls = extrair_recursivo(f, f.name)
-                        for name, xml_data in todos_xmls:
-                            res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                            if res:
-                                key = res["Chave"]
-                                # Salva fisicamente no HD para zerar a memória RAM!
-                                caminho_pasta = os.path.join(WORKSPACE_DIR, res['Pasta'])
-                                os.makedirs(caminho_pasta, exist_ok=True)
-                                caminho_completo = os.path.join(caminho_pasta, name)
-                                
-                                with open(caminho_completo, "wb") as f_xml:
-                                    f_xml.write(xml_data)
-                                
-                                if key in lote_dict:
-                                    if res["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_dict[key] = (res, is_p)
-                                else:
-                                    lote_dict[key] = (res, is_p)
-                            del xml_data
-                        del todos_xmls
-                    except: continue
+                open_zips = {}
+                zip_todos_path = os.path.join(WORKSPACE_DIR, "garimpo_todos_xml.zip")
                 
-                # EMPACOTAMENTO FINAL TOTALMENTE DESVINCULADO DA MEMÓRIA
-                status_text.text("📦 Compactando arquivos finais (Isso pode levar um minuto)...")
-                shutil.make_archive('garimpo_organizado', 'zip', WORKSPACE_DIR)
+                # Abre o ZIP geral para gravação contínua
+                with zipfile.ZipFile(zip_todos_path, "w", zipfile.ZIP_DEFLATED) as z_todos:
+                    for i, f in enumerate(uploaded_files):
+                        if i % 50 == 0: gc.collect()
+                        if total_arquivos > 0 and i % max(1, int(total_arquivos * 0.02)) == 0:
+                            progresso_bar.progress((i + 1) / total_arquivos)
+                            status_text.text(f"⛏️ Processando arquivo {i+1}/{total_arquivos}: {f.name}")
+                        
+                        try:
+                            f.seek(0)
+                            todos_xmls = extrair_recursivo(f, f.name)
+                            
+                            for name, xml_data in todos_xmls:
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    key = res["Chave"]
+                                    if key in lote_dict:
+                                        if res["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_dict[key] = (res, is_p)
+                                    else:
+                                        lote_dict[key] = (res, is_p)
+                                        
+                                        # Escreve no ZIP de "TODOS"
+                                        z_todos.writestr(name, xml_data)
+                                        
+                                        # Escreve no ZIP Mensal Organizado
+                                        zip_month_name = f"garimpo_organizado_{res['Ano']}_{res['Mes']}.zip"
+                                        zip_month_path = os.path.join(WORKSPACE_DIR, zip_month_name)
+                                        
+                                        if zip_month_name not in open_zips:
+                                            open_zips[zip_month_name] = zipfile.ZipFile(zip_month_path, "a", zipfile.ZIP_DEFLATED)
+                                        
+                                        open_zips[zip_month_name].writestr(f"{res['Pasta']}/{name}", xml_data)
+                                        
+                                del xml_data 
+                            del todos_xmls
+                        except: continue
                 
-                with zipfile.ZipFile('todos_xml.zip', 'w', zipfile.ZIP_DEFLATED) as z_todos:
-                    for root, dirs, files in os.walk(WORKSPACE_DIR):
-                        for file in files:
-                            if file.lower().endswith('.xml'):
-                                z_todos.write(os.path.join(root, file), arcname=file)
-
-                status_box.update(label="✅ Concluído!", state="complete", expanded=False)
+                # Fecha os zips mensais abertos
+                for z in open_zips.values(): z.close()
+                
+                status_box.update(label="✅ Concluído com Sucesso!", state="complete", expanded=False)
                 progresso_bar.empty(); status_text.empty()
 
             rel_list, audit_map, canc_list, inut_list, aut_list, geral_list = [], {}, [], [], [], []
@@ -750,37 +732,34 @@ if st.session_state['confirmado']:
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
                 with st.spinner("Adicionando..."):
-                    os.makedirs(WORKSPACE_DIR, exist_ok=True)
-                    for f in extra_files:
-                        try:
-                            f.seek(0)
-                            todos_xmls = extrair_recursivo(f, f.name)
-                            for name, xml_data in todos_xmls:
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res:
-                                    ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
-                                    if not ja_existe:
-                                        caminho_pasta = os.path.join(WORKSPACE_DIR, res['Pasta'])
-                                        os.makedirs(caminho_pasta, exist_ok=True)
-                                        caminho_completo = os.path.join(caminho_pasta, name)
-                                        with open(caminho_completo, "wb") as f_xml:
-                                            f_xml.write(xml_data)
-                                    
-                                    st.session_state['relatorio'].append(res)
-                                del xml_data
-                        except: continue
+                    zip_todos_path = os.path.join(WORKSPACE_DIR, "garimpo_todos_xml.zip")
+                    open_zips = {}
                     
-                    # REFAZ OS ZIPS APÓS ADICIONAR
-                    if os.path.exists('garimpo_organizado.zip'): os.remove('garimpo_organizado.zip')
-                    shutil.make_archive('garimpo_organizado', 'zip', WORKSPACE_DIR)
-                    if os.path.exists('todos_xml.zip'): os.remove('todos_xml.zip')
-                    with zipfile.ZipFile('todos_xml.zip', 'w', zipfile.ZIP_DEFLATED) as z_todos:
-                        for root, dirs, files in os.walk(WORKSPACE_DIR):
-                            for file in files:
-                                if file.lower().endswith('.xml'):
-                                    z_todos.write(os.path.join(root, file), arcname=file)
-
-                    st.session_state['zip_pronto'] = None 
+                    with zipfile.ZipFile(zip_todos_path, "a", zipfile.ZIP_DEFLATED) as z_todos:
+                        for f in extra_files:
+                            try:
+                                f.seek(0)
+                                todos_xmls = extrair_recursivo(f, f.name)
+                                for name, xml_data in todos_xmls:
+                                    res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                    if res:
+                                        ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
+                                        if not ja_existe:
+                                            # Adiciona no Zip Todos
+                                            z_todos.writestr(name, xml_data)
+                                            
+                                            # Adiciona no Zip Mensal
+                                            zip_month_name = f"garimpo_organizado_{res['Ano']}_{res['Mes']}.zip"
+                                            zip_month_path = os.path.join(WORKSPACE_DIR, zip_month_name)
+                                            if zip_month_name not in open_zips:
+                                                open_zips[zip_month_name] = zipfile.ZipFile(zip_month_path, "a", zipfile.ZIP_DEFLATED)
+                                            open_zips[zip_month_name].writestr(f"{res['Pasta']}/{name}", xml_data)
+                                            
+                                        st.session_state['relatorio'].append(res)
+                                    del xml_data
+                            except: continue
+                    
+                    for z in open_zips.values(): z.close()
                     
                     lote_recalc = {}
                     for item in st.session_state['relatorio']:
@@ -844,7 +823,7 @@ if st.session_state['confirmado']:
 
         st.divider()
 
-        # --- EXCEL FINAL COM DOWNLOAD ---
+        # --- EXCEL FINAL MASTER ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
             st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo', index=False)
@@ -855,61 +834,56 @@ if st.session_state['confirmado']:
             st.session_state['df_autorizadas'].to_excel(writer, sheet_name='Autorizadas', index=False)
             if not st.session_state['df_divergencias'].empty: st.session_state['df_divergencias'].to_excel(writer, sheet_name='Divergencias', index=False)
 
-        col1, col2, col3 = st.columns(3)
+        st.markdown("### 📥 DOWNLOADS OFICIAIS (SISTEMA ANTI-QUEDA)")
+        st.info("Para garantir a estabilidade com arquivos +300MB, os ZIPs foram gerados automaticamente no HD do servidor durante a leitura.")
         
-        if os.path.exists('garimpo_organizado.zip'):
-            with open('garimpo_organizado.zip', 'rb') as f_org:
-                with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", data=f_org, file_name="garimpo_organizado.zip", mime="application/zip", use_container_width=True)
-        if os.path.exists('todos_xml.zip'):
-            with open('todos_xml.zip', 'rb') as f_todos:
-                with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", data=f_todos, file_name="todos_xml.zip", mime="application/zip", use_container_width=True)
+        # Painel Final: Excel, Mês Organizado e Todos Soltos
+        col_esq, col_dir = st.columns(2)
+        
+        with col_esq:
+            st.download_button("📊 1. BAIXAR RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
             
-        with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
-
-        st.divider()
-
-        # --- DOWNLOAD FRACIONADO (POR MÊS) DIRETO DO HD ---
-        st.markdown("### 📂 DOWNLOAD FRACIONADO (POR MÊS)")
-        st.info("💡 Use esta opção se o botão 'BAIXAR ORGANIZADO' acima travar o sistema. O arquivo será dividido por mês.")
-        
-        if os.path.exists(WORKSPACE_DIR):
-            anos_meses = sorted(list(set([(r.get("Ano", "0000"), r.get("Mes", "00")) for r in st.session_state['relatorio'] if r.get("Ano", "0000") != "0000"])))
-            if anos_meses:
-                opcoes_meses = ["--- SELECIONE ---"] + [f"{a}/{m}" for a, m in anos_meses]
-                mes_selecionado = st.selectbox("Escolha o Ano/Mês para baixar:", opcoes_meses)
-                
-                if mes_selecionado != "--- SELECIONE ---":
-                    ano_sel, mes_sel = mes_selecionado.split("/")
-                    qtd_arquivos_mes = sum(1 for r in st.session_state['relatorio'] if r.get("Ano") == ano_sel and r.get("Mes") == mes_sel)
-                    st.write(f"📦 Arquivos encontrados em **{mes_selecionado}**: {qtd_arquivos_mes}")
+            st.markdown("---")
+            st.markdown("**📂 2. DOWNLOAD ORGANIZADO (POR MÊS)**")
+            if os.path.exists(WORKSPACE_DIR):
+                anos_meses = sorted(list(set([(r.get("Ano", "0000"), r.get("Mes", "00")) for r in st.session_state['relatorio'] if r.get("Ano", "0000") != "0000"])))
+                if anos_meses:
+                    opcoes_meses = ["--- SELECIONE ---"] + [f"{a}/{m}" for a, m in anos_meses]
+                    mes_selecionado = st.selectbox("Escolha o Ano/Mês:", opcoes_meses)
                     
-                    if st.button("⚙️ PREPARAR ZIP DESTE MÊS"):
-                        with st.spinner(f"Extraindo e empacotando {qtd_arquivos_mes} arquivos..."):
-                            nome_arquivo_mes = f"garimpo_{ano_sel}_{mes_sel}.zip"
-                            if os.path.exists(nome_arquivo_mes): os.remove(nome_arquivo_mes)
-                            
-                            with zipfile.ZipFile(nome_arquivo_mes, "w", zipfile.ZIP_DEFLATED) as z_mes:
-                                for root, dirs, files in os.walk(WORKSPACE_DIR):
-                                    path_str = root.replace('\\', '/')
-                                    if f"/{ano_sel}/{mes_sel}" in path_str + "/":
-                                        for file in files:
-                                            if file.lower().endswith('.xml'):
-                                                z_mes.write(os.path.join(root, file), arcname=file)
-                            
-                            st.session_state['zip_pronto'] = nome_arquivo_mes
-                            st.rerun()
-                
-                if st.session_state.get('zip_pronto') and os.path.exists(st.session_state['zip_pronto']):
-                    st.success("✅ Arquivo pronto para download!")
-                    with open(st.session_state['zip_pronto'], 'rb') as f_mes:
-                        st.download_button(
-                            f"📥 BAIXAR {st.session_state['zip_pronto']}", 
-                            data=f_mes, 
-                            file_name=st.session_state['zip_pronto'], 
-                            mime="application/zip", 
-                            use_container_width=True
-                        )
+                    if mes_selecionado != "--- SELECIONE ---":
+                        ano_sel, mes_sel = mes_selecionado.split("/")
+                        nome_arquivo_mes = f"garimpo_organizado_{ano_sel}_{mes_sel}.zip"
+                        caminho_arquivo = os.path.join(WORKSPACE_DIR, nome_arquivo_mes)
+                        
+                        if os.path.exists(caminho_arquivo):
+                            tamanho_mb = os.path.getsize(caminho_arquivo) / (1024 * 1024)
+                            with open(caminho_arquivo, "rb") as f_mes:
+                                st.download_button(
+                                    f"📥 BAIXAR {ano_sel}/{mes_sel} ORGANIZADO ({tamanho_mb:.1f} MB)", 
+                                    data=f_mes, 
+                                    file_name=nome_arquivo_mes, 
+                                    mime="application/zip", 
+                                    use_container_width=True
+                                )
+                                
+        with col_dir:
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            st.markdown("**📦 3. DOWNLOAD BRUTO (TODOS OS XMLs JUNTOS)**")
+            st.write("Baixe todos os XMLs soltos num único ZIP (ideal para o validador da Sefaz).")
+            zip_todos_path = os.path.join(WORKSPACE_DIR, "garimpo_todos_xml.zip")
+            if os.path.exists(zip_todos_path):
+                tamanho_todos_mb = os.path.getsize(zip_todos_path) / (1024 * 1024)
+                with open(zip_todos_path, "rb") as f_todos:
+                    st.download_button(
+                        f"📥 BAIXAR TODOS OS XMLs ({tamanho_todos_mb:.1f} MB)", 
+                        data=f_todos, 
+                        file_name="garimpo_todos_xml.zip", 
+                        mime="application/zip", 
+                        use_container_width=True
+                    )
         
+        st.divider()
         if st.button("⛏️ NOVO GARIMPO"):
             limpar_arquivos_temp()
             st.session_state.clear(); st.rerun()
