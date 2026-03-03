@@ -805,15 +805,12 @@ if st.session_state['confirmado']:
 
         col1, col2, col3 = st.columns(3)
         
-        # Leitura dos ZIPs gravados no disco
+        # STREAMING DOS ARQUIVOS PARA EVITAR ERRO DE MEMÓRIA (DOWNLOAD DIRETO DO DISCO)
         if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
             with open('z_org.zip', 'rb') as f_org:
-                bytes_org = f_org.read()
+                with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", f_org, "garimpo_organizado.zip", mime="application/zip", use_container_width=True)
             with open('z_todos.zip', 'rb') as f_todos:
-                bytes_todos = f_todos.read()
-                
-            with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", bytes_org, "garimpo_organizado.zip", use_container_width=True)
-            with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", bytes_todos, "todos_xml.zip", use_container_width=True)
+                with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", f_todos, "todos_xml.zip", mime="application/zip", use_container_width=True)
             
         with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
