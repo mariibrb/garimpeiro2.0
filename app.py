@@ -103,7 +103,7 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
     resumo = {
         "Arquivo": nome_puro, "Chave": "", "Tipo": "Outros", "Série": "0",
         "Número": 0, "Status": "NORMAIS", "Pasta": "",
-        "Valor": 0.0, "Conteúdo": content_bytes, "Ano": "0000", "Mes": "00",
+        "Valor": 0.0, "Conteúdo": b"", "Ano": "0000", "Mes": "00", # OTIMIZAÇÃO: Remove o texto do XML da RAM
         "Operacao": "SAIDA", "Data_Emissao": "",
         "CNPJ_Emit": "", "Nome_Emit": "", "Doc_Dest": "", "Nome_Dest": ""
     }
@@ -187,9 +187,8 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         return resumo, is_p
     except: return None, False
 
-# --- FUNÇÃO RECURSIVA ---
+# --- FUNÇÃO RECURSIVA OTIMIZADA PARA MEMÓRIA (GERADOR) ---
 def extrair_recursivo(conteudo_bytes, nome_arquivo):
-    itens = []
     if nome_arquivo.lower().endswith('.zip'):
         try:
             with zipfile.ZipFile(io.BytesIO(conteudo_bytes)) as z:
@@ -197,13 +196,12 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
                     if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): continue
                     sub_conteudo = z.read(sub_nome)
                     if sub_nome.lower().endswith('.zip'):
-                        itens.extend(extrair_recursivo(sub_conteudo, sub_nome))
+                        yield from extrair_recursivo(sub_conteudo, sub_nome)
                     elif sub_nome.lower().endswith('.xml'):
-                        itens.append((os.path.basename(sub_nome), sub_conteudo))
+                        yield (os.path.basename(sub_nome), sub_conteudo)
         except: pass
     elif nome_arquivo.lower().endswith('.xml'):
-        itens.append((os.path.basename(nome_arquivo), conteudo_bytes))
-    return itens
+        yield (os.path.basename(nome_arquivo), conteudo_bytes)
 
 # --- LIMPEZA DE ARQUIVOS TEMPORÁRIOS ---
 def limpar_arquivos_temp():
@@ -288,6 +286,7 @@ if st.session_state['confirmado']:
                         try:
                             f.seek(0)
                             content = f.read()
+                            # Agora extrair_recursivo não cria a lista na memória, ele gera uma a uma
                             todos_xmls = extrair_recursivo(content, f.name)
                             del content
                             
@@ -302,6 +301,7 @@ if st.session_state['confirmado']:
                                         caminho_completo = f"{res['Pasta']}/{name}"
                                         z_org.writestr(caminho_completo, xml_data)
                                         z_todos.writestr(name, xml_data)
+                                del xml_data # Limpa a nota atual da memória imediatamente
                             del todos_xmls
                         except: continue
                 
@@ -728,6 +728,7 @@ if st.session_state['confirmado']:
                                                 z_todos.writestr(name, xml_data)
                                             
                                             st.session_state['relatorio'].append(res)
+                                        del xml_data
                                 except: continue
                     
                     lote_recalc = {}
