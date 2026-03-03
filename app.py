@@ -504,6 +504,94 @@ if st.session_state['confirmado']:
                             })
                             st.success(f"✅ Notas marcadas como Inutilizadas com sucesso!")
                             st.rerun()
+
+        # =====================================================================
+        # MÓDULO: DESFAZER INUTILIZAÇÃO MANUAL
+        # =====================================================================
+        inut_manuais = [item for item in st.session_state['relatorio'] if item.get('Arquivo') == "REGISTRO_MANUAL"]
+        if inut_manuais:
+            with st.expander("🔙 DESFAZER INUTILIZAÇÃO MANUAL"):
+                opcoes_desfazer = []
+                for item in inut_manuais:
+                    opcoes_desfazer.append(f"{item['Tipo']} | Série {item['Série']} | Nota {item['Número']}")
+                
+                desfazer_selecionados = st.multiselect("Selecione as notas para REMOVER da lista de inutilizadas:", opcoes_desfazer)
+                
+                if st.button("DESFAZER E ATUALIZAR TABELAS"):
+                    if desfazer_selecionados:
+                        with st.spinner("Removendo registros..."):
+                            chaves_para_remover = []
+                            for selecao in desfazer_selecionados:
+                                partes = selecao.split(" | ")
+                                tipo_man = partes[0].strip()
+                                serie_man = partes[1].replace("Série", "").strip()
+                                nota_man = int(partes[2].replace("Nota", "").strip())
+                                chaves_para_remover.append(f"MANUAL_INUT_{tipo_man}_{serie_man}_{nota_man}")
+                            
+                            # Filtra a lista mestra para remover os itens selecionados
+                            st.session_state['relatorio'] = [item for item in st.session_state['relatorio'] if item['Chave'] not in chaves_para_remover]
+
+                            # RECALCULA TUDO APÓS A REMOÇÃO
+                            lote_recalc = {}
+                            for item in st.session_state['relatorio']:
+                                key = item["Chave"]
+                                is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+                                if key in lote_recalc:
+                                    if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: lote_recalc[key] = (item, is_p)
+                                else: lote_recalc[key] = (item, is_p)
+
+                            audit_map, canc_list, inut_list, aut_list, geral_list = {}, [], [], [], []
+                            for k, (res, is_p) in lote_recalc.items():
+                                origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})" if is_p else f"TERCEIROS ({res['Operacao']})"
+                                
+                                registro_detalhado = {
+                                    "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
+                                    "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
+                                    "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
+                                    "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                                    "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
+                                }
+
+                                if res["Status"] == "INUTILIZADOS":
+                                    r = res.get("Range", (res["Número"], res["Número"]))
+                                    for n in range(r[0], r[1] + 1):
+                                        item_inut = registro_detalhado.copy(); item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0}); geral_list.append(item_inut)
+                                else:
+                                    geral_list.append(registro_detalhado)
+
+                                if is_p:
+                                    sk = (res["Tipo"], res["Série"])
+                                    if sk not in audit_map: audit_map[sk] = {"nums": set(), "valor": 0.0}
+                                    if res["Status"] == "INUTILIZADOS":
+                                        r = res.get("Range", (res["Número"], res["Número"]))
+                                        for n in range(r[0], r[1] + 1):
+                                            audit_map[sk]["nums"].add(n); inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+                                    else:
+                                        if res["Número"] > 0:
+                                            audit_map[sk]["nums"].add(res["Número"])
+                                            if res["Status"] == "CANCELADOS":
+                                                canc_list.append(registro_detalhado)
+                                            elif res["Status"] == "NORMAIS":
+                                                aut_list.append(registro_detalhado)
+                                            audit_map[sk]["valor"] += res["Valor"]
+
+                            res_final, fal_final = [], []
+                            for (t, s), dados in audit_map.items():
+                                ns = sorted(list(dados["nums"]))
+                                if ns:
+                                    n_min, n_max = ns[0], ns[-1]
+                                    res_final.append({"Documento": t, "Série": s, "Início": n_min, "Fim": n_max, "Quantidade": len(ns), "Valor Contábil (R$)": round(dados["valor"], 2)})
+                                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
+                                        fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+
+                            st.session_state.update({
+                                'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final), 
+                                'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 
+                                'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
+                                'st_counts': {"CANCELADOS": len(canc_list), "INUTILIZADOS": len(inut_list), "AUTORIZADAS": len(aut_list)}
+                            })
+                            st.success(f"✅ Inutilização manual desfeita com sucesso!")
+                            st.rerun()
             st.divider()
         # =====================================================================
         
