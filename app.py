@@ -378,7 +378,8 @@ if st.session_state['confirmado']:
         col_audit, col_canc, col_inut = st.columns(3)
         
         with col_audit:
-            st.markdown("### ⚠️ BURACOS")
+            qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
+            st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else:
@@ -504,6 +505,7 @@ if st.session_state['confirmado']:
                             })
                             st.success(f"✅ Notas marcadas como Inutilizadas com sucesso!")
                             st.rerun()
+            st.divider()
 
         # =====================================================================
         # MÓDULO: DESFAZER INUTILIZAÇÃO MANUAL
@@ -548,7 +550,7 @@ if st.session_state['confirmado']:
                                     "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
                                     "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
                                     "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
-                                    "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
+                                    "Doc Destinatário": res["Doc Destinatário"], "Nome Destinatário": res["Nome Destinatário"],
                                     "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
                                 }
 
