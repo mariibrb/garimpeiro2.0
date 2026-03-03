@@ -212,6 +212,9 @@ def extrair_recursivo(conteudo_ou_file, nome_arquivo):
 def limpar_arquivos_temp():
     if os.path.exists('z_org.zip'): os.remove('z_org.zip')
     if os.path.exists('z_todos.zip'): os.remove('z_todos.zip')
+    for f in os.listdir('.'):
+        if f.startswith('garimpo_') and f.endswith('.zip'):
+            os.remove(f)
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
@@ -246,12 +249,13 @@ with st.container():
 
 st.markdown("---")
 
-keys_to_init = ['garimpo_ok', 'confirmado', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'validation_done']
+keys_to_init = ['garimpo_ok', 'confirmado', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'validation_done', 'zip_pronto']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
         elif k == 'relatorio': st.session_state[k] = []
         elif k == 'st_counts': st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
+        elif k == 'zip_pronto': st.session_state[k] = None
         else: st.session_state[k] = False
 
 with st.sidebar:
@@ -321,7 +325,8 @@ if st.session_state['confirmado']:
                     "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
                     "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
                     "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
-                    "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
+                    "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"],
+                    "Ano": res["Ano"], "Mes": res["Mes"] # Guardado em memória para agrupar os meses depois
                 }
 
                 if res["Status"] == "INUTILIZADOS":
@@ -734,6 +739,8 @@ if st.session_state['confirmado']:
                                         del xml_data
                                 except: continue
                     
+                    st.session_state['zip_pronto'] = None # Reseta o botão de download de mês
+                    
                     lote_recalc = {}
                     for item in st.session_state['relatorio']:
                         key = item["Chave"]
@@ -820,22 +827,47 @@ if st.session_state['confirmado']:
 
         st.divider()
 
-        # --- DOWNLOAD SELETIVO ---
-        st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
+        # --- DOWNLOAD FRACIONADO (POR MÊS) ---
+        st.markdown("### 📂 DOWNLOAD FRACIONADO (POR MÊS)")
+        st.info("💡 Use esta opção se o botão 'BAIXAR ORGANIZADO' acima travar o sistema. O arquivo será dividido por mês.")
+        
         if os.path.exists('z_org.zip'):
-            with zipfile.ZipFile('z_org.zip', 'r') as z_read:
-                todas_pastas = sorted(list(set([os.path.dirname(k) for k in z_read.namelist()])))
-                if todas_pastas:
-                    pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
-                    if pasta_selecionada != "--- SELECIONE ---":
-                        buf_seletivo = io.BytesIO()
-                        cont_selecionados = 0
-                        with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_DEFLATED) as z_sel:
-                            for item_name in z_read.namelist():
-                                if item_name.startswith(pasta_selecionada):
-                                    z_sel.writestr(os.path.basename(item_name), z_read.read(item_name))
-                                    cont_selecionados += 1
-                        st.download_button(f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", buf_seletivo.getvalue(), f"{pasta_selecionada.replace('/', '_')}.zip", use_container_width=True)
+            anos_meses = sorted(list(set([(r.get("Ano", "0000"), r.get("Mes", "00")) for r in st.session_state['relatorio'] if r.get("Ano", "0000") != "0000"])))
+            if anos_meses:
+                opcoes_meses = ["--- SELECIONE ---"] + [f"{a}/{m}" for a, m in anos_meses]
+                mes_selecionado = st.selectbox("Escolha o Ano/Mês para baixar:", opcoes_meses)
+                
+                if mes_selecionado != "--- SELECIONE ---":
+                    ano_sel, mes_sel = mes_selecionado.split("/")
+                    qtd_arquivos_mes = sum(1 for r in st.session_state['relatorio'] if r.get("Ano") == ano_sel and r.get("Mes") == mes_sel)
+                    st.write(f"📦 Arquivos encontrados em **{mes_selecionado}**: {qtd_arquivos_mes}")
+                    
+                    if st.button("⚙️ PREPARAR ZIP DESTE MÊS"):
+                        with st.spinner(f"Extraindo e empacotando {qtd_arquivos_mes} arquivos..."):
+                            nome_arquivo_mes = f"garimpo_{ano_sel}_{mes_sel}.zip"
+                            if os.path.exists(nome_arquivo_mes):
+                                os.remove(nome_arquivo_mes)
+                            
+                            with zipfile.ZipFile('z_org.zip', 'r') as z_read:
+                                with zipfile.ZipFile(nome_arquivo_mes, "w", zipfile.ZIP_DEFLATED) as z_mes:
+                                    for item_name in z_read.namelist():
+                                        # Filtra apenas os caminhos que contém o ano/mês selecionado
+                                        if f"/{ano_sel}/{mes_sel}/" in item_name:
+                                            # Salva o arquivo XML "solto" no novo ZIP, sem as pastas, para facilitar o uso
+                                            z_mes.writestr(os.path.basename(item_name), z_read.read(item_name))
+                            
+                            st.session_state['zip_pronto'] = nome_arquivo_mes
+                            st.rerun()
+                
+                if st.session_state.get('zip_pronto') and os.path.exists(st.session_state['zip_pronto']):
+                    st.success("✅ Arquivo pronto para download!")
+                    st.download_button(
+                        f"📥 BAIXAR {st.session_state['zip_pronto']}", 
+                        data=open(st.session_state['zip_pronto'], 'rb'), 
+                        file_name=st.session_state['zip_pronto'], 
+                        mime="application/zip", 
+                        use_container_width=True
+                    )
         
         if st.button("⛏️ NOVO GARIMPO"):
             limpar_arquivos_temp()
