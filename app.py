@@ -205,6 +205,11 @@ def extrair_recursivo(conteudo_bytes, nome_arquivo):
         itens.append((os.path.basename(nome_arquivo), conteudo_bytes))
     return itens
 
+# --- LIMPEZA DE ARQUIVOS TEMPORÁRIOS ---
+def limpar_arquivos_temp():
+    if os.path.exists('z_org.zip'): os.remove('z_org.zip')
+    if os.path.exists('z_todos.zip'): os.remove('z_todos.zip')
+
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
@@ -238,13 +243,11 @@ with st.container():
 
 st.markdown("---")
 
-keys_to_init = ['garimpo_ok', 'confirmado', 'z_org', 'z_todos', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'dict_arquivos', 'validation_done']
+keys_to_init = ['garimpo_ok', 'confirmado', 'relatorio', 'df_resumo', 'df_faltantes', 'df_canceladas', 'df_inutilizadas', 'df_autorizadas', 'df_geral', 'df_divergencias', 'st_counts', 'validation_done']
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: st.session_state[k] = pd.DataFrame()
-        elif 'z_' in k: st.session_state[k] = None
         elif k == 'relatorio': st.session_state[k] = []
-        elif k == 'dict_arquivos': st.session_state[k] = {}
         elif k == 'st_counts': st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
         else: st.session_state[k] = False
 
@@ -257,23 +260,24 @@ with st.sidebar:
         if st.button("✅ LIBERAR OPERAÇÃO"): st.session_state['confirmado'] = True
     st.divider()
     if st.button("🗑️ RESETAR SISTEMA"):
+        limpar_arquivos_temp()
         st.session_state.clear(); st.rerun()
 
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
         uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
+            limpar_arquivos_temp() # Limpa resíduos de processamentos anteriores
             lote_dict = {}
-            dict_fisico = {}
-            buf_org, buf_todos = io.BytesIO(), io.BytesIO()
             
             progresso_bar = st.progress(0)
             status_text = st.empty()
             total_arquivos = len(uploaded_files)
             
             with st.status("⛏️ Minerando...", expanded=True) as status_box:
-                with zipfile.ZipFile(buf_org, "w", zipfile.ZIP_STORED) as z_org, \
-                     zipfile.ZipFile(buf_todos, "w", zipfile.ZIP_STORED) as z_todos:
+                # GRAVAÇÃO DIRETA NO DISCO (Bypass do erro de memória)
+                with zipfile.ZipFile('z_org.zip', "w", zipfile.ZIP_DEFLATED) as z_org, \
+                     zipfile.ZipFile('z_todos.zip', "w", zipfile.ZIP_DEFLATED) as z_todos:
                     
                     for i, f in enumerate(uploaded_files):
                         if i % 50 == 0: gc.collect()
@@ -298,7 +302,6 @@ if st.session_state['confirmado']:
                                         caminho_completo = f"{res['Pasta']}/{name}"
                                         z_org.writestr(caminho_completo, xml_data)
                                         z_todos.writestr(name, xml_data)
-                                        dict_fisico[caminho_completo] = xml_data
                             del todos_xmls
                         except: continue
                 
@@ -354,8 +357,7 @@ if st.session_state['confirmado']:
                         fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
 
             st.session_state.update({
-                'z_org': buf_org.getvalue(), 'z_todos': buf_todos.getvalue(), 
-                'relatorio': rel_list, 'dict_arquivos': dict_fisico,
+                'relatorio': rel_list,
                 'df_resumo': pd.DataFrame(res_final), 'df_faltantes': pd.DataFrame(fal_final), 
                 'df_canceladas': pd.DataFrame(canc_list), 'df_inutilizadas': pd.DataFrame(inut_list), 
                 'df_autorizadas': pd.DataFrame(aut_list), 'df_geral': pd.DataFrame(geral_list),
@@ -550,7 +552,7 @@ if st.session_state['confirmado']:
                                     "Origem": origem_label, "Operação": res["Operacao"], "Modelo": res["Tipo"], 
                                     "Série": res["Série"], "Nota": res["Número"], "Data Emissão": res["Data_Emissao"],
                                     "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
-                                    "Doc Destinatário": res["Doc Destinatário"], "Nome Destinatário": res["Nome Destinatário"],
+                                    "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
                                     "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"]
                                 }
 
@@ -707,16 +709,26 @@ if st.session_state['confirmado']:
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
                 with st.spinner("Adicionando..."):
-                    for f in extra_files:
-                        try:
-                            content = f.read()
-                            todos_xmls = extrair_recursivo(content, f.name)
-                            for name, xml_data in todos_xmls:
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res:
-                                    st.session_state['relatorio'].append(res)
-                                    st.session_state['dict_arquivos'][f"{res['Pasta']}/{name}"] = xml_data
-                        except: continue
+                    # Processamos os novos arquivos físicos em modo "append" (a)
+                    if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
+                        with zipfile.ZipFile('z_org.zip', "a", zipfile.ZIP_DEFLATED) as z_org, \
+                             zipfile.ZipFile('z_todos.zip', "a", zipfile.ZIP_DEFLATED) as z_todos:
+                            for f in extra_files:
+                                try:
+                                    content = f.read()
+                                    todos_xmls = extrair_recursivo(content, f.name)
+                                    for name, xml_data in todos_xmls:
+                                        res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                        if res:
+                                            # Checa se já existe para não duplicar no ZIP físico
+                                            ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
+                                            if not ja_existe:
+                                                caminho_completo = f"{res['Pasta']}/{name}"
+                                                z_org.writestr(caminho_completo, xml_data)
+                                                z_todos.writestr(name, xml_data)
+                                            
+                                            st.session_state['relatorio'].append(res)
+                                except: continue
                     
                     lote_recalc = {}
                     for item in st.session_state['relatorio']:
@@ -792,28 +804,40 @@ if st.session_state['confirmado']:
             if not st.session_state['df_divergencias'].empty: st.session_state['df_divergencias'].to_excel(writer, sheet_name='Divergencias', index=False)
 
         col1, col2, col3 = st.columns(3)
-        with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", st.session_state['z_org'], "garimpo_organizado.zip", use_container_width=True)
-        with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", st.session_state['z_todos'], "todos_xml.zip", use_container_width=True)
+        
+        # Leitura dos ZIPs gravados no disco
+        if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
+            with open('z_org.zip', 'rb') as f_org:
+                bytes_org = f_org.read()
+            with open('z_todos.zip', 'rb') as f_todos:
+                bytes_todos = f_todos.read()
+                
+            with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", bytes_org, "garimpo_organizado.zip", use_container_width=True)
+            with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", bytes_todos, "todos_xml.zip", use_container_width=True)
+            
         with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
         st.divider()
 
         # --- DOWNLOAD SELETIVO ---
         st.markdown("### 📂 DOWNLOAD SELETIVO POR PASTA")
-        todas_pastas = sorted(list(set([os.path.dirname(k) for k in st.session_state['dict_arquivos'].keys()])))
-        if todas_pastas:
-            pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
-            if pasta_selecionada != "--- SELECIONE ---":
-                buf_seletivo = io.BytesIO()
-                cont_selecionados = 0
-                with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_STORED) as z_sel:
-                    for caminho, dados in st.session_state['dict_arquivos'].items():
-                        if caminho.startswith(pasta_selecionada):
-                            z_sel.writestr(os.path.basename(caminho), dados)
-                            cont_selecionados += 1
-                st.download_button(f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", buf_seletivo.getvalue(), f"{pasta_selecionada.replace('/', '_')}.zip", use_container_width=True)
+        if os.path.exists('z_org.zip'):
+            with zipfile.ZipFile('z_org.zip', 'r') as z_read:
+                todas_pastas = sorted(list(set([os.path.dirname(k) for k in z_read.namelist()])))
+                if todas_pastas:
+                    pasta_selecionada = st.selectbox("Escolha a pasta fiscal para baixar:", ["--- SELECIONE ---"] + todas_pastas)
+                    if pasta_selecionada != "--- SELECIONE ---":
+                        buf_seletivo = io.BytesIO()
+                        cont_selecionados = 0
+                        with zipfile.ZipFile(buf_seletivo, "w", zipfile.ZIP_DEFLATED) as z_sel:
+                            for item_name in z_read.namelist():
+                                if item_name.startswith(pasta_selecionada):
+                                    z_sel.writestr(os.path.basename(item_name), z_read.read(item_name))
+                                    cont_selecionados += 1
+                        st.download_button(f"📥 BAIXAR {cont_selecionados} ARQUIVOS DE: {pasta_selecionada}", buf_seletivo.getvalue(), f"{pasta_selecionada.replace('/', '_')}.zip", use_container_width=True)
         
         if st.button("⛏️ NOVO GARIMPO"):
+            limpar_arquivos_temp()
             st.session_state.clear(); st.rerun()
 else:
     st.warning("👈 Insira o CNPJ na barra lateral para começar.")
