@@ -215,11 +215,9 @@ def extrair_recursivo(conteudo_ou_file, nome_arquivo):
                     if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): continue
                     
                     if sub_nome.lower().endswith('.zip'):
-                        # MÁGICA AQUI: Extrai o ZIP interno pro disco em vez de jogar na RAM
                         temp_path = z.extract(sub_nome, path=TEMP_EXTRACT_DIR)
                         with open(temp_path, 'rb') as f_temp:
                             yield from extrair_recursivo(f_temp, sub_nome)
-                        # Apaga o arquivo físico temporário para não entupir o disco
                         try: os.remove(temp_path)
                         except: pass
                     elif sub_nome.lower().endswith('.xml'):
@@ -299,7 +297,7 @@ if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
         uploaded_files = st.file_uploader("Arraste seus arquivos aqui:", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
-            limpar_arquivos_temp() # Limpa resíduos de processamentos anteriores
+            limpar_arquivos_temp() 
             lote_dict = {}
             
             progresso_bar = st.progress(0)
@@ -307,7 +305,6 @@ if st.session_state['confirmado']:
             total_arquivos = len(uploaded_files)
             
             with st.status("⛏️ Minerando...", expanded=True) as status_box:
-                # GRAVAÇÃO DIRETA NO DISCO
                 with zipfile.ZipFile('z_org.zip', "w", zipfile.ZIP_DEFLATED) as z_org, \
                      zipfile.ZipFile('z_todos.zip', "w", zipfile.ZIP_DEFLATED) as z_todos:
                     
@@ -833,12 +830,12 @@ if st.session_state['confirmado']:
 
         col1, col2, col3 = st.columns(3)
         
-        # STREAMING DOS ARQUIVOS PARA EVITAR ERRO DE MEMÓRIA (DOWNLOAD DIRETO DO DISCO)
+        # STREAMING DOS ARQUIVOS PARA EVITAR ERRO DE MEMÓRIA
         if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
-            with col1: 
-                st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", data=open('z_org.zip', 'rb'), file_name="garimpo_organizado.zip", mime="application/zip", use_container_width=True)
-            with col2: 
-                st.download_button("📦 BAIXAR TODOS (SÓ XML)", data=open('z_todos.zip', 'rb'), file_name="todos_xml.zip", mime="application/zip", use_container_width=True)
+            with open('z_org.zip', 'rb') as f_org:
+                with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", data=f_org, file_name="garimpo_organizado.zip", mime="application/zip", use_container_width=True)
+            with open('z_todos.zip', 'rb') as f_todos:
+                with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", data=f_todos, file_name="todos_xml.zip", mime="application/zip", use_container_width=True)
             
         with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
@@ -869,20 +866,24 @@ if st.session_state['confirmado']:
                                 with zipfile.ZipFile(nome_arquivo_mes, "w", zipfile.ZIP_DEFLATED) as z_mes:
                                     for item_name in z_read.namelist():
                                         if f"/{ano_sel}/{mes_sel}/" in item_name:
-                                            z_mes.writestr(os.path.basename(item_name), z_read.read(item_name))
-                            
+                                            # Extrai direto do zip de origem para o zip de destino sem encher a RAM
+                                            xml_bytes = z_read.read(item_name)
+                                            z_mes.writestr(os.path.basename(item_name), xml_bytes)
+                                            del xml_bytes
+                                            
                             st.session_state['zip_pronto'] = nome_arquivo_mes
                             st.rerun()
                 
                 if st.session_state.get('zip_pronto') and os.path.exists(st.session_state['zip_pronto']):
                     st.success("✅ Arquivo pronto para download!")
-                    st.download_button(
-                        f"📥 BAIXAR {st.session_state['zip_pronto']}", 
-                        data=open(st.session_state['zip_pronto'], 'rb'), 
-                        file_name=st.session_state['zip_pronto'], 
-                        mime="application/zip", 
-                        use_container_width=True
-                    )
+                    with open(st.session_state['zip_pronto'], 'rb') as f_mes:
+                        st.download_button(
+                            f"📥 BAIXAR {st.session_state['zip_pronto']}", 
+                            data=f_mes, 
+                            file_name=st.session_state['zip_pronto'], 
+                            mime="application/zip", 
+                            use_container_width=True
+                        )
         
         if st.button("⛏️ NOVO GARIMPO"):
             limpar_arquivos_temp()
