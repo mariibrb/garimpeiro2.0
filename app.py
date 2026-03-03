@@ -6,6 +6,7 @@ import re
 import pandas as pd
 import random
 import gc
+import shutil
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
 st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
@@ -126,8 +127,11 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         resumo["Nome_Dest"] = re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S).group(1).upper() if re.search(r'<dest>.*?<xnome>(.*?)</xnome>', tag_l, re.S) else ""
 
         # Identificação de Data de Emissão
-        data_match = re.search(r'<(?:dhemi|demi|dhregevento)>(\d{4}-\d{2}-\d{2})', tag_l)
-        if data_match: resumo["Data_Emissao"] = data_match.group(1)
+        data_match = re.search(r'<(?:dhemi|demi|dhregevento|dhrecbto)>(\d{4})-(\d{2})-(\d{2})', tag_l)
+        if data_match: 
+            resumo["Data_Emissao"] = f"{data_match.group(1)}-{data_match.group(2)}-{data_match.group(3)}"
+            resumo["Ano"] = data_match.group(1)
+            resumo["Mes"] = data_match.group(2)
 
         # 1. IDENTIFICAÇÃO DE INUTILIZADAS
         if '<inutnfe' in tag_l or '<retinutnfe' in tag_l or '<procinut' in tag_l:
@@ -141,7 +145,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             
             resumo["Número"] = int(ini)
             resumo["Range"] = (int(ini), int(fin))
-            resumo["Ano"] = "20" + re.search(r'<ano>(\d+)</', tag_l).group(1)[-2:] if re.search(r'<ano>(\d+)</', tag_l) else "0000"
+            
+            if resumo["Ano"] == "0000":
+                ano_match = re.search(r'<ano>(\d+)</', tag_l)
+                if ano_match:
+                    resumo["Ano"] = "20" + ano_match.group(1)[-2:]
+
             resumo["Chave"] = f"INUT_{resumo['Série']}_{ini}"
 
         else:
@@ -152,8 +161,9 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
             else:
                 resumo["Chave"] = match_ch.group(1)
 
-            if resumo["Chave"]:
-                resumo["Ano"], resumo["Mes"] = "20" + resumo["Chave"][2:4], resumo["Chave"][4:6]
+            if resumo["Chave"] and len(resumo["Chave"]) == 44:
+                resumo["Ano"] = "20" + resumo["Chave"][2:4]
+                resumo["Mes"] = resumo["Chave"][4:6]
                 resumo["Série"] = str(int(resumo["Chave"][22:25]))
                 resumo["Número"] = int(resumo["Chave"][25:34])
                 if not resumo["Data_Emissao"]: resumo["Data_Emissao"] = f"{resumo['Ano']}-{resumo['Mes']}-01"
@@ -177,6 +187,9 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         if not resumo["CNPJ_Emit"] and resumo["Chave"] and not resumo["Chave"].startswith("INUT_"): 
             resumo["CNPJ_Emit"] = resumo["Chave"][6:20]
         
+        if resumo["Mes"] == "00": resumo["Mes"] = "01"
+        if resumo["Ano"] == "0000": resumo["Ano"] = "2000"
+
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
         
         if is_p:
@@ -187,18 +200,28 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         return resumo, is_p
     except: return None, False
 
-# --- FUNÇÃO RECURSIVA OTIMIZADA PARA LER DIRETO DO STREAM (ANTI-TRAVAMENTO) ---
+# --- FUNÇÃO RECURSIVA BLINDADA (EXTRAÇÃO PARA DISCO PARA SALVAR MEMÓRIA) ---
+TEMP_EXTRACT_DIR = "temp_garimpo_zips"
+
 def extrair_recursivo(conteudo_ou_file, nome_arquivo):
+    if not os.path.exists(TEMP_EXTRACT_DIR):
+        os.makedirs(TEMP_EXTRACT_DIR)
+        
     if nome_arquivo.lower().endswith('.zip'):
         try:
-            # Verifica se é um arquivo físico/uploaded (tem método read) ou se são bytes de um sub-zip
             file_obj = conteudo_ou_file if hasattr(conteudo_ou_file, 'read') else io.BytesIO(conteudo_ou_file)
             with zipfile.ZipFile(file_obj) as z:
                 for sub_nome in z.namelist():
                     if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): continue
+                    
                     if sub_nome.lower().endswith('.zip'):
-                        sub_conteudo = z.read(sub_nome)
-                        yield from extrair_recursivo(sub_conteudo, sub_nome)
+                        # MÁGICA AQUI: Extrai o ZIP interno pro disco em vez de jogar na RAM
+                        temp_path = z.extract(sub_nome, path=TEMP_EXTRACT_DIR)
+                        with open(temp_path, 'rb') as f_temp:
+                            yield from extrair_recursivo(f_temp, sub_nome)
+                        # Apaga o arquivo físico temporário para não entupir o disco
+                        try: os.remove(temp_path)
+                        except: pass
                     elif sub_nome.lower().endswith('.xml'):
                         yield (os.path.basename(sub_nome), z.read(sub_nome))
         except: pass
@@ -215,6 +238,8 @@ def limpar_arquivos_temp():
     for f in os.listdir('.'):
         if f.startswith('garimpo_') and f.endswith('.zip'):
             os.remove(f)
+    if os.path.exists(TEMP_EXTRACT_DIR):
+        shutil.rmtree(TEMP_EXTRACT_DIR, ignore_errors=True)
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
@@ -282,7 +307,7 @@ if st.session_state['confirmado']:
             total_arquivos = len(uploaded_files)
             
             with st.status("⛏️ Minerando...", expanded=True) as status_box:
-                # GRAVAÇÃO DIRETA NO DISCO (Bypass do erro de memória)
+                # GRAVAÇÃO DIRETA NO DISCO
                 with zipfile.ZipFile('z_org.zip', "w", zipfile.ZIP_DEFLATED) as z_org, \
                      zipfile.ZipFile('z_todos.zip', "w", zipfile.ZIP_DEFLATED) as z_todos:
                     
@@ -294,7 +319,6 @@ if st.session_state['confirmado']:
                         
                         try:
                             f.seek(0)
-                            # Puxa diretamente do objeto de arquivo, sem carregar tudo com read()
                             todos_xmls = extrair_recursivo(f, f.name)
                             
                             for name, xml_data in todos_xmls:
@@ -308,7 +332,7 @@ if st.session_state['confirmado']:
                                         caminho_completo = f"{res['Pasta']}/{name}"
                                         z_org.writestr(caminho_completo, xml_data)
                                         z_todos.writestr(name, xml_data)
-                                del xml_data # Exclui a nota lida da memória na mesma hora
+                                del xml_data 
                             del todos_xmls
                         except: continue
                 
@@ -326,7 +350,7 @@ if st.session_state['confirmado']:
                     "CNPJ Emitente": res["CNPJ_Emit"], "Nome Emitente": res["Nome_Emit"],
                     "Doc Destinatário": res["Doc_Dest"], "Nome Destinatário": res["Nome_Dest"],
                     "Chave": res["Chave"], "Status Final": res["Status"], "Valor": res["Valor"],
-                    "Ano": res["Ano"], "Mes": res["Mes"] # Guardado em memória para agrupar os meses depois
+                    "Ano": res["Ano"], "Mes": res["Mes"] 
                 }
 
                 if res["Status"] == "INUTILIZADOS":
@@ -432,7 +456,6 @@ if st.session_state['confirmado']:
                                 serie_man = partes[1].replace("Série", "").strip()
                                 nota_man = int(partes[2].replace("Nota", "").strip())
                                 
-                                # Cria um registro falso na memória para forçar o sistema a reconhecer a inutilização
                                 res_manual = {
                                     "Arquivo": "REGISTRO_MANUAL",
                                     "Chave": f"MANUAL_INUT_{tipo_man}_{serie_man}_{nota_man}",
@@ -440,11 +463,11 @@ if st.session_state['confirmado']:
                                     "Série": serie_man,
                                     "Número": nota_man,
                                     "Status": "INUTILIZADOS",
-                                    "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/00/Serie_{serie_man}",
+                                    "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/01/Serie_{serie_man}",
                                     "Valor": 0.0,
                                     "Conteúdo": b"",
                                     "Ano": "0000",
-                                    "Mes": "00",
+                                    "Mes": "01",
                                     "Operacao": "SAIDA",
                                     "Data_Emissao": "",
                                     "CNPJ_Emit": cnpj_limpo,
@@ -454,7 +477,6 @@ if st.session_state['confirmado']:
                                 }
                                 st.session_state['relatorio'].append(res_manual)
                         
-                            # RECALCULA TUDO APÓS A INSERÇÃO
                             lote_recalc = {}
                             for item in st.session_state['relatorio']:
                                 key = item["Chave"]
@@ -540,10 +562,8 @@ if st.session_state['confirmado']:
                                 nota_man = int(partes[2].replace("Nota", "").strip())
                                 chaves_para_remover.append(f"MANUAL_INUT_{tipo_man}_{serie_man}_{nota_man}")
                             
-                            # Filtra a lista mestra para remover os itens selecionados
                             st.session_state['relatorio'] = [item for item in st.session_state['relatorio'] if item['Chave'] not in chaves_para_remover]
 
-                            # RECALCULA TUDO APÓS A REMOÇÃO
                             lote_recalc = {}
                             for item in st.session_state['relatorio']:
                                 key = item["Chave"]
@@ -610,7 +630,6 @@ if st.session_state['confirmado']:
         # --- ETAPA 2: VALIDAÇÃO ---
         st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÓRIO DE AUTENTICIDADE")
         
-        # --- PAINEL CORPORATIVO MOVIDO PARA CÁ (LOG LOGO ACIMA DO UPLOAD) ---
         if st.session_state.get('validation_done'):
             n_divergencias = len(st.session_state['df_divergencias'])
             if n_divergencias > 0:
@@ -717,7 +736,6 @@ if st.session_state['confirmado']:
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
                 with st.spinner("Adicionando..."):
-                    # Processamos os novos arquivos físicos em modo "append" (a)
                     if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
                         with zipfile.ZipFile('z_org.zip', "a", zipfile.ZIP_DEFLATED) as z_org, \
                              zipfile.ZipFile('z_todos.zip', "a", zipfile.ZIP_DEFLATED) as z_todos:
@@ -728,7 +746,6 @@ if st.session_state['confirmado']:
                                     for name, xml_data in todos_xmls:
                                         res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                         if res:
-                                            # Checa se já existe para não duplicar no ZIP físico
                                             ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
                                             if not ja_existe:
                                                 caminho_completo = f"{res['Pasta']}/{name}"
@@ -739,7 +756,7 @@ if st.session_state['confirmado']:
                                         del xml_data
                                 except: continue
                     
-                    st.session_state['zip_pronto'] = None # Reseta o botão de download de mês
+                    st.session_state['zip_pronto'] = None 
                     
                     lote_recalc = {}
                     for item in st.session_state['relatorio']:
@@ -851,9 +868,7 @@ if st.session_state['confirmado']:
                             with zipfile.ZipFile('z_org.zip', 'r') as z_read:
                                 with zipfile.ZipFile(nome_arquivo_mes, "w", zipfile.ZIP_DEFLATED) as z_mes:
                                     for item_name in z_read.namelist():
-                                        # Filtra apenas os caminhos que contém o ano/mês selecionado
                                         if f"/{ano_sel}/{mes_sel}/" in item_name:
-                                            # Salva o arquivo XML "solto" no novo ZIP, sem as pastas, para facilitar o uso
                                             z_mes.writestr(os.path.basename(item_name), z_read.read(item_name))
                             
                             st.session_state['zip_pronto'] = nome_arquivo_mes
