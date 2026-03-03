@@ -103,7 +103,7 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
     resumo = {
         "Arquivo": nome_puro, "Chave": "", "Tipo": "Outros", "Série": "0",
         "Número": 0, "Status": "NORMAIS", "Pasta": "",
-        "Valor": 0.0, "Conteúdo": b"", "Ano": "0000", "Mes": "00", # OTIMIZAÇÃO: Remove o texto do XML da RAM
+        "Valor": 0.0, "Conteúdo": b"", "Ano": "0000", "Mes": "00",
         "Operacao": "SAIDA", "Data_Emissao": "",
         "CNPJ_Emit": "", "Nome_Emit": "", "Doc_Dest": "", "Nome_Dest": ""
     }
@@ -187,21 +187,26 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         return resumo, is_p
     except: return None, False
 
-# --- FUNÇÃO RECURSIVA OTIMIZADA PARA MEMÓRIA (GERADOR) ---
-def extrair_recursivo(conteudo_bytes, nome_arquivo):
+# --- FUNÇÃO RECURSIVA OTIMIZADA PARA LER DIRETO DO STREAM (ANTI-TRAVAMENTO) ---
+def extrair_recursivo(conteudo_ou_file, nome_arquivo):
     if nome_arquivo.lower().endswith('.zip'):
         try:
-            with zipfile.ZipFile(io.BytesIO(conteudo_bytes)) as z:
+            # Verifica se é um arquivo físico/uploaded (tem método read) ou se são bytes de um sub-zip
+            file_obj = conteudo_ou_file if hasattr(conteudo_ou_file, 'read') else io.BytesIO(conteudo_ou_file)
+            with zipfile.ZipFile(file_obj) as z:
                 for sub_nome in z.namelist():
                     if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): continue
-                    sub_conteudo = z.read(sub_nome)
                     if sub_nome.lower().endswith('.zip'):
+                        sub_conteudo = z.read(sub_nome)
                         yield from extrair_recursivo(sub_conteudo, sub_nome)
                     elif sub_nome.lower().endswith('.xml'):
-                        yield (os.path.basename(sub_nome), sub_conteudo)
+                        yield (os.path.basename(sub_nome), z.read(sub_nome))
         except: pass
     elif nome_arquivo.lower().endswith('.xml'):
-        yield (os.path.basename(nome_arquivo), conteudo_bytes)
+        if hasattr(conteudo_ou_file, 'read'):
+            yield (os.path.basename(nome_arquivo), conteudo_ou_file.read())
+        else:
+            yield (os.path.basename(nome_arquivo), conteudo_ou_file)
 
 # --- LIMPEZA DE ARQUIVOS TEMPORÁRIOS ---
 def limpar_arquivos_temp():
@@ -285,10 +290,8 @@ if st.session_state['confirmado']:
                         
                         try:
                             f.seek(0)
-                            content = f.read()
-                            # Agora extrair_recursivo não cria a lista na memória, ele gera uma a uma
-                            todos_xmls = extrair_recursivo(content, f.name)
-                            del content
+                            # Puxa diretamente do objeto de arquivo, sem carregar tudo com read()
+                            todos_xmls = extrair_recursivo(f, f.name)
                             
                             for name, xml_data in todos_xmls:
                                 res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
@@ -301,7 +304,7 @@ if st.session_state['confirmado']:
                                         caminho_completo = f"{res['Pasta']}/{name}"
                                         z_org.writestr(caminho_completo, xml_data)
                                         z_todos.writestr(name, xml_data)
-                                del xml_data # Limpa a nota atual da memória imediatamente
+                                del xml_data # Exclui a nota lida da memória na mesma hora
                             del todos_xmls
                         except: continue
                 
@@ -715,8 +718,8 @@ if st.session_state['confirmado']:
                              zipfile.ZipFile('z_todos.zip', "a", zipfile.ZIP_DEFLATED) as z_todos:
                             for f in extra_files:
                                 try:
-                                    content = f.read()
-                                    todos_xmls = extrair_recursivo(content, f.name)
+                                    f.seek(0)
+                                    todos_xmls = extrair_recursivo(f, f.name)
                                     for name, xml_data in todos_xmls:
                                         res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                         if res:
