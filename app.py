@@ -807,10 +807,10 @@ if st.session_state['confirmado']:
         
         # STREAMING DOS ARQUIVOS PARA EVITAR ERRO DE MEMÓRIA (DOWNLOAD DIRETO DO DISCO)
         if os.path.exists('z_org.zip') and os.path.exists('z_todos.zip'):
-            with open('z_org.zip', 'rb') as f_org:
-                with col1: st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", f_org, "garimpo_organizado.zip", mime="application/zip", use_container_width=True)
-            with open('z_todos.zip', 'rb') as f_todos:
-                with col2: st.download_button("📦 BAIXAR TODOS (SÓ XML)", f_todos, "todos_xml.zip", mime="application/zip", use_container_width=True)
+            with col1: 
+                st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", data=open('z_org.zip', 'rb'), file_name="garimpo_organizado.zip", mime="application/zip", use_container_width=True)
+            with col2: 
+                st.download_button("📦 BAIXAR TODOS (SÓ XML)", data=open('z_todos.zip', 'rb'), file_name="todos_xml.zip", mime="application/zip", use_container_width=True)
             
         with col3: st.download_button("📊 RELATÓRIO EXCEL MASTER", buffer_excel.getvalue(), "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
