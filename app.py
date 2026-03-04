@@ -1124,7 +1124,7 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO (SISTEMA ANTI-CRASH POR LOTES)
         # =====================================================================
         st.markdown("### ⚙️ ETAPA 3: FILTRAR E EXPORTAR (BLINDADO)")
-        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar o limite, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar. Escolha o Mês ou baixe o Lote Completo.")
+        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar o limite de 8.000 notas, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar.")
         
         anos_meses = []
         for r in st.session_state['relatorio']:
@@ -1153,7 +1153,14 @@ if st.session_state['confirmado']:
                 sel_mes = partes_data[1]
             
             with st.spinner("Buscando no HD e montando pacotes..."):
-                limpar_arquivos_temp() # Limpa resíduos antes de criar os novos
+                
+                # --- AQUI ESTAVA O BUG FATAL! ---
+                # Apenas limpo os arquivos Zips antigos para abrir espaço.
+                # NUNCA MAIS vou apagar a pasta TEMP_UPLOADS_DIR aqui dentro!
+                for f in os.listdir('.'):
+                    if f.startswith('z_org_final') or f.startswith('z_todos_final'):
+                        try: os.remove(f)
+                        except: pass
 
                 df_geral_filtrado = st.session_state['df_geral'].copy()
                 
@@ -1212,7 +1219,7 @@ if st.session_state['confirmado']:
                                             manter = True
                                         
                                     if manter:
-                                        # Lógica anti-queda: se passou do limite, fecha e cria a Parte 2
+                                        # Lógica anti-queda: se passou do limite de notas, fecha e cria a Parte 2
                                         if org_count >= MAX_XML_PER_ZIP * curr_org_part:
                                             z_org.close()
                                             curr_org_part += 1
@@ -1244,7 +1251,7 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         # =====================================================================
-        # BOTÕES GRANDES FINAIS DE DOWNLOAD (COM SEPARADOR VISUAL)
+        # BOTÕES GRANDES FINAIS DE DOWNLOAD (SISTEMA DE SEGURANÇA POR LOTES)
         # =====================================================================
         if st.session_state.get('export_ready'):
             st.success("✅ Tudo empacotado e pronto para baixar!")
