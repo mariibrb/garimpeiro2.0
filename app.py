@@ -224,14 +224,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         if not resumo["CNPJ_Emit"] and resumo["Chave"] and not resumo["Chave"].startswith("INUT_"): 
             resumo["CNPJ_Emit"] = resumo["Chave"][6:20]
         
-        # Correção antibug para as pastas de mês
         if resumo["Mes"] == "00": 
             resumo["Mes"] = "01"
             
         if resumo["Ano"] == "0000": 
             resumo["Ano"] = "2000"
 
-        # Emissão Própria (Seja Entrada ou Saída, o Emitente é o Cliente)
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
         
         if is_p:
@@ -315,7 +313,7 @@ with st.container():
                 <li><b>Enviar as Notas:</b> Arraste sua pasta de notas (ZIP ou XML soltos). O sistema suporta grandes volumes (+300MB).</li>
                 <li><b>Analisar:</b> Inicie o Garimpo. Ele lerá os arquivos em segurança.</li>
                 <li><b>Validar:</b> Confirme a Autenticidade (Sefaz) e preencha notas inutilizadas.</li>
-                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha o mês que deseja exportar (ou todos) e baixe!</li>
+                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha exatamente o que deseja baixar (Mês, Modelo, Série) e exporte.</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -326,7 +324,8 @@ with st.container():
             <ul>
                 <li><b>Acha Notas Perdidas:</b> Identifica buracos na numeração.</li>
                 <li><b>Limpa Cancelamentos:</b> Separa as notas canceladas da apuração.</li>
-                <li><b>Regra de Competência (Exportação):</b> As notas de "Emissão Própria" (Entrada ou Saída) são rigorosamente filtradas pelo mês que você desejar, enquanto as de "Terceiros" são mantidas integrais na exportação.</li>
+                <li><b>Filtros Granulares:</b> Baixe apenas NF-e, apenas CT-e, separe a Série 1 da Série 2, ou isente as notas de Terceiros do filtro de competência.</li>
+                <li><b>Auditoria Cruzada:</b> Confronta o status do seu arquivo físico com o que consta no site da SEFAZ.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -1121,63 +1120,78 @@ if st.session_state['confirmado']:
         st.divider()
 
         # =====================================================================
-        # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO (NOVO VISUAL)
+        # ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO (NOVO PAINEL DE CONTROLE)
         # =====================================================================
-        st.markdown("### ⚙️ ETAPA 3: EXPORTAÇÃO BLINDADA")
-        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar 8.000 notas, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar.")
+        st.markdown("### ⚙️ ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO")
+        st.info("Deixe as caixas vazias para exportar TUDO, ou selecione cirurgicamente o que você deseja baixar (ex: separar só a Série 1, ou apenas as NF-e de Terceiros).")
         
-        tipo_extracao = st.radio(
-            "Como você deseja exportar os arquivos finais?",
-            ["📦 EXTRAIR TUDO (Lote Completo com todos os meses juntos)", 
-             "📅 FILTRAR POR MÊS (Separar apenas a Emissão Própria de um mês específico)"]
-        )
+        todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
+        anos_meses = sorted(list(set([f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}" for r in st.session_state['relatorio'] if r.get('Ano', '0000') != '0000'])))
+        modelos = sorted(list(set([r.get('Tipo', '') for r in st.session_state['relatorio']])))
+        series = sorted(list(set([str(r.get('Série', '0')) for r in st.session_state['relatorio']])))
+        
+        with st.container():
+            f_col1, f_col2, f_col3, f_col4 = st.columns(4)
+            with f_col1:
+                filtro_origem = st.multiselect("📌 Origem:", todas_origens, help="Ex: Emissão Própria ou Terceiros. Deixe vazio para TODOS.")
+            with f_col2:
+                filtro_meses = st.multiselect("📅 Ano/Mês:", anos_meses, help="Ex: 2026/02. Deixe vazio para TODOS OS MESES.")
+                aplicar_mes_so_na_propria = st.checkbox("Aplicar Mês APENAS na Emissão Própria?", value=True, help="Se marcado, as notas de Terceiros NÃO serão cortadas pelo filtro de mês, garantindo a sua regra de competência fiscal.")
+            with f_col3:
+                filtro_modelos = st.multiselect("📄 Modelo:", modelos, help="Ex: NF-e, CT-e, NFC-e. Deixe vazio para TODOS.")
+            with f_col4:
+                filtro_series = st.multiselect("🔢 Série:", series, help="Ex: 1, 2, 0. Deixe vazio para TODAS.")
 
-        is_todos = "TUDO" in tipo_extracao
-        sel_ano = ""
-        sel_mes = ""
-        pode_processar = False
-        
-        if not is_todos:
-            anos_meses = []
-            for r in st.session_state['relatorio']:
-                if r.get("Ano", "0000") != "0000":
-                    tupla_data = (r.get("Ano", "0000"), r.get("Mes", "00"))
-                    if tupla_data not in anos_meses:
-                        anos_meses.append(tupla_data)
-                        
-            anos_meses = sorted(anos_meses)
-            opcoes_filtro = ["--- SELECIONE O MÊS ---"]
-            for a, m in anos_meses:
-                opcoes_filtro.append(f"{a}/{m}")
-            
-            mes_escolhido = st.selectbox("Mês de Competência da Emissão Própria:", opcoes_filtro)
-            
-            if mes_escolhido != "--- SELECIONE O MÊS ---":
-                partes_data = mes_escolhido.split("/")
-                sel_ano = partes_data[0]
-                sel_mes = partes_data[1]
-                pode_processar = True
-        else:
-            pode_processar = True
-        
-        if pode_processar and st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
+        if st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
             
             with st.spinner("Buscando no HD e montando pacotes..."):
                 
+                # Limpa zips antigos para não misturar
                 for f in os.listdir('.'):
                     if f.startswith('z_org_final') or f.startswith('z_todos_final'):
                         try: os.remove(f)
                         except: pass
 
+                # --- 1. APLICA FILTROS NO EXCEL ---
                 df_geral_filtrado = st.session_state['df_geral'].copy()
                 
-                if not is_todos and not df_geral_filtrado.empty:
-                    df_geral_filtrado = df_geral_filtrado[
-                        (~df_geral_filtrado['Origem'].str.contains('PRÓPRIA')) | 
-                        ((df_geral_filtrado['Origem'].str.contains('PRÓPRIA')) & (df_geral_filtrado['Ano'] == sel_ano) & (df_geral_filtrado['Mes'] == sel_mes)) | 
-                        (df_geral_filtrado['Ano'] == '0000')
-                    ]
+                if not df_geral_filtrado.empty:
+                    # Filtro de Origem
+                    if len(filtro_origem) > 0:
+                        condicoes_origem = []
+                        if "EMISSÃO PRÓPRIA" in filtro_origem:
+                            condicoes_origem.append(df_geral_filtrado['Origem'].str.contains('PRÓPRIA'))
+                        if "TERCEIROS" in filtro_origem:
+                            condicoes_origem.append(df_geral_filtrado['Origem'].str.contains('TERCEIROS'))
+                        
+                        if condicoes_origem:
+                            df_geral_filtrado = df_geral_filtrado[pd.concat(condicoes_origem, axis=1).any(axis=1)]
+                            
+                    # Filtro de Mês com Regra Inteligente de Terceiros
+                    if len(filtro_meses) > 0 and not df_geral_filtrado.empty:
+                        df_geral_filtrado['Mes_Comp'] = df_geral_filtrado['Ano'] + "/" + df_geral_filtrado['Mes']
+                        
+                        if aplicar_mes_so_na_propria:
+                            df_geral_filtrado = df_geral_filtrado[
+                                (df_geral_filtrado['Mes_Comp'].isin(filtro_meses)) | 
+                                (df_geral_filtrado['Origem'].str.contains('TERCEIROS')) |
+                                (df_geral_filtrado['Status Final'] == 'INUTILIZADA')
+                            ]
+                        else:
+                            df_geral_filtrado = df_geral_filtrado[
+                                (df_geral_filtrado['Mes_Comp'].isin(filtro_meses)) | 
+                                (df_geral_filtrado['Status Final'] == 'INUTILIZADA')
+                            ]
+                            
+                    # Filtro de Modelo
+                    if len(filtro_modelos) > 0 and not df_geral_filtrado.empty:
+                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Modelo'].isin(filtro_modelos)]
+                        
+                    # Filtro de Série
+                    if len(filtro_series) > 0 and not df_geral_filtrado.empty:
+                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Série'].astype(str).isin(filtro_series)]
 
+                # Cria o Buffer de Excel
                 buffer_excel = io.BytesIO()
                 with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
                     st.session_state['df_resumo'].to_excel(writer, sheet_name='Resumo_Auditoria', index=False)
@@ -1191,7 +1205,7 @@ if st.session_state['confirmado']:
                 
                 st.session_state['excel_buffer'] = buffer_excel.getvalue()
 
-                # Variáveis de controle de Divisão em Lotes
+                # --- 2. APLICA FILTROS FÍSICOS NOS ZIPS (Zero RAM) ---
                 org_parts = []
                 todos_parts = []
                 org_count = 0
@@ -1215,18 +1229,40 @@ if st.session_state['confirmado']:
                             for name, xml_data in extrair_recursivo(f_temp, f_name):
                                 res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                 if res:
-                                    manter = False
-                                    if is_todos:
-                                        manter = True
-                                    else:
-                                        if is_p:
-                                            if res["Ano"] == "0000" or (res["Ano"] == sel_ano and res["Mes"] == sel_mes):
-                                                manter = True
-                                        else:
-                                            manter = True
+                                    manter = True
+                                    
+                                    # Valida Filtro Origem
+                                    if len(filtro_origem) > 0:
+                                        origem_nota = "EMISSÃO PRÓPRIA" if is_p else "TERCEIROS"
+                                        if origem_nota not in filtro_origem:
+                                            manter = False
+                                            
+                                    # Valida Filtro Mês
+                                    if manter and len(filtro_meses) > 0:
+                                        mes_nota = f"{res['Ano']}/{res['Mes']}"
+                                        passar_mes = False
+                                        if mes_nota in filtro_meses: 
+                                            passar_mes = True
+                                        elif res["Status"] == "INUTILIZADOS": 
+                                            passar_mes = True
+                                        elif aplicar_mes_so_na_propria and not is_p: 
+                                            passar_mes = True
+                                            
+                                        if not passar_mes:
+                                            manter = False
+                                            
+                                    # Valida Filtro Modelo
+                                    if manter and len(filtro_modelos) > 0:
+                                        if res["Tipo"] not in filtro_modelos:
+                                            manter = False
+                                            
+                                    # Valida Filtro Série
+                                    if manter and len(filtro_series) > 0:
+                                        if str(res["Série"]) not in filtro_series:
+                                            manter = False
                                         
                                     if manter:
-                                        # Lógica anti-queda: se passou do limite de notas, fecha e cria a Parte 2
+                                        # Lógica anti-queda: se passou do limite, fecha e cria a Parte 2
                                         if org_count >= MAX_XML_PER_ZIP * curr_org_part:
                                             z_org.close()
                                             curr_org_part += 1
@@ -1261,7 +1297,7 @@ if st.session_state['confirmado']:
         # BOTÕES GRANDES FINAIS DE DOWNLOAD (SISTEMA DE SEGURANÇA POR LOTES)
         # =====================================================================
         if st.session_state.get('export_ready'):
-            st.success("✅ Tudo empacotado e pronto para baixar!")
+            st.success("✅ Tudo empacotado, filtrado e pronto para baixar!")
             
             st.markdown("### 📂 DOWNLOAD: ORGANIZADO (POR PASTAS FISCAIS)")
             
@@ -1274,7 +1310,7 @@ if st.session_state['confirmado']:
                         label = f"📥 BAIXAR LOTE {part_num}" if len(org_list) > 1 else "📂 BAIXAR ORGANIZADO (ZIP)"
                         with cols[idx]:
                             with open(part_name, 'rb') as f:
-                                st.download_button(label, data=f.read(), file_name=f"garimpo_organizado_pt{part_num}.zip", mime="application/zip", use_container_width=True)
+                                st.download_button(label, data=f.read(), file_name=f"garimpo_filtrado_org_pt{part_num}.zip", mime="application/zip", use_container_width=True)
 
             st.markdown("### 📦 DOWNLOAD: TODOS OS XMLs (SÓ ARQUIVOS SOLTOS)")
             
@@ -1287,10 +1323,10 @@ if st.session_state['confirmado']:
                         label = f"📥 BAIXAR LOTE {part_num}" if len(todos_list) > 1 else "📦 BAIXAR TODOS (SÓ XML)"
                         with cols[idx]:
                             with open(part_name, 'rb') as f:
-                                st.download_button(label, data=f.read(), file_name=f"todos_xml_pt{part_num}.zip", mime="application/zip", use_container_width=True)
+                                st.download_button(label, data=f.read(), file_name=f"todos_filtrado_xml_pt{part_num}.zip", mime="application/zip", use_container_width=True)
 
             st.markdown("### 📊 RELATÓRIO EXCEL MASTER")
-            st.download_button("📊 BAIXAR EXCEL MASTER", st.session_state['excel_buffer'], "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
+            st.download_button("📊 BAIXAR EXCEL MASTER (FILTRADO)", st.session_state['excel_buffer'], "auditoria_detalhada_filtrada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
         st.divider()
         if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
