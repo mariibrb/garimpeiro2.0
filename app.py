@@ -97,6 +97,7 @@ aplicar_estilo_premium()
 # --- VARIÁVEIS DE SISTEMA DE ARQUIVOS (PREVENÇÃO DE QUEDA DE MEMÓRIA) ---
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 TEMP_UPLOADS_DIR = "temp_garimpo_uploads"
+MAX_XML_PER_ZIP = 8000  # Trava de segurança para impedir queda do Streamlit (gera zips de ~20MB)
 
 # --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
@@ -223,12 +224,14 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         if not resumo["CNPJ_Emit"] and resumo["Chave"] and not resumo["Chave"].startswith("INUT_"): 
             resumo["CNPJ_Emit"] = resumo["Chave"][6:20]
         
+        # Correção antibug para as pastas de mês
         if resumo["Mes"] == "00": 
             resumo["Mes"] = "01"
             
         if resumo["Ano"] == "0000": 
             resumo["Ano"] = "2000"
 
+        # Emissão Própria (Seja Entrada ou Saída, o Emitente é o Cliente)
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
         
         if is_p:
@@ -280,10 +283,10 @@ def extrair_recursivo(conteudo_ou_file, nome_arquivo):
 # --- LIMPEZA DE PASTAS TEMPORÁRIAS ---
 def limpar_arquivos_temp():
     try:
-        if os.path.exists('z_org_final.zip'): 
-            os.remove('z_org_final.zip')
-        if os.path.exists('z_todos_final.zip'): 
-            os.remove('z_todos_final.zip')
+        for f in os.listdir('.'):
+            if f.endswith('.zip') and ('z_org_final' in f or 'z_todos_final' in f):
+                try: os.remove(f)
+                except: pass
             
         if os.path.exists(TEMP_EXTRACT_DIR): 
             shutil.rmtree(TEMP_EXTRACT_DIR, ignore_errors=True)
@@ -292,6 +295,11 @@ def limpar_arquivos_temp():
             shutil.rmtree(TEMP_UPLOADS_DIR, ignore_errors=True)
     except: 
         pass
+
+# --- DIVISOR DE LOTES HTML (Para deixar botões organizados) ---
+def chunk_list(lst, n):
+    for i in range(0, len(lst), n): 
+        yield lst[i:i + n]
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
@@ -338,7 +346,9 @@ keys_to_init = [
     'df_divergencias', 
     'st_counts', 
     'validation_done', 
-    'export_ready'
+    'export_ready',
+    'org_zip_parts',
+    'todos_zip_parts'
 ]
 
 for k in keys_to_init:
@@ -349,6 +359,8 @@ for k in keys_to_init:
             st.session_state[k] = []
         elif k == 'st_counts': 
             st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
+        elif 'parts' in k:
+            st.session_state[k] = []
         else: 
             st.session_state[k] = False
 
@@ -1109,10 +1121,10 @@ if st.session_state['confirmado']:
         st.divider()
 
         # =====================================================================
-        # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO
+        # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO (SISTEMA ANTI-CRASH POR LOTES)
         # =====================================================================
-        st.markdown("### ⚙️ ETAPA 3: FILTRAR COMPETÊNCIA E EXPORTAR FINAIS")
-        st.info("Escolha se quer baixar TODOS OS MESES juntos, ou fatiar a Emissão Própria por um mês específico (sempre mantendo os Terceiros). Essa extração previne travamentos em volumes gigantes.")
+        st.markdown("### ⚙️ ETAPA 3: FILTRAR E EXPORTAR (BLINDADO)")
+        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar o limite, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar. Escolha o Mês ou baixe o Lote Completo.")
         
         anos_meses = []
         for r in st.session_state['relatorio']:
@@ -1141,10 +1153,7 @@ if st.session_state['confirmado']:
                 sel_mes = partes_data[1]
             
             with st.spinner("Buscando no HD e montando pacotes..."):
-                if os.path.exists('z_org_final.zip'): 
-                    os.remove('z_org_final.zip')
-                if os.path.exists('z_todos_final.zip'): 
-                    os.remove('z_todos_final.zip')
+                limpar_arquivos_temp() # Limpa resíduos antes de criar os novos
 
                 df_geral_filtrado = st.session_state['df_geral'].copy()
                 
@@ -1163,72 +1172,111 @@ if st.session_state['confirmado']:
                     st.session_state['df_canceladas'].to_excel(writer, sheet_name='Canceladas', index=False)
                     st.session_state['df_inutilizadas'].to_excel(writer, sheet_name='Inutilizadas', index=False)
                     st.session_state['df_autorizadas'].to_excel(writer, sheet_name='Autorizadas', index=False)
-                    
                     if not st.session_state['df_divergencias'].empty: 
                         st.session_state['df_divergencias'].to_excel(writer, sheet_name='Divergencias', index=False)
                 
                 st.session_state['excel_buffer'] = buffer_excel.getvalue()
 
-                with zipfile.ZipFile('z_org_final.zip', "w", zipfile.ZIP_DEFLATED) as z_org, \
-                     zipfile.ZipFile('z_todos_final.zip', "w", zipfile.ZIP_DEFLATED) as z_todos:
-                    
-                    if os.path.exists(TEMP_UPLOADS_DIR):
-                        for f_name in os.listdir(TEMP_UPLOADS_DIR):
-                            f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
-                            with open(f_path, "rb") as f_temp:
-                                for name, xml_data in extrair_recursivo(f_temp, f_name):
-                                    res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                    if res:
-                                        manter = False
-                                        if is_todos:
-                                            manter = True
-                                        else:
-                                            if is_p:
-                                                if res["Ano"] == "0000" or (res["Ano"] == sel_ano and res["Mes"] == sel_mes):
-                                                    manter = True
-                                            else:
-                                                manter = True
-                                            
-                                        if manter:
-                                            z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
-                                            z_todos.writestr(name, xml_data)
-                                    del xml_data
+                # Variáveis de controle de Divisão em Lotes
+                org_parts = []
+                todos_parts = []
+                org_count = 0
+                todos_count = 0
+                curr_org_part = 1
+                curr_todos_part = 1
                 
+                org_name = f'z_org_final_pt{curr_org_part}.zip'
+                todos_name = f'z_todos_final_pt{curr_todos_part}.zip'
+                
+                z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+                z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+                
+                org_parts.append(org_name)
+                todos_parts.append(todos_name)
+                
+                if os.path.exists(TEMP_UPLOADS_DIR):
+                    for f_name in os.listdir(TEMP_UPLOADS_DIR):
+                        f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
+                        with open(f_path, "rb") as f_temp:
+                            for name, xml_data in extrair_recursivo(f_temp, f_name):
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    manter = False
+                                    if is_todos:
+                                        manter = True
+                                    else:
+                                        if is_p:
+                                            if res["Ano"] == "0000" or (res["Ano"] == sel_ano and res["Mes"] == sel_mes):
+                                                manter = True
+                                        else:
+                                            manter = True
+                                        
+                                    if manter:
+                                        # Lógica anti-queda: se passou do limite, fecha e cria a Parte 2
+                                        if org_count >= MAX_XML_PER_ZIP * curr_org_part:
+                                            z_org.close()
+                                            curr_org_part += 1
+                                            org_name = f'z_org_final_pt{curr_org_part}.zip'
+                                            z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+                                            org_parts.append(org_name)
+                                            
+                                        if todos_count >= MAX_XML_PER_ZIP * curr_todos_part:
+                                            z_todos.close()
+                                            curr_todos_part += 1
+                                            todos_name = f'z_todos_final_pt{curr_todos_part}.zip'
+                                            z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+                                            todos_parts.append(todos_name)
+
+                                        z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
+                                        org_count += 1
+                                        
+                                        z_todos.writestr(name, xml_data)
+                                        todos_count += 1
+                                        
+                                del xml_data
+                
+                if z_org: z_org.close()
+                if z_todos: z_todos.close()
+
+                st.session_state['org_zip_parts'] = org_parts
+                st.session_state['todos_zip_parts'] = todos_parts
                 st.session_state['export_ready'] = True
                 st.rerun()
 
         # =====================================================================
-        # BOTÕES GRANDES FINAIS DE DOWNLOAD (CORREÇÃO OFICIAL STREAMLIT)
+        # BOTÕES GRANDES FINAIS DE DOWNLOAD (COM SEPARADOR VISUAL)
         # =====================================================================
         if st.session_state.get('export_ready'):
-            st.success("✅ Tudo empacotado, processado e pronto para baixar!")
+            st.success("✅ Tudo empacotado e pronto para baixar!")
             
-            c1, c2, c3 = st.columns(3)
+            st.markdown("### 📂 DOWNLOAD: ORGANIZADO (POR PASTAS FISCAIS)")
             
-            if os.path.exists('z_org_final.zip'):
-                with c1:
-                    with open('z_org_final.zip', 'rb') as f_org:
-                        st.download_button(
-                            "📂 BAIXAR ORGANIZADO (ZIP)", 
-                            data=f_org, 
-                            file_name="garimpo_filtrado_organizado.zip", 
-                            mime="application/zip", 
-                            use_container_width=True
-                        )
-                    
-            if os.path.exists('z_todos_final.zip'):
-                with c2:
-                    with open('z_todos_final.zip', 'rb') as f_todos:
-                        st.download_button(
-                            "📦 BAIXAR TODOS (SÓ XML)", 
-                            data=f_todos, 
-                            file_name="todos_filtrado_xml.zip", 
-                            mime="application/zip", 
-                            use_container_width=True
-                        )
-                
-            with c3: 
-                st.download_button("📊 RELATÓRIO EXCEL MASTER", st.session_state['excel_buffer'], "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
+            org_list = st.session_state['org_zip_parts']
+            for row in chunk_list(org_list, 3):
+                cols = st.columns(len(row))
+                for idx, part_name in enumerate(row):
+                    if os.path.exists(part_name):
+                        part_num = re.search(r'pt(\d+)', part_name).group(1)
+                        label = f"📥 BAIXAR LOTE {part_num}" if len(org_list) > 1 else "📂 BAIXAR ORGANIZADO (ZIP)"
+                        with cols[idx]:
+                            with open(part_name, 'rb') as f:
+                                st.download_button(label, data=f.read(), file_name=f"garimpo_organizado_pt{part_num}.zip", mime="application/zip", use_container_width=True)
+
+            st.markdown("### 📦 DOWNLOAD: TODOS OS XMLs (SÓ ARQUIVOS SOLTOS)")
+            
+            todos_list = st.session_state['todos_zip_parts']
+            for row in chunk_list(todos_list, 3):
+                cols = st.columns(len(row))
+                for idx, part_name in enumerate(row):
+                    if os.path.exists(part_name):
+                        part_num = re.search(r'pt(\d+)', part_name).group(1)
+                        label = f"📥 BAIXAR LOTE {part_num}" if len(todos_list) > 1 else "📦 BAIXAR TODOS (SÓ XML)"
+                        with cols[idx]:
+                            with open(part_name, 'rb') as f:
+                                st.download_button(label, data=f.read(), file_name=f"todos_xml_pt{part_num}.zip", mime="application/zip", use_container_width=True)
+
+            st.markdown("### 📊 RELATÓRIO EXCEL MASTER")
+            st.download_button("📊 BAIXAR EXCEL MASTER", st.session_state['excel_buffer'], "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
 
         st.divider()
         if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
