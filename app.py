@@ -1121,42 +1121,49 @@ if st.session_state['confirmado']:
         st.divider()
 
         # =====================================================================
-        # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO (SISTEMA ANTI-CRASH POR LOTES)
+        # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO (NOVO VISUAL)
         # =====================================================================
-        st.markdown("### ⚙️ ETAPA 3: FILTRAR E EXPORTAR (BLINDADO)")
-        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar o limite de 8.000 notas, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar.")
+        st.markdown("### ⚙️ ETAPA 3: EXPORTAÇÃO BLINDADA")
+        st.info("Para evitar erro de memória no servidor, se o volume ultrapassar 8.000 notas, o sistema dividirá automaticamente seus arquivos em pequenos lotes seguros de baixar.")
         
-        anos_meses = []
-        for r in st.session_state['relatorio']:
-            if r.get("Ano", "0000") != "0000":
-                tupla_data = (r.get("Ano", "0000"), r.get("Mes", "00"))
-                if tupla_data not in anos_meses:
-                    anos_meses.append(tupla_data)
-                    
-        anos_meses = sorted(anos_meses)
+        tipo_extracao = st.radio(
+            "Como você deseja exportar os arquivos finais?",
+            ["📦 EXTRAIR TUDO (Lote Completo com todos os meses juntos)", 
+             "📅 FILTRAR POR MÊS (Separar apenas a Emissão Própria de um mês específico)"]
+        )
+
+        is_todos = "TUDO" in tipo_extracao
+        sel_ano = ""
+        sel_mes = ""
+        pode_processar = False
         
-        opcoes_filtro = ["--- SELECIONE ---", "TODOS OS MESES (Lote Completo)"]
-        for a, m in anos_meses:
-            opcoes_filtro.append(f"{a}/{m}")
-        
-        mes_escolhido = st.selectbox("Escolha a Opção de Download:", opcoes_filtro)
-        
-        if mes_escolhido != "--- SELECIONE ---" and st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
+        if not is_todos:
+            anos_meses = []
+            for r in st.session_state['relatorio']:
+                if r.get("Ano", "0000") != "0000":
+                    tupla_data = (r.get("Ano", "0000"), r.get("Mes", "00"))
+                    if tupla_data not in anos_meses:
+                        anos_meses.append(tupla_data)
+                        
+            anos_meses = sorted(anos_meses)
+            opcoes_filtro = ["--- SELECIONE O MÊS ---"]
+            for a, m in anos_meses:
+                opcoes_filtro.append(f"{a}/{m}")
             
-            is_todos = (mes_escolhido == "TODOS OS MESES (Lote Completo)")
-            sel_ano = ""
-            sel_mes = ""
+            mes_escolhido = st.selectbox("Mês de Competência da Emissão Própria:", opcoes_filtro)
             
-            if not is_todos:
+            if mes_escolhido != "--- SELECIONE O MÊS ---":
                 partes_data = mes_escolhido.split("/")
                 sel_ano = partes_data[0]
                 sel_mes = partes_data[1]
+                pode_processar = True
+        else:
+            pode_processar = True
+        
+        if pode_processar and st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
             
             with st.spinner("Buscando no HD e montando pacotes..."):
                 
-                # --- AQUI ESTAVA O BUG FATAL! ---
-                # Apenas limpo os arquivos Zips antigos para abrir espaço.
-                # NUNCA MAIS vou apagar a pasta TEMP_UPLOADS_DIR aqui dentro!
                 for f in os.listdir('.'):
                     if f.startswith('z_org_final') or f.startswith('z_todos_final'):
                         try: os.remove(f)
