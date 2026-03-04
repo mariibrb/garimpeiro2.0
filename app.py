@@ -309,7 +309,7 @@ with st.container():
                 <li><b>Enviar as Notas:</b> Arraste sua pasta de notas (ZIP ou XML soltos). O sistema suporta grandes volumes (+300MB).</li>
                 <li><b>Analisar:</b> Inicie o Garimpo. Ele lerá os arquivos em segurança.</li>
                 <li><b>Validar:</b> Confirme a Autenticidade (Sefaz) e preencha notas inutilizadas.</li>
-                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha o mês de Emissão Própria que deseja exportar e baixe!</li>
+                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha o mês que deseja exportar (ou todos) e baixe!</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1114,7 +1114,7 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTRO INTELIGENTE E EXPORTAÇÃO
         # =====================================================================
         st.markdown("### ⚙️ ETAPA 3: FILTRAR COMPETÊNCIA E EXPORTAR FINAIS")
-        st.info("O filtro isola a Emissão Própria no mês selecionado, mas mantém TODOS os XMLs de Terceiros e Inutilizadas na extração. Assim, seus arquivos finais ficam leves e exatos, e os botões não travam o sistema.")
+        st.info("Escolha se quer baixar TODOS OS MESES juntos, ou fatiar a Emissão Própria por um mês específico (sempre mantendo os Terceiros). Essa extração previne travamentos em volumes gigantes.")
         
         anos_meses = []
         for r in st.session_state['relatorio']:
@@ -1125,26 +1125,32 @@ if st.session_state['confirmado']:
                     
         anos_meses = sorted(anos_meses)
         
-        opcoes_filtro = ["--- SELECIONE ---"]
+        opcoes_filtro = ["--- SELECIONE ---", "TODOS OS MESES (Lote Completo)"]
         for a, m in anos_meses:
             opcoes_filtro.append(f"{a}/{m}")
         
-        mes_escolhido = st.selectbox("Escolha o Mês de Competência da Emissão Própria:", opcoes_filtro)
+        mes_escolhido = st.selectbox("Escolha a Opção de Download:", opcoes_filtro)
         
         if mes_escolhido != "--- SELECIONE ---" and st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
-            partes_data = mes_escolhido.split("/")
-            sel_ano = partes_data[0]
-            sel_mes = partes_data[1]
             
-            with st.spinner("Buscando no HD e montando pacotes filtrados e seguros..."):
+            is_todos = (mes_escolhido == "TODOS OS MESES (Lote Completo)")
+            sel_ano = ""
+            sel_mes = ""
+            
+            if not is_todos:
+                partes_data = mes_escolhido.split("/")
+                sel_ano = partes_data[0]
+                sel_mes = partes_data[1]
+            
+            with st.spinner("Buscando no HD e montando pacotes..."):
                 if os.path.exists('z_org_final.zip'): 
                     os.remove('z_org_final.zip')
                 if os.path.exists('z_todos_final.zip'): 
                     os.remove('z_todos_final.zip')
 
-                # Filtra e cria Excel correspondente ao que vai para o ZIP
                 df_geral_filtrado = st.session_state['df_geral'].copy()
-                if not df_geral_filtrado.empty:
+                
+                if not is_todos and not df_geral_filtrado.empty:
                     df_geral_filtrado = df_geral_filtrado[
                         (~df_geral_filtrado['Origem'].str.contains('PRÓPRIA')) | 
                         ((df_geral_filtrado['Origem'].str.contains('PRÓPRIA')) & (df_geral_filtrado['Ano'] == sel_ano) & (df_geral_filtrado['Mes'] == sel_mes)) | 
@@ -1165,7 +1171,6 @@ if st.session_state['confirmado']:
                 
                 st.session_state['excel_buffer'] = buffer_excel.getvalue()
 
-                # Busca no HD e constrói Zips lendo os blocos salvos (Zero RAM)
                 with zipfile.ZipFile('z_org_final.zip', "w", zipfile.ZIP_DEFLATED) as z_org, \
                      zipfile.ZipFile('z_todos_final.zip', "w", zipfile.ZIP_DEFLATED) as z_todos:
                     
@@ -1176,13 +1181,15 @@ if st.session_state['confirmado']:
                                 for name, xml_data in extrair_recursivo(f_temp, f_name):
                                     res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                     if res:
-                                        # REGRA DE OURO DA MARI: Mantém Terceiros. Mantém Inutilizadas. Filtra Emissão Própria (Saída ou Entrada).
                                         manter = False
-                                        if is_p:
-                                            if res["Ano"] == "0000" or (res["Ano"] == sel_ano and res["Mes"] == sel_mes):
-                                                manter = True
-                                        else:
+                                        if is_todos:
                                             manter = True
+                                        else:
+                                            if is_p:
+                                                if res["Ano"] == "0000" or (res["Ano"] == sel_ano and res["Mes"] == sel_mes):
+                                                    manter = True
+                                            else:
+                                                manter = True
                                             
                                         if manter:
                                             z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
@@ -1193,19 +1200,41 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         # =====================================================================
-        # BOTÕES GRANDES FINAIS DE DOWNLOAD
+        # BOTÕES GRANDES FINAIS DE DOWNLOAD (MODO CANUDINHO ANTI-CRASH)
         # =====================================================================
         if st.session_state.get('export_ready'):
-            st.success("✅ Tudo empacotado, filtrado e pronto para baixar!")
+            st.success("✅ Tudo empacotado, processado e pronto para baixar!")
             
+            # --- Função mágica que lê o arquivo aos poucos no botão ---
+            def gerador_de_download(caminho_arquivo):
+                with open(caminho_arquivo, 'rb') as f:
+                    while True:
+                        pedaco = f.read(5 * 1024 * 1024) # Puxa 5 MB por vez e limpa a memória
+                        if not pedaco:
+                            break
+                        yield pedaco
+
             c1, c2, c3 = st.columns(3)
-            with open('z_org_final.zip', 'rb') as f_org:
+            
+            if os.path.exists('z_org_final.zip'):
                 with c1: 
-                    st.download_button("📂 BAIXAR ORGANIZADO (ZIP)", data=f_org.read(), file_name="garimpo_filtrado_organizado.zip", mime="application/zip", use_container_width=True)
+                    st.download_button(
+                        "📂 BAIXAR ORGANIZADO (ZIP)", 
+                        data=gerador_de_download('z_org_final.zip'), 
+                        file_name="garimpo_filtrado_organizado.zip", 
+                        mime="application/zip", 
+                        use_container_width=True
+                    )
                     
-            with open('z_todos_final.zip', 'rb') as f_todos:
+            if os.path.exists('z_todos_final.zip'):
                 with c2: 
-                    st.download_button("📦 BAIXAR TODOS (SÓ XML)", data=f_todos.read(), file_name="todos_filtrado_xml.zip", mime="application/zip", use_container_width=True)
+                    st.download_button(
+                        "📦 BAIXAR TODOS (SÓ XML)", 
+                        data=gerador_de_download('z_todos_final.zip'), 
+                        file_name="todos_filtrado_xml.zip", 
+                        mime="application/zip", 
+                        use_container_width=True
+                    )
                 
             with c3: 
                 st.download_button("📊 RELATÓRIO EXCEL MASTER", st.session_state['excel_buffer'], "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
