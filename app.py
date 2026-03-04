@@ -223,14 +223,12 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
         if not resumo["CNPJ_Emit"] and resumo["Chave"] and not resumo["Chave"].startswith("INUT_"): 
             resumo["CNPJ_Emit"] = resumo["Chave"][6:20]
         
-        # Correção antibug para as pastas de mês
         if resumo["Mes"] == "00": 
             resumo["Mes"] = "01"
             
         if resumo["Ano"] == "0000": 
             resumo["Ano"] = "2000"
 
-        # Emissão Própria (Seja Entrada ou Saída, o Emitente é o Cliente)
         is_p = (resumo["CNPJ_Emit"] == client_cnpj_clean)
         
         if is_p:
@@ -1200,41 +1198,34 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         # =====================================================================
-        # BOTÕES GRANDES FINAIS DE DOWNLOAD (MODO CANUDINHO ANTI-CRASH)
+        # BOTÕES GRANDES FINAIS DE DOWNLOAD (CORREÇÃO OFICIAL STREAMLIT)
         # =====================================================================
         if st.session_state.get('export_ready'):
             st.success("✅ Tudo empacotado, processado e pronto para baixar!")
             
-            # --- Função mágica que lê o arquivo aos poucos no botão ---
-            def gerador_de_download(caminho_arquivo):
-                with open(caminho_arquivo, 'rb') as f:
-                    while True:
-                        pedaco = f.read(5 * 1024 * 1024) # Puxa 5 MB por vez e limpa a memória
-                        if not pedaco:
-                            break
-                        yield pedaco
-
             c1, c2, c3 = st.columns(3)
             
             if os.path.exists('z_org_final.zip'):
-                with c1: 
-                    st.download_button(
-                        "📂 BAIXAR ORGANIZADO (ZIP)", 
-                        data=gerador_de_download('z_org_final.zip'), 
-                        file_name="garimpo_filtrado_organizado.zip", 
-                        mime="application/zip", 
-                        use_container_width=True
-                    )
+                with c1:
+                    with open('z_org_final.zip', 'rb') as f_org:
+                        st.download_button(
+                            "📂 BAIXAR ORGANIZADO (ZIP)", 
+                            data=f_org, 
+                            file_name="garimpo_filtrado_organizado.zip", 
+                            mime="application/zip", 
+                            use_container_width=True
+                        )
                     
             if os.path.exists('z_todos_final.zip'):
-                with c2: 
-                    st.download_button(
-                        "📦 BAIXAR TODOS (SÓ XML)", 
-                        data=gerador_de_download('z_todos_final.zip'), 
-                        file_name="todos_filtrado_xml.zip", 
-                        mime="application/zip", 
-                        use_container_width=True
-                    )
+                with c2:
+                    with open('z_todos_final.zip', 'rb') as f_todos:
+                        st.download_button(
+                            "📦 BAIXAR TODOS (SÓ XML)", 
+                            data=f_todos, 
+                            file_name="todos_filtrado_xml.zip", 
+                            mime="application/zip", 
+                            use_container_width=True
+                        )
                 
             with c3: 
                 st.download_button("📊 RELATÓRIO EXCEL MASTER", st.session_state['excel_buffer'], "auditoria_detalhada.xlsx", use_container_width=True, mime="application/vnd.ms-excel")
