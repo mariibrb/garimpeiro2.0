@@ -1,3 +1,4 @@
+import hashlib
 import streamlit as st
 import zipfile
 import io
@@ -8,9 +9,11 @@ import random
 import gc
 import shutil
 import pdfplumber
+from collections import Counter, defaultdict
+from datetime import date, datetime
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
-st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
+st.set_page_config(page_title="GARIMPEIRO 2", layout="wide", page_icon="⛏️")
 
 def aplicar_estilo_premium():
     st.markdown("""
@@ -98,7 +101,10 @@ aplicar_estilo_premium()
 # --- VARIÁVEIS DE SISTEMA DE ARQUIVOS (PREVENÇÃO DE QUEDA DE MEMÓRIA) ---
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 TEMP_UPLOADS_DIR = "temp_garimpo_uploads"
-MAX_XML_PER_ZIP = 8000  # Trava de segurança para impedir queda do Streamlit (gera zips de ~20MB)
+MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (Domínio e Etapa 3); reparte em vários lotes
+# Se dois números emitidos consecutivos (ordenados) diferem mais que isto, tratamos como outra faixa.
+# Assim evitamos milhões de "buracos" falsos (ex.: uma chave/XML errado com nº gigante ou duas séries distantes misturadas).
+MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS = 25000
 
 # --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
@@ -300,51 +306,683 @@ def chunk_list(lst, n):
     for i in range(0, len(lst), n): 
         yield lst[i:i + n]
 
+
+def compactar_dataframe_memoria(df):
+    """Reduz uso de RAM (categorias + downcast); seguro para filtros .str / .isin."""
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    n = len(out)
+    for col in out.columns:
+        if out[col].dtype != object and not str(out[col].dtype).startswith("string"):
+            continue
+        nu = out[col].nunique(dropna=False)
+        if nu <= 1 or nu > min(4096, max(48, n // 2)):
+            continue
+        try:
+            out[col] = out[col].astype("category")
+        except (TypeError, ValueError):
+            pass
+    for col in out.select_dtypes(include=["float64"]).columns:
+        out[col] = pd.to_numeric(out[col], downcast="float")
+    for col in out.select_dtypes(include=["int64"]).columns:
+        out[col] = pd.to_numeric(out[col], downcast="integer")
+    return out
+
+
+def aplicar_compactacao_dfs_sessao():
+    """Compacta DataFrames grandes na sessão (útil no Streamlit Cloud)."""
+    for k in (
+        "df_geral",
+        "df_resumo",
+        "df_faltantes",
+        "df_canceladas",
+        "df_inutilizadas",
+        "df_autorizadas",
+        "df_divergencias",
+    ):
+        v = st.session_state.get(k)
+        if v is not None and isinstance(v, pd.DataFrame) and not v.empty:
+            st.session_state[k] = compactar_dataframe_memoria(v)
+    gc.collect()
+
+
+def _ym_tuple(ano, mes):
+    try:
+        return (int(ano), int(mes))
+    except (ValueError, TypeError):
+        return None
+
+
+def _ym_gt(ano_a, mes_a, ano_b, mes_b):
+    ta, tb = _ym_tuple(ano_a, mes_a), _ym_tuple(ano_b, mes_b)
+    if not ta or not tb:
+        return False
+    return ta > tb
+
+
+def _ym_eq(ano_a, mes_a, ano_b, mes_b):
+    ta, tb = _ym_tuple(ano_a, mes_a), _ym_tuple(ano_b, mes_b)
+    if not ta or not tb:
+        return False
+    return ta == tb
+
+
+def ultimos_dict_para_dataframe(ultimos_dict):
+    if not ultimos_dict:
+        return pd.DataFrame(columns=["Modelo", "Série", "Último número"])
+    rows = []
+    for kstr, v in ultimos_dict.items():
+        if "|" not in kstr:
+            continue
+        a, b = kstr.split("|", 1)
+        rows.append({"Modelo": a.strip(), "Série": b.strip(), "Último número": int(v)})
+    return pd.DataFrame(rows)
+
+
+def ref_map_from_dataframe(df):
+    """Monta o mapa 'Modelo|Série' -> último a partir da tabela do editor."""
+    out = {}
+    if df is None or df.empty:
+        return out
+    for _, row in df.iterrows():
+        modelo = row.get("Modelo")
+        if modelo is None or (isinstance(modelo, float) and pd.isna(modelo)):
+            continue
+        modelo = str(modelo).strip()
+        if not modelo:
+            continue
+        serie = row.get("Série")
+        if serie is None or (isinstance(serie, float) and pd.isna(serie)):
+            serie = ""
+        else:
+            serie = str(serie).strip()
+        if not serie:
+            continue
+        ult = row.get("Último número")
+        if ult is None or (isinstance(ult, float) and pd.isna(ult)):
+            continue
+        try:
+            u = int(float(ult))
+        except (TypeError, ValueError):
+            continue
+        if u <= 0:
+            continue
+        out[f"{modelo}|{serie}"] = u
+    return out
+
+
+def item_registro_manual_inutilizado(cnpj_limpo, tipo_man, serie_man, nota_man):
+    serie_str = str(serie_man).strip()
+    return {
+        "Arquivo": "REGISTRO_MANUAL",
+        "Chave": f"MANUAL_INUT_{tipo_man}_{serie_str}_{nota_man}",
+        "Tipo": tipo_man,
+        "Série": serie_str,
+        "Número": int(nota_man),
+        "Status": "INUTILIZADOS",
+        "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/01/Serie_{serie_str}",
+        "Valor": 0.0,
+        "Conteúdo": b"",
+        "Ano": "0000",
+        "Mes": "01",
+        "Operacao": "SAIDA",
+        "Data_Emissao": "",
+        "CNPJ_Emit": cnpj_limpo,
+        "Nome_Emit": "INSERÇÃO MANUAL",
+        "Doc_Dest": "",
+        "Nome_Dest": "",
+    }
+
+
+def parse_linhas_inutil_manual(text):
+    """Linhas: MODELO|SÉRIE|NÚMERO (pipes opcionais com espaços)."""
+    triplas = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        mod, ser, num = parts[0], parts[1], parts[2]
+        d = "".join(filter(str.isdigit, num))
+        if not d:
+            continue
+        try:
+            n = int(d)
+        except ValueError:
+            continue
+        if n <= 0 or not mod or not ser:
+            continue
+        triplas.append((mod, ser, n))
+    return triplas
+
+
+def reconstruir_dataframes_relatorio_simples():
+    """Recalcula tabelas a partir de st.session_state['relatorio'] (status no próprio item)."""
+    lote_recalc = {}
+    for item in st.session_state["relatorio"]:
+        key = item["Chave"]
+        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+        if key in lote_recalc:
+            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
+                lote_recalc[key] = (item, is_p)
+        else:
+            lote_recalc[key] = (item, is_p)
+
+    audit_map = {}
+    canc_list = []
+    inut_list = []
+    aut_list = []
+    geral_list = []
+
+    for k, (res, is_p) in lote_recalc.items():
+        if is_p:
+            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
+        else:
+            origem_label = f"TERCEIROS ({res['Operacao']})"
+
+        registro_detalhado = {
+            "Origem": origem_label,
+            "Operação": res["Operacao"],
+            "Modelo": res["Tipo"],
+            "Série": res["Série"],
+            "Nota": res["Número"],
+            "Data Emissão": res["Data_Emissao"],
+            "CNPJ Emitente": res["CNPJ_Emit"],
+            "Nome Emitente": res["Nome_Emit"],
+            "Doc Destinatário": res["Doc_Dest"],
+            "Nome Destinatário": res["Nome_Dest"],
+            "Chave": res["Chave"],
+            "Status Final": res["Status"],
+            "Valor": res["Valor"],
+            "Ano": res["Ano"],
+            "Mes": res["Mes"],
+        }
+
+        if res["Status"] == "INUTILIZADOS":
+            r = res.get("Range", (res["Número"], res["Número"]))
+            for n in range(r[0], r[1] + 1):
+                item_inut = registro_detalhado.copy()
+                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                geral_list.append(item_inut)
+        else:
+            geral_list.append(registro_detalhado)
+
+        if is_p:
+            sk = (res["Tipo"], res["Série"])
+            if sk not in audit_map:
+                audit_map[sk] = {"nums": set(), "valor": 0.0}
+
+            if res["Status"] == "INUTILIZADOS":
+                r = res.get("Range", (res["Número"], res["Número"]))
+                for n in range(r[0], r[1] + 1):
+                    audit_map[sk]["nums"].add(n)
+                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+            else:
+                if res["Número"] > 0:
+                    audit_map[sk]["nums"].add(res["Número"])
+                    if res["Status"] == "CANCELADOS":
+                        canc_list.append(registro_detalhado)
+                    elif res["Status"] == "NORMAIS":
+                        aut_list.append(registro_detalhado)
+                    audit_map[sk]["valor"] += res["Valor"]
+
+    res_final = []
+    fal_final = []
+
+    for (t, s), dados in audit_map.items():
+        ns = sorted(list(dados["nums"]))
+        if ns:
+            n_min = ns[0]
+            n_max = ns[-1]
+            res_final.append(
+                {
+                    "Documento": t,
+                    "Série": s,
+                    "Início": n_min,
+                    "Fim": n_max,
+                    "Quantidade": len(ns),
+                    "Valor Contábil (R$)": round(dados["valor"], 2),
+                }
+            )
+            fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
+
+    st.session_state.update(
+        {
+            "df_resumo": pd.DataFrame(res_final),
+            "df_faltantes": pd.DataFrame(fal_final),
+            "df_canceladas": pd.DataFrame(canc_list),
+            "df_inutilizadas": pd.DataFrame(inut_list),
+            "df_autorizadas": pd.DataFrame(aut_list),
+            "df_geral": pd.DataFrame(geral_list),
+            "st_counts": {
+                "CANCELADOS": len(canc_list),
+                "INUTILIZADOS": len(inut_list),
+                "AUTORIZADAS": len(aut_list),
+            },
+        }
+    )
+    aplicar_compactacao_dfs_sessao()
+
+
+def filtrar_df_geral_para_exportacao(
+    df_base,
+    filtro_origem,
+    filtro_meses,
+    aplicar_mes_so_na_propria,
+    filtro_modelos,
+    filtro_series,
+    filtro_status,
+    filtro_operacao,
+):
+    """Mesma lógica da Etapa 3, reutilizada para pré-visualização e exportação."""
+    if df_base is None or df_base.empty:
+        return df_base
+    out = df_base.copy()
+    if len(filtro_origem) > 0:
+        pat = "|".join([re.escape(o.split()[0]) for o in filtro_origem])
+        out = out[out["Origem"].str.contains(pat, regex=True, na=False)]
+    if len(filtro_meses) > 0:
+        out = out.copy()
+        out["Mes_Comp"] = out["Ano"].astype(str) + "/" + out["Mes"].astype(str)
+        if aplicar_mes_so_na_propria:
+            out = out[
+                (out["Mes_Comp"].isin(filtro_meses))
+                | (out["Origem"].str.contains("TERCEIROS", na=False))
+            ]
+        else:
+            out = out[out["Mes_Comp"].isin(filtro_meses)]
+    if len(filtro_modelos) > 0:
+        out = out[out["Modelo"].isin(filtro_modelos)]
+    if len(filtro_series) > 0:
+        out = out[out["Série"].astype(str).isin(filtro_series)]
+    if len(filtro_status) > 0:
+        out = out[out["Status Final"].isin(filtro_status)]
+    if len(filtro_operacao) > 0 and "Operação" in out.columns:
+        out = out[out["Operação"].isin(filtro_operacao)]
+    return out
+
+
+def v2_acrescentar_filtro_sessao(state_key, novos, permitidos=None):
+    """Acrescenta um ou mais valores à lista em session_state sem duplicar."""
+    if isinstance(novos, str):
+        novos = [novos]
+    perm = set(permitidos) if permitidos is not None else None
+    cur = list(st.session_state.get(state_key) or [])
+    for v in novos:
+        if perm is not None and v not in perm:
+            continue
+        if v not in cur:
+            cur.append(v)
+    st.session_state[state_key] = cur
+
+
+def rotulo_download_zip_parte(caminho_ficheiro):
+    m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
+    return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
+
+
+def coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref):
+    """Só emissão própria; números no mês de referência e nos meses posteriores."""
+    agg = defaultdict(lambda: {"no_mes_ref": set(), "apos_ref": set()})
+    for r in relatorio:
+        if "EMITIDOS_CLIENTE" not in r.get("Pasta", ""):
+            continue
+        ano = r.get("Ano", "2000")
+        mes = r.get("Mes", "01")
+        if str(ano) == "0000":
+            continue
+        tipo = r.get("Tipo") or ""
+        ser = str(r.get("Série", "0"))
+        key = (tipo, ser)
+        stt = r.get("Status", "")
+        if stt == "INUTILIZADOS":
+            ra, rb = r.get("Range", (r.get("Número", 0), r.get("Número", 0)))
+            try:
+                ra, rb = int(ra), int(rb)
+            except (TypeError, ValueError):
+                continue
+            for n in range(ra, rb + 1):
+                if _ym_eq(ano, mes, ano_ref, mes_ref):
+                    agg[key]["no_mes_ref"].add(n)
+                elif _ym_gt(ano, mes, ano_ref, mes_ref):
+                    agg[key]["apos_ref"].add(n)
+        else:
+            try:
+                n = int(r.get("Número", 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n <= 0:
+                continue
+            if _ym_eq(ano, mes, ano_ref, mes_ref):
+                agg[key]["no_mes_ref"].add(n)
+            elif _ym_gt(ano, mes, ano_ref, mes_ref):
+                agg[key]["apos_ref"].add(n)
+    return agg
+
+
+def montar_df_conferencia_sequencia(relatorio, ano_ref, mes_ref, ref_map):
+    """ref_map: chave 'Modelo|Série' -> último nº informado ao fim do mês de referência."""
+    linhas = []
+    agg = coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref)
+    for kstr, ultimo_u in ref_map.items():
+        partes = kstr.split("|", 2)
+        if len(partes) < 2:
+            continue
+        tipo, ser = partes[0].strip(), partes[1].strip()
+        key = (tipo, ser)
+        bucket = agg.get(key, {"no_mes_ref": set(), "apos_ref": set()})
+        nr = bucket["no_mes_ref"]
+        ap = bucket["apos_ref"]
+        max_no_mes = max(nr) if nr else None
+        min_apos = min(ap) if ap else None
+        obs = []
+        if max_no_mes is None:
+            obs.append("Sem notas desta série no mês de referência nos XMLs.")
+        elif max_no_mes > ultimo_u:
+            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é maior que o último informado ({ultimo_u}).")
+        elif max_no_mes < ultimo_u:
+            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é menor que o último informado ({ultimo_u}).")
+        else:
+            obs.append("Máximo no mês de referência coincide com o último informado.")
+        esperado_proximo = ultimo_u + 1
+        if min_apos is None:
+            obs.append("Nenhuma nota após o mês de referência neste lote.")
+        elif min_apos > esperado_proximo:
+            obs.append(
+                f"Possível falta de sequência: primeiro nº após ref. nos XMLs é {min_apos}; esperado {esperado_proximo}."
+            )
+        elif min_apos < esperado_proximo:
+            obs.append(
+                f"Primeiro após ref. nos XMLs: {min_apos} (menor que {esperado_proximo} — verifique competência ou duplicados)."
+            )
+        else:
+            obs.append(f"Sequência coerente: primeiro após ref. = {esperado_proximo}.")
+        linhas.append(
+            {
+                "Modelo": tipo,
+                "Série": ser,
+                "Último informado (fim mês ref.)": ultimo_u,
+                "Máx. XML no mês ref.": max_no_mes if max_no_mes is not None else "—",
+                "Primeiro XML após ref.": min_apos if min_apos is not None else "—",
+                "Observações": " ".join(obs),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
+    """Buracos só dentro de cada trecho; saltos grandes quebram o trecho (não preenche o intervalo entre faixas)."""
+    out = []
+    if not nums_sorted:
+        return out
+    segmentos = [[nums_sorted[0]]]
+    for i in range(1, len(nums_sorted)):
+        if nums_sorted[i] - nums_sorted[i - 1] > gap_max:
+            segmentos.append([nums_sorted[i]])
+        else:
+            segmentos[-1].append(nums_sorted[i])
+    for seg in segmentos:
+        lo, hi = seg[0], seg[-1]
+        seg_set = set(seg)
+        for b in range(lo, hi + 1):
+            if b not in seg_set:
+                out.append({"Tipo": tipo_doc, "Série": serie_str, "Num_Faltante": b})
+    return out
+
+
 # --- FUNÇÃO AUXILIAR PARA O BLOCO DOMÍNIO ---
 def extrair_notas_faltantes_dominio(pdf_file):
+    """
+    Regex original página a página + mesmo padrão no texto achatado (cruza linhas).
+    """
     notas_faltantes = []
+    meta = {
+        "erro": None,
+        "n_paginas": 0,
+        "n_chars": 0,
+        "n_tuplas_regex": 0,
+        "texto_amostra": "",
+    }
+    REGEX_ORIGINAL = re.compile(
+        r"(\d+)\s+(\d+)\s+(\d+)\s+(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e)",
+        re.IGNORECASE,
+    )
+
+    def _expand_iff(grps):
+        inicio, fim, serie = int(grps[0]), int(grps[1]), str(grps[2]).strip()
+        if fim < inicio:
+            inicio, fim = fim, inicio
+        if fim - inicio > 500000:
+            return
+        for num in range(inicio, fim + 1):
+            notas_faltantes.append({"Série": serie, "Número": num})
+
     try:
-        with pdfplumber.open(pdf_file) as pdf:
+        pdf_fonte = None
+        if hasattr(pdf_file, "seek"):
+            try:
+                pdf_file.seek(0)
+            except Exception:
+                pass
+        try:
+            pdf_fonte = pdfplumber.open(pdf_file)
+        except Exception:
+            dados = pdf_file.read()
+            if hasattr(pdf_file, "seek"):
+                pdf_file.seek(0)
+            pdf_fonte = pdfplumber.open(io.BytesIO(dados))
+
+        with pdf_fonte as pdf:
+            partes = []
             for page in pdf.pages:
-                text = page.extract_text()
-                matches = re.findall(r'(\d+)\s+(\d+)\s+(\d+)\s+(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e)', text, re.IGNORECASE)
-                for m in matches:
-                    inicio, fim, serie = int(m[0]), int(m[1]), str(m[2])
-                    for num in range(inicio, fim + 1):
-                        notas_faltantes.append({"Série": serie, "Número": num})
-    except: pass
-    return notas_faltantes
+                t = page.extract_text() or ""
+                partes.append(t)
+                for m in REGEX_ORIGINAL.finditer(t):
+                    meta["n_tuplas_regex"] += 1
+                    _expand_iff(m.groups())
+
+            meta["n_paginas"] = len(pdf.pages)
+            texto = "\n".join(partes)
+            meta["n_chars"] = len(texto)
+            flat = re.sub(r"[\s\xa0]+", " ", texto).strip()
+            meta["texto_amostra"] = flat[:500] if flat else ""
+
+            for m in REGEX_ORIGINAL.finditer(flat):
+                meta["n_tuplas_regex"] += 1
+                _expand_iff(m.groups())
+
+            def _add_sff(a, b, c):
+                try:
+                    serie, inicio, fim = str(a).strip(), int(b), int(c)
+                except (ValueError, TypeError):
+                    return
+                if fim < inicio:
+                    inicio, fim = fim, inicio
+                if fim - inicio > 500000:
+                    return
+                for num in range(inicio, fim + 1):
+                    notas_faltantes.append({"Série": serie, "Número": num})
+
+            vistos_x = set()
+            for m in re.finditer(
+                r"(\d{1,4})\s+(\d{1,9})\s+(\d{1,9})\s*(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e|NFE|NFCE|CTE)",
+                flat,
+                re.IGNORECASE,
+            ):
+                key = m.group(0)
+                if key in vistos_x:
+                    continue
+                vistos_x.add(key)
+                meta["n_tuplas_regex"] += 1
+                _add_sff(m.group(1), m.group(2), m.group(3))
+
+        uniq = {}
+        for it in notas_faltantes:
+            uniq[(str(it["Série"]), it["Número"])] = it
+        notas_faltantes = list(uniq.values())
+
+    except Exception as e:
+        meta["erro"] = str(e)
+    return notas_faltantes, meta
+
+
+def extrair_chaves_de_excel(arquivo_excel):
+    chaves = []
+    try:
+        df_keys = pd.read_excel(arquivo_excel, header=None)
+        for _, row in df_keys.iterrows():
+            raw = row.iloc[0]
+            if pd.isna(raw):
+                continue
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                try:
+                    f = float(raw)
+                    s = str(int(f)) if f.is_integer() else str(raw).strip()
+                except (ValueError, OverflowError):
+                    s = str(raw).strip()
+            else:
+                s = str(raw).strip()
+            digitos = "".join(filter(str.isdigit, s))
+            if len(digitos) >= 44:
+                chaves.append(digitos[:44])
+    except Exception:
+        pass
+    return list(dict.fromkeys(chaves))
+
+
+def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
+    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada). Retorna (lista_caminhos, total_xml)."""
+    if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
+        return [], 0
+    ch_set = set(chaves_lista)
+    try:
+        for f in os.listdir("."):
+            if f.endswith(".zip") and "faltantes_dominio_final" in f:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    parts = []
+    part_idx = 1
+    count_xml = 0
+    no_lote = 0
+    nome = f"faltantes_dominio_final_pt{part_idx}.zip"
+    zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+    parts.append(nome)
+
+    try:
+        for fn in os.listdir(TEMP_UPLOADS_DIR):
+            f_path = os.path.join(TEMP_UPLOADS_DIR, fn)
+            with open(f_path, "rb") as ft:
+                for name, data in extrair_recursivo(ft, fn):
+                    res, _ = identify_xml_info(data, cnpj_limpo, name)
+                    if res and res["Chave"] in ch_set:
+                        if no_lote >= MAX_XML_PER_ZIP:
+                            zf.close()
+                            part_idx += 1
+                            nome = f"faltantes_dominio_final_pt{part_idx}.zip"
+                            zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+                            parts.append(nome)
+                            no_lote = 0
+                        zf.writestr(f"{res['Pasta']}/{name}", data)
+                        count_xml += 1
+                        no_lote += 1
+    finally:
+        try:
+            zf.close()
+        except Exception:
+            pass
+
+    if count_xml == 0:
+        for p in parts:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        return [], 0
+
+    return parts, count_xml
+
+
+# Texto espelhado nos cartões + área “copiar guia” (manter alinhado ao fluxo real da app)
+TEXTO_GUIA_GARIMPEIRO = """
+O GARIMPEIRO — Guia rápido (para copiar)
+
+PASSO A PASSO
+1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
+2. Envie ZIP ou XML soltos (volumes grandes são suportados). Depois do primeiro resultado, pode incluir mais ficheiros no topo da página, sem reiniciar o garimpo.
+3. Clique em Iniciar grande garimpo e aguarde a leitura.
+4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
+5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
+6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
+7. Etapa 3: filtra o relatório geral (colunas Origem, Ano/Mês, Modelo, Série, Status Final, Operação); contadores antes de exportar; confirmação obrigatória se todos os multiselects estiverem vazios; Excel (folhas Filtrado + Resumo_status); CSV opcional; ZIP com pastas e/ou ZIP só com ficheiros na raiz; até 10 mil XMLs por ficheiro ZIP.
+8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
+
+O QUE O SISTEMA FAZ
+• Emissão própria (CNPJ da sidebar = emitente): resumo por série, buracos na numeração, canceladas e inutilizadas; buracos são calculados por “trechos” para evitar listas falsamente enormes.
+• Terceiros: totalizador por tipo (NF-e, NFC-e, CT-e, MDF-e).
+• Um mesmo documento pode gerar mais do que um XML no disco (ex.: nota e evento) — o mesmo número de chaves pode corresponder a vários ficheiros.
+
+DICAS
+• Resetar sistema limpa sessão e temporários; use se trocar de cliente ou quiser recomeçar do zero.
+• Modelos na app: NF-e, NFC-e, CT-e, MDF-e (use estes nomes nas tabelas e colagens).
+""".strip()
+
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
+st.caption(
+    "Este ficheiro: **app2.py** — Etapa 3 alargada (atalhos, CSV, ZIP opcional). "
+    "Interface padrão: `streamlit run app.py`."
+)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 Como usar o sistema (Passo a Passo)</h3>
+            <h3>📖 Como usar (passo a passo)</h3>
             <ol>
-                <li><b>Identificar a Empresa:</b> No menu branco à esquerda, escreva o CNPJ do cliente.</li>
-                <li><b>Enviar as Notas:</b> Arraste sua pasta de notas (ZIP ou XML soltos). Suporta grandes volumes (+300MB).</li>
-                <li><b>Analisar:</b> Inicie o Garimpo. Ele lerá os arquivos em segurança.</li>
-                <li><b>Validar:</b> Confirme a Autenticidade (Sefaz) e preencha notas inutilizadas.</li>
-                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha exatamente o que deseja baixar (Mês, Modelo, Série) e exporte.</li>
+                <li><b>CNPJ:</b> Na lateral, o CNPJ do <b>emitente</b> (cliente) → Liberar operação.</li>
+                <li><b>Lote:</b> Envie ZIP ou XML. Grandes volumes são suportados.</li>
+                <li><b>Garimpo:</b> Iniciar grande garimpo e aguardar.</li>
+                <li><b>Mais ficheiros:</b> No <b>topo dos resultados</b>, inclua XML/ZIP extra <b>sem reiniciar</b>.</li>
+                <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
+                <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
+                <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
+                <li><b>Exportar:</b> Etapa 3 — filtra o relatório geral por colunas e gera Excel/ZIP; ou lista específica (chaves 44 dígitos na col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 O que o sistema faz por si</h3>
+            <h3>📊 O que o sistema faz</h3>
             <ul>
-                <li><b>Acha Notas Perdidas:</b> Identifica buracos na numeração.</li>
-                <li><b>Limpa Cancelamentos:</b> Separa as notas canceladas da apuração.</li>
-                <li><b>Filtros Granulares:</b> Baixe apenas NF-e, apenas CT-e, separe a Série 1 da Série 2, ou isente as notas de Terceiros do filtro de competência.</li>
-                <li><b>Auditoria Cruzada:</b> Confronta o status do seu arquivo físico com o que consta no site da SEFAZ.</li>
+                <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
+                <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
+                <li><b>Exportação filtrada:</b> Linhas do relatório geral da sessão; cada ZIP com no máximo 10 000 XMLs.</li>
+                <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
+                <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
+
+    with st.expander("📋 Guia em texto simples (para copiar)", expanded=False):
+        st.caption("Clique na caixa, Ctrl+A (Cmd+A no Mac) e Ctrl+C para copiar tudo.")
+        st.text_area(
+            "Guia",
+            value=TEXTO_GUIA_GARIMPEIRO,
+            height=320,
+            key="garimpeiro_guia_copiar",
+            label_visibility="collapsed",
+        )
 
 st.markdown("---")
 
@@ -365,22 +1003,50 @@ keys_to_init = [
     'org_zip_parts',
     'todos_zip_parts',
     'ch_falt_dom',
-    'zip_dom_pronto'
+    'zip_dom_parts'
 ]
 
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: 
             st.session_state[k] = pd.DataFrame()
-        elif k in ['relatorio', 'org_zip_parts', 'todos_zip_parts', 'ch_falt_dom']: 
+        elif k in ['relatorio', 'org_zip_parts', 'todos_zip_parts', 'ch_falt_dom', 'zip_dom_parts']: 
             st.session_state[k] = []
         elif k == 'st_counts': 
             st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
         else: 
             st.session_state[k] = False
 
+if "export_csv_buffer" not in st.session_state:
+    st.session_state["export_csv_buffer"] = None
+if "excel_buffer" not in st.session_state:
+    st.session_state["excel_buffer"] = None
+if "export_excel_name" not in st.session_state:
+    st.session_state["export_excel_name"] = "relatorio.xlsx"
+if "export_csv_name" not in st.session_state:
+    st.session_state["export_csv_name"] = "relatorio.csv"
+
+if "seq_ref_ultimos" not in st.session_state:
+    st.session_state["seq_ref_ultimos"] = None
+if "seq_ref_ano" not in st.session_state:
+    st.session_state["seq_ref_ano"] = None
+if "seq_ref_mes" not in st.session_state:
+    st.session_state["seq_ref_mes"] = None
+if "seq_ref_rows" not in st.session_state:
+    if st.session_state.get("seq_ref_ultimos"):
+        st.session_state["seq_ref_rows"] = ultimos_dict_para_dataframe(st.session_state["seq_ref_ultimos"])
+    else:
+        st.session_state["seq_ref_rows"] = pd.DataFrame(
+            [{"Modelo": "NF-e", "Série": "1", "Último número": None}]
+        )
+
 with st.sidebar:
     st.markdown("### 🔍 Configuração")
+    st.caption(
+        "Memória: lotes muito grandes mantêm muitas linhas na sessão. "
+        "No Streamlit Cloud, descarregue ZIP/Excel e use **Novo garimpo**. "
+        "Atualize dependências com `requirements.txt`."
+    )
     cnpj_input = st.text_input("CNPJ DO CLIENTE", placeholder="00.000.000/0001-00")
     cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
     
@@ -390,6 +1056,66 @@ with st.sidebar:
     if len(cnpj_limpo) == 14:
         if st.button("✅ LIBERAR OPERAÇÃO"): 
             st.session_state['confirmado'] = True
+
+        with st.expander("📌 Último nº por série (mês de referência)"):
+            d = date.today()
+            def_ano = d.year - 1 if d.month == 1 else d.year
+            def_mes = 12 if d.month == 1 else d.month - 1
+            a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
+            m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
+            sr_ano = st.number_input("Ano de referência", min_value=2000, max_value=2100, value=int(a0), key="seq_in_ano")
+            sr_mes = st.number_input("Mês (1–12)", min_value=1, max_value=12, value=int(m0), key="seq_in_mes")
+            st.caption(
+                "Preencha a tabela: escolha o modelo, a série e o **último número** daquele mês. "
+                "Linhas vazias ou sem número são ignoradas ao guardar."
+            )
+            if st.session_state.get("garimpo_ok"):
+                if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
+                    dfr = st.session_state.get("df_resumo")
+                    if dfr is not None and not dfr.empty:
+                        novas = []
+                        for _, r in dfr.iterrows():
+                            novas.append(
+                                {
+                                    "Modelo": r["Documento"],
+                                    "Série": str(r["Série"]),
+                                    "Último número": None,
+                                }
+                            )
+                        st.session_state["seq_ref_rows"] = pd.DataFrame(novas)
+                        st.success("Só falta preencher a coluna do último número.")
+                        st.rerun()
+                    else:
+                        st.warning("Resumo por série ainda vazio.")
+            _opts = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
+            _tbl = st.data_editor(
+                st.session_state["seq_ref_rows"],
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "Modelo": st.column_config.SelectboxColumn("Modelo", options=_opts, required=True),
+                    "Série": st.column_config.TextColumn("Série", required=True, max_chars=10),
+                    "Último número": st.column_config.NumberColumn(
+                        "Último nº", min_value=0, step=1, format="%d", help="Último emitido no mês de referência"
+                    ),
+                },
+            )
+            st.session_state["seq_ref_rows"] = _tbl.copy()
+            if st.button("Guardar referência", key="seq_btn_guardar", use_container_width=True):
+                parsed = ref_map_from_dataframe(st.session_state["seq_ref_rows"])
+                if parsed:
+                    st.session_state["seq_ref_ano"] = int(sr_ano)
+                    st.session_state["seq_ref_mes"] = int(sr_mes)
+                    st.session_state["seq_ref_ultimos"] = parsed
+                    st.success(f"{len(parsed)} série(s) guardada(s).")
+                else:
+                    st.warning("Preencha pelo menos uma linha com modelo, série e último número (> 0).")
+            if st.session_state.get("seq_ref_ultimos"):
+                st.info(
+                    f"Referência ativa: {st.session_state['seq_ref_ano']}/"
+                    f"{int(st.session_state['seq_ref_mes']):02d} — "
+                    f"{len(st.session_state['seq_ref_ultimos'])} série(s)."
+                )
             
     st.divider()
     
@@ -531,8 +1257,7 @@ if st.session_state['confirmado']:
                         "Valor Contábil (R$)": round(dados["valor"], 2)
                     })
                     
-                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                        fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
 
             st.session_state.update({
                 'relatorio': rel_list,
@@ -548,8 +1273,11 @@ if st.session_state['confirmado']:
                     "AUTORIZADAS": len(aut_list)
                 }, 
                 'garimpo_ok': True, 
-                'export_ready': False
+                'export_ready': False,
+                'excel_buffer': None,
+                'export_csv_buffer': None,
             })
+            aplicar_compactacao_dfs_sessao()
             st.rerun()
     else:
         # --- RESULTADOS TELA INICIAL ---
@@ -558,9 +1286,91 @@ if st.session_state['confirmado']:
         c1.metric("📦 AUTORIZADAS (PRÓPRIAS)", sc.get("AUTORIZADAS", 0))
         c2.metric("❌ CANCELADAS (PRÓPRIAS)", sc.get("CANCELADOS", 0))
         c3.metric("🚫 INUTILIZADAS (PRÓPRIAS)", sc.get("INUTILIZADOS", 0))
-        
+
+        st.caption(
+            "Se faltar XML ou ZIP, use o bloco abaixo sem reiniciar o garimpo: os totais e as tabelas atualizam na hora."
+        )
+        # =====================================================================
+        # MÓDULO: ADICIONAR MAIS ARQUIVOS (CARGA INCREMENTAL) — no topo dos resultados
+        # =====================================================================
+        with st.expander("➕ Incluir mais XML / ZIP no lote (sem resetar)", expanded=False):
+            extra_files = st.file_uploader(
+                "Ficheiros a acrescentar ao lote actual:",
+                accept_multiple_files=True,
+                key="extra_files",
+            )
+            if extra_files and st.button("Processar e atualizar", key="extra_btn_proc", type="primary"):
+                with st.spinner("A adicionar…"):
+                    os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
+                    for f in extra_files:
+                        caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
+                        with open(caminho_salvo, "wb") as out_f:
+                            out_f.write(f.read())
+
+                        f.seek(0)
+                        try:
+                            todos_xmls = extrair_recursivo(f, f.name)
+                            for name, xml_data in todos_xmls:
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    ja_existe = any(
+                                        item["Chave"] == res["Chave"] for item in st.session_state["relatorio"]
+                                    )
+                                    if not ja_existe:
+                                        st.session_state["relatorio"].append(res)
+                                del xml_data
+                        except Exception:
+                            pass
+
+                    st.session_state["export_ready"] = False
+                    reconstruir_dataframes_relatorio_simples()
+                st.rerun()
+
         st.markdown("### 📊 RESUMO POR SÉRIE")
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
+
+        st.markdown("### 📥 TERCEIROS — TOTAL POR TIPO")
+        _rels_terc = [
+            r
+            for r in st.session_state["relatorio"]
+            if "RECEBIDOS_TERCEIROS" in r.get("Pasta", "")
+        ]
+        if not _rels_terc:
+            st.info("Nenhum XML de terceiros no lote.")
+        else:
+            _cnt_terc = Counter((r.get("Tipo") or "Outros") for r in _rels_terc)
+            _df_terc = pd.DataFrame(
+                [{"Modelo": t, "Quantidade": n} for t, n in sorted(_cnt_terc.items(), key=lambda x: x[0])]
+            )
+            st.caption(f"Somatório geral (documentos lidos): {_df_terc['Quantidade'].sum()}")
+            st.dataframe(_df_terc, use_container_width=True, hide_index=True)
+
+        if (
+            st.session_state.get("seq_ref_ultimos")
+            and st.session_state.get("seq_ref_ano") is not None
+            and st.session_state.get("seq_ref_mes") is not None
+        ):
+            st.markdown("### 🔗 Conferência de sequência (vs. mês de referência)")
+            ar = int(st.session_state["seq_ref_ano"])
+            mr = int(st.session_state["seq_ref_mes"])
+            st.caption(
+                f"Competência de referência: {ar}/{mr:02d}. "
+                "Só emissão própria; canceladas, autorizadas e inutilizadas entram na sequência."
+            )
+            df_seq = montar_df_conferencia_sequencia(
+                st.session_state["relatorio"], ar, mr, st.session_state["seq_ref_ultimos"]
+            )
+            if df_seq.empty:
+                st.info("Nenhuma série na referência para exibir.")
+            else:
+                st.dataframe(df_seq, use_container_width=True, hide_index=True)
+        else:
+            with st.expander("🔗 Conferência de sequência (opcional)", expanded=False):
+                st.markdown(
+                    "No menu lateral, em **Último nº por série**, escolha o mês/ano base e preencha a **tabela** "
+                    "(modelo, série, último número). Depois do garimpo pode usar **Puxar séries do resumo** para "
+                    "trazer modelo e série automaticamente — só falta digitar o último nº."
+                )
         
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
@@ -568,20 +1378,34 @@ if st.session_state['confirmado']:
         with col_audit:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
+            st.caption(
+                "Somente emissão própria: o CNPJ do emitente do XML é o mesmo da sidebar (vale para NF-e de entrada e de saída emitidas pelo cliente). "
+                "Notas em que o cliente só é destinatário (terceiros) não entram nos buracos."
+            )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else: 
                 st.info("✅ Tudo em ordem.")
                 
         with col_canc:
-            st.markdown("### ❌ CANCELADAS")
+            _q_canc = (
+                len(st.session_state["df_canceladas"])
+                if not st.session_state["df_canceladas"].empty
+                else 0
+            )
+            st.markdown(f"### ❌ CANCELADAS ({_q_canc})")
             if not st.session_state['df_canceladas'].empty:
                 st.dataframe(st.session_state['df_canceladas'], use_container_width=True, hide_index=True)
             else: 
                 st.info("ℹ️ Nenhuma nota.")
                 
         with col_inut:
-            st.markdown("### 🚫 INUTILIZADAS")
+            _q_inut = (
+                len(st.session_state["df_inutilizadas"])
+                if not st.session_state["df_inutilizadas"].empty
+                else 0
+            )
+            st.markdown(f"### 🚫 INUTILIZADAS ({_q_inut})")
             if not st.session_state['df_inutilizadas'].empty:
                 st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True)
             else: 
@@ -592,273 +1416,138 @@ if st.session_state['confirmado']:
         # =====================================================================
         # MÓDULO: DECLARAR INUTILIZADAS MANUAIS
         # =====================================================================
-        if not st.session_state['df_faltantes'].empty:
-            st.markdown("### 🛠️ INFORMAR NOTAS INUTILIZADAS (SEM XML)")
-            with st.expander("Consulte a Sefaz e selecione abaixo as notas que constam como inutilizadas."):
-                opcoes_buracos = []
-                for idx, row in st.session_state['df_faltantes'].iterrows():
-                    opcoes_buracos.append(f"{row['Tipo']} | Série {row['Série']} | Nota {row['Nº Faltante']}")
-                
-                buracos_selecionados = st.multiselect("Selecione as notas para marcá-las como Inutilizadas:", opcoes_buracos)
-                
-                if st.button("CONFIRMAR INUTILIZAÇÃO (ATUALIZAR TABELAS)"):
-                    if buracos_selecionados:
-                        with st.spinner("Atualizando..."):
-                            for selecao in buracos_selecionados:
-                                partes = selecao.split(" | ")
-                                tipo_man = partes[0].strip()
-                                serie_man = partes[1].replace("Série", "").strip()
-                                nota_man = int(partes[2].replace("Nota", "").strip())
-                                
-                                res_manual = {
-                                    "Arquivo": "REGISTRO_MANUAL", 
-                                    "Chave": f"MANUAL_INUT_{tipo_man}_{serie_man}_{nota_man}",
-                                    "Tipo": tipo_man, 
-                                    "Série": serie_man, 
-                                    "Número": nota_man, 
-                                    "Status": "INUTILIZADOS",
-                                    "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/01/Serie_{serie_man}",
-                                    "Valor": 0.0, 
-                                    "Conteúdo": b"", 
-                                    "Ano": "0000", 
-                                    "Mes": "01", 
-                                    "Operacao": "SAIDA",
-                                    "Data_Emissao": "", 
-                                    "CNPJ_Emit": cnpj_limpo, 
-                                    "Nome_Emit": "INSERÇÃO MANUAL",
-                                    "Doc_Dest": "", 
-                                    "Nome_Dest": ""
-                                }
-                                st.session_state['relatorio'].append(res_manual)
-                        
-                            lote_recalc = {}
-                            for item in st.session_state['relatorio']:
-                                key = item["Chave"]
-                                is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                                if key in lote_recalc:
-                                    if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                        lote_recalc[key] = (item, is_p)
-                                else: 
-                                    lote_recalc[key] = (item, is_p)
+        st.markdown("### 🛠️ Inutilizadas sem XML")
+        with st.expander(
+            "Inclua notas que a Sefaz mostra inutilizadas mas que não estão no lote de ficheiros.",
+            expanded=False,
+        ):
+            st.caption(
+                "Três formas: escolher entre os **buracos** (com filtro), marcar uma **faixa** de números ou **colar** várias linhas."
+            )
+            tab_b, tab_f, tab_c = st.tabs(["Dos buracos", "Faixa de números", "Colar lista"])
 
-                            audit_map = {}
-                            canc_list = []
-                            inut_list = []
-                            aut_list = []
-                            geral_list = []
-                            
-                            for k, (res, is_p) in lote_recalc.items():
-                                if is_p:
-                                    origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                                else:
-                                    origem_label = f"TERCEIROS ({res['Operacao']})"
-                                    
-                                registro_detalhado = {
-                                    "Origem": origem_label, 
-                                    "Operação": res["Operacao"], 
-                                    "Modelo": res["Tipo"], 
-                                    "Série": res["Série"], 
-                                    "Nota": res["Número"], 
-                                    "Data Emissão": res["Data_Emissao"], 
-                                    "CNPJ Emitente": res["CNPJ_Emit"], 
-                                    "Nome Emitente": res["Nome_Emit"],
-                                    "Doc Destinatário": res["Doc_Dest"], 
-                                    "Nome Destinatário": res["Nome_Dest"], 
-                                    "Chave": res["Chave"], 
-                                    "Status Final": res["Status"], 
-                                    "Valor": res["Valor"], 
-                                    "Ano": res["Ano"], 
-                                    "Mes": res["Mes"]
-                                }
-                                
-                                if res["Status"] == "INUTILIZADOS":
-                                    r = res.get("Range", (res["Número"], res["Número"]))
-                                    for n in range(r[0], r[1] + 1):
-                                        item_inut = registro_detalhado.copy()
-                                        item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                        geral_list.append(item_inut)
-                                else: 
-                                    geral_list.append(registro_detalhado)
-
-                                if is_p:
-                                    sk = (res["Tipo"], res["Série"])
-                                    if sk not in audit_map: 
-                                        audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                        
-                                    if res["Status"] == "INUTILIZADOS":
-                                        r = res.get("Range", (res["Número"], res["Número"]))
-                                        for n in range(r[0], r[1] + 1):
-                                            audit_map[sk]["nums"].add(n)
-                                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                                    else:
-                                        if res["Número"] > 0:
-                                            audit_map[sk]["nums"].add(res["Número"])
-                                            if res["Status"] == "CANCELADOS": 
-                                                canc_list.append(registro_detalhado)
-                                            elif res["Status"] == "NORMAIS": 
-                                                aut_list.append(registro_detalhado)
-                                            audit_map[sk]["valor"] += res["Valor"]
-
-                            res_final = []
-                            fal_final = []
-                            
-                            for (t, s), dados in audit_map.items():
-                                ns = sorted(list(dados["nums"]))
-                                if ns:
-                                    n_min = ns[0]
-                                    n_max = ns[-1]
-                                    res_final.append({
-                                        "Documento": t, 
-                                        "Série": s, 
-                                        "Início": n_min, 
-                                        "Fim": n_max, 
-                                        "Quantidade": len(ns), 
-                                        "Valor Contábil (R$)": round(dados["valor"], 2)
-                                    })
-                                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-
-                            st.session_state.update({
-                                'df_resumo': pd.DataFrame(res_final), 
-                                'df_faltantes': pd.DataFrame(fal_final), 
-                                'df_canceladas': pd.DataFrame(canc_list), 
-                                'df_inutilizadas': pd.DataFrame(inut_list), 
-                                'df_autorizadas': pd.DataFrame(aut_list), 
-                                'df_geral': pd.DataFrame(geral_list), 
-                                'st_counts': {
-                                    "CANCELADOS": len(canc_list), 
-                                    "INUTILIZADOS": len(inut_list), 
-                                    "AUTORIZADAS": len(aut_list)
-                                }
-                            })
+            with tab_b:
+                df_b = st.session_state["df_faltantes"].copy()
+                if not df_b.empty and "Serie" in df_b.columns and "Série" not in df_b.columns:
+                    df_b = df_b.rename(columns={"Serie": "Série"})
+                if df_b.empty:
+                    st.info("Sem buracos na auditoria — use **Faixa** ou **Colar**, ou faça o garimpo primeiro.")
+                elif not {"Tipo", "Série", "Num_Faltante"}.issubset(df_b.columns):
+                    st.warning(
+                        "A tabela de buracos não tem o formato esperado (Tipo, Série, Num_Faltante). "
+                        "Faça **Novo garimpo** para recalcular."
+                    )
+                else:
+                    _mods_b = sorted(df_b["Tipo"].astype(str).unique())
+                    _mb = st.selectbox("Modelo", _mods_b, key="inut_b_mod")
+                    _sub_b = df_b[df_b["Tipo"].astype(str) == _mb]
+                    _sers_b = sorted(_sub_b["Série"].astype(str).unique())
+                    _sb = st.selectbox("Série", _sers_b, key="inut_b_ser")
+                    _sub2_b = _sub_b[_sub_b["Série"].astype(str) == _sb]
+                    _nums_b = sorted(_sub2_b["Num_Faltante"].astype(int).unique())
+                    st.caption(f"{len(_nums_b)} número(s) em falta neste modelo/série.")
+                    _pick_b = st.multiselect(
+                        "Marque os que quer tratar como inutilizados:",
+                        options=_nums_b,
+                        format_func=lambda x: f"Nota n.º {x}",
+                        key="inut_b_pick",
+                    )
+                    if st.button("Aplicar seleção", type="primary", key="inut_b_go"):
+                        if not _pick_b:
+                            st.warning("Selecione pelo menos um número.")
+                        else:
+                            with st.spinner("A atualizar…"):
+                                for _nb in _pick_b:
+                                    st.session_state["relatorio"].append(
+                                        item_registro_manual_inutilizado(cnpj_limpo, _mb, _sb, _nb)
+                                    )
+                                reconstruir_dataframes_relatorio_simples()
                             st.rerun()
+
+            with tab_f:
+                _mf = st.selectbox("Modelo", ["NF-e", "NFC-e", "CT-e", "MDF-e"], key="inut_f_mod")
+                _sf = st.text_input("Série", value="1", key="inut_f_ser").strip()
+                _c1f, _c2f = st.columns(2)
+                _n0 = _c1f.number_input("Nota inicial", min_value=1, value=1, step=1, key="inut_f_i")
+                _n1 = _c2f.number_input("Nota final", min_value=1, value=1, step=1, key="inut_f_f")
+                _MAX_FAIXA_INUT = 5000
+                st.caption(f"No máximo {_MAX_FAIXA_INUT} notas por vez (proteção do sistema).")
+                if st.button("Marcar faixa inteira", type="primary", key="inut_f_go"):
+                    if not _sf:
+                        st.warning("Indique a série.")
+                    elif _n0 > _n1:
+                        st.warning("A nota inicial não pode ser maior que a final.")
+                    elif (_n1 - _n0 + 1) > _MAX_FAIXA_INUT:
+                        st.warning(f"Reduza a faixa (máximo {_MAX_FAIXA_INUT} notas).")
+                    else:
+                        with st.spinner("A atualizar…"):
+                            for _nn in range(int(_n0), int(_n1) + 1):
+                                st.session_state["relatorio"].append(
+                                    item_registro_manual_inutilizado(cnpj_limpo, _mf, _sf, _nn)
+                                )
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
+
+            with tab_c:
+                st.caption("Uma nota por linha: `NF-e|1|100` (modelo | série | número).")
+                _txt_c = st.text_area(
+                    "Linhas",
+                    height=120,
+                    key="inut_c_txt",
+                    placeholder="NF-e|1|100\nNF-e|1|101",
+                )
+                if st.button("Importar e aplicar", type="primary", key="inut_c_go"):
+                    _tri = parse_linhas_inutil_manual(_txt_c)
+                    if not _tri:
+                        st.warning("Nenhuma linha válida.")
+                    else:
+                        with st.spinner("A atualizar…"):
+                            for _mod, _ser, _nota in _tri:
+                                st.session_state["relatorio"].append(
+                                    item_registro_manual_inutilizado(cnpj_limpo, _mod, _ser, _nota)
+                                )
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
 
         # =====================================================================
         # MÓDULO: DESFAZER INUTILIZAÇÃO MANUAL
         # =====================================================================
         inut_manuais = [item for item in st.session_state['relatorio'] if item.get('Arquivo') == "REGISTRO_MANUAL"]
         if inut_manuais:
-            with st.expander("🔙 DESFAZER INUTILIZAÇÃO MANUAL"):
-                opcoes_desfazer = []
-                for item in inut_manuais:
-                    opcoes_desfazer.append(f"{item['Tipo']} | Série {item['Série']} | Nota {item['Número']}")
-                    
-                desfazer_selecionados = st.multiselect("Selecione as notas para REMOVER da lista de inutilizadas:", opcoes_desfazer)
-                
-                if st.button("DESFAZER E ATUALIZAR TABELAS"):
-                    if desfazer_selecionados:
-                        with st.spinner("Removendo..."):
-                            chaves_removidas = []
-                            for s in desfazer_selecionados:
-                                partes = s.split(' | ')
-                                t_tipo = partes[0].strip()
-                                t_serie = partes[1].replace('Série', '').strip()
-                                t_nota = int(partes[2].replace('Nota', '').strip())
-                                chaves_removidas.append(f"MANUAL_INUT_{t_tipo}_{t_serie}_{t_nota}")
-                                
-                            st.session_state['relatorio'] = [i for i in st.session_state['relatorio'] if i['Chave'] not in chaves_removidas]
-                            
-                            lote_recalc = {}
-                            for item in st.session_state['relatorio']:
-                                key = item["Chave"]
-                                is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                                if key in lote_recalc:
-                                    if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                        lote_recalc[key] = (item, is_p)
-                                else: 
-                                    lote_recalc[key] = (item, is_p)
-
-                            audit_map = {}
-                            canc_list = []
-                            inut_list = []
-                            aut_list = []
-                            geral_list = []
-                            
-                            for k, (res, is_p) in lote_recalc.items():
-                                if is_p:
-                                    origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                                else:
-                                    origem_label = f"TERCEIROS ({res['Operacao']})"
-                                    
-                                registro_detalhado = {
-                                    "Origem": origem_label, 
-                                    "Operação": res["Operacao"], 
-                                    "Modelo": res["Tipo"], 
-                                    "Série": res["Série"], 
-                                    "Nota": res["Número"], 
-                                    "Data Emissão": res["Data_Emissao"], 
-                                    "CNPJ Emitente": res["CNPJ_Emit"], 
-                                    "Nome Emitente": res["Nome_Emit"], 
-                                    "Doc Destinatário": res["Doc_Dest"], 
-                                    "Nome Destinatário": res["Nome_Dest"], 
-                                    "Chave": res["Chave"], 
-                                    "Status Final": res["Status"], 
-                                    "Valor": res["Valor"], 
-                                    "Ano": res["Ano"], 
-                                    "Mes": res["Mes"]
-                                }
-                                
-                                if res["Status"] == "INUTILIZADOS":
-                                    r = res.get("Range", (res["Número"], res["Número"]))
-                                    for n in range(r[0], r[1] + 1):
-                                        item_inut = registro_detalhado.copy()
-                                        item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                        geral_list.append(item_inut)
-                                else: 
-                                    geral_list.append(registro_detalhado)
-
-                                if is_p:
-                                    sk = (res["Tipo"], res["Série"])
-                                    if sk not in audit_map: 
-                                        audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                        
-                                    if res["Status"] == "INUTILIZADOS":
-                                        r = res.get("Range", (res["Número"], res["Número"]))
-                                        for n in range(r[0], r[1] + 1): 
-                                            audit_map[sk]["nums"].add(n)
-                                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                                    else:
-                                        if res["Número"] > 0:
-                                            audit_map[sk]["nums"].add(res["Número"])
-                                            if res["Status"] == "CANCELADOS": 
-                                                canc_list.append(registro_detalhado)
-                                            elif res["Status"] == "NORMAIS": 
-                                                aut_list.append(registro_detalhado)
-                                            audit_map[sk]["valor"] += res["Valor"]
-                                            
-                            res_final = []
-                            fal_final = []
-                            
-                            for (t, s), dados in audit_map.items():
-                                ns = sorted(list(dados["nums"]))
-                                if ns:
-                                    n_min = ns[0]
-                                    n_max = ns[-1]
-                                    res_final.append({
-                                        "Documento": t, 
-                                        "Série": s, 
-                                        "Início": n_min, 
-                                        "Fim": n_max, 
-                                        "Quantidade": len(ns), 
-                                        "Valor Contábil (R$)": round(dados["valor"], 2)
-                                    })
-                                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-                                        
-                            st.session_state.update({
-                                'df_resumo': pd.DataFrame(res_final), 
-                                'df_faltantes': pd.DataFrame(fal_final), 
-                                'df_canceladas': pd.DataFrame(canc_list), 
-                                'df_inutilizadas': pd.DataFrame(inut_list), 
-                                'df_autorizadas': pd.DataFrame(aut_list), 
-                                'df_geral': pd.DataFrame(geral_list), 
-                                'st_counts': {
-                                    "CANCELADOS": len(canc_list), 
-                                    "INUTILIZADOS": len(inut_list), 
-                                    "AUTORIZADAS": len(aut_list)
-                                }
-                            })
-                            st.rerun()
+            with st.expander("🔙 Desfazer inutilização manual", expanded=False):
+                _df_m = pd.DataFrame(
+                    [
+                        {"Chave": i["Chave"], "Tipo": i["Tipo"], "Série": str(i["Série"]), "Nota": i["Número"]}
+                        for i in inut_manuais
+                    ]
+                )
+                _dm = sorted(_df_m["Tipo"].astype(str).unique())
+                _mdes = st.selectbox("Modelo", _dm, key="desf_mod")
+                _sub_d = _df_m[_df_m["Tipo"].astype(str) == _mdes]
+                _dsers = sorted(_sub_d["Série"].astype(str).unique())
+                _sdes = st.selectbox("Série", _dsers, key="desf_ser")
+                _sub2_d = _sub_d[_sub_d["Série"].astype(str) == _sdes].sort_values("Nota")
+                _rotulos = {
+                    row["Chave"]: f"Nota n.º {int(row['Nota'])}"
+                    for _, row in _sub2_d.iterrows()
+                }
+                _chaves_sel = st.multiselect(
+                    "Remover da lista de inutilizadas:",
+                    options=list(_rotulos.keys()),
+                    format_func=lambda k: _rotulos.get(k, k),
+                    key="desf_pick",
+                )
+                if st.button("Remover seleção e atualizar tabelas", key="desf_btn"):
+                    if _chaves_sel:
+                        with st.spinner("A remover…"):
+                            _set_rem = set(_chaves_sel)
+                            st.session_state["relatorio"] = [
+                                i for i in st.session_state["relatorio"] if i["Chave"] not in _set_rem
+                            ]
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
+                    else:
+                        st.warning("Selecione pelo menos um registo.")
 
         st.divider()
         
@@ -982,8 +1671,7 @@ if st.session_state['confirmado']:
                             "Quantidade": len(ns), 
                             "Valor Contábil (R$)": round(dados["valor"], 2)
                         })
-                        for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                            fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
+                        fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
                             
                 st.session_state.update({
                     'df_canceladas': pd.DataFrame(canc_list), 
@@ -1000,315 +1688,635 @@ if st.session_state['confirmado']:
                     }, 
                     'validation_done': True
                 })
+                aplicar_compactacao_dfs_sessao()
                 st.rerun()
 
         st.divider()
 
         # =====================================================================
-        # MÓDULO: ADICIONAR MAIS ARQUIVOS (CARGA INCREMENTAL)
+        # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
-        with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
-            extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
-            if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
-                with st.spinner("Adicionando..."):
-                    os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
-                    for f in extra_files:
-                        caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
-                        with open(caminho_salvo, "wb") as out_f:
-                            out_f.write(f.read())
-                        
-                        f.seek(0)
-                        try:
-                            todos_xmls = extrair_recursivo(f, f.name)
-                            for name, xml_data in todos_xmls:
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res:
-                                    ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
-                                    if not ja_existe:
-                                        st.session_state['relatorio'].append(res)
-                                del xml_data
-                        except: 
-                            pass
-                    
-                    st.session_state['export_ready'] = False
-                    
-                    lote_recalc = {}
-                    for item in st.session_state['relatorio']:
-                        key = item["Chave"]
-                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                        if key in lote_recalc:
-                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                lote_recalc[key] = (item, is_p)
-                        else: 
-                            lote_recalc[key] = (item, is_p)
+        st.markdown("### ⚙️ Etapa 3: filtros e exportação")
+        st.info(
+            "**Listas (dropdowns):** em cada lista pode marcar **várias opções ao mesmo tempo** (Ctrl+clique ou caixas múltiplas). "
+            "Combinar NF-e com EMISSÃO PRÓPRIA e TERCEIROS = escolher nas três listas ou usar os atalhos abaixo. "
+            "**Atalhos:** **acrescentam** à lista (não apagam o que já estava). "
+            "**Botão principal no fim (Gerar Excel / CSV / ZIP…):** gera ficheiros."
+        )
+        st.caption(
+            "Dados: apenas o relatório geral desta sessão (após o garimpo). "
+            "Lista vazia num critério = esse critério não restringe. "
+            "Contadores = linhas e chaves distintas após todos os critérios ativos. "
+            "Todas as listas vazias = todas as linhas do relatório geral (com confirmação)."
+        )
 
-                    audit_map = {}
-                    canc_list = []
-                    inut_list = []
-                    aut_list = []
-                    geral_list = []
-                    
-                    for k, (res, is_p) in lote_recalc.items():
-                        if is_p:
-                            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                        else:
-                            origem_label = f"TERCEIROS ({res['Operacao']})"
-                            
-                        registro_detalhado = {
-                            "Origem": origem_label, 
-                            "Operação": res["Operacao"], 
-                            "Modelo": res["Tipo"], 
-                            "Série": res["Série"], 
-                            "Nota": res["Número"], 
-                            "Data Emissão": res["Data_Emissao"], 
-                            "CNPJ Emitente": res["CNPJ_Emit"], 
-                            "Nome Emitente": res["Nome_Emit"],
-                            "Doc Destinatário": res["Doc_Dest"], 
-                            "Nome Destinatário": res["Nome_Dest"], 
-                            "Chave": res["Chave"], 
-                            "Status Final": res["Status"], 
-                            "Valor": res["Valor"], 
-                            "Ano": res["Ano"], 
-                            "Mes": res["Mes"]
-                        }
-                        
-                        if res["Status"] == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            for n in range(r[0], r[1] + 1):
-                                item_inut = registro_detalhado.copy()
-                                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                geral_list.append(item_inut)
-                        else: 
-                            geral_list.append(registro_detalhado)
+        _wp = st.session_state.pop("v2_preset_warn", None)
+        if _wp:
+            st.warning(_wp)
 
-                        if is_p:
-                            sk = (res["Tipo"], res["Série"])
-                            if sk not in audit_map: 
-                                audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                
-                            if res["Status"] == "INUTILIZADOS":
-                                r = res.get("Range", (res["Número"], res["Número"]))
-                                for n in range(r[0], r[1] + 1): 
-                                    audit_map[sk]["nums"].add(n)
-                                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                            else:
-                                if res["Número"] > 0:
-                                    audit_map[sk]["nums"].add(res["Número"])
-                                    if res["Status"] == "CANCELADOS": 
-                                        canc_list.append(registro_detalhado)
-                                    elif res["Status"] == "NORMAIS": 
-                                        aut_list.append(registro_detalhado)
-                                    audit_map[sk]["valor"] += res["Valor"]
-                                    
-                    res_final = []
-                    fal_final = []
-                    
-                    for (t, s), dados in audit_map.items():
-                        ns = sorted(list(dados["nums"]))
-                        if ns:
-                            n_min = ns[0]
-                            n_max = ns[-1]
-                            res_final.append({
-                                "Documento": t, 
-                                "Série": s, 
-                                "Início": n_min, 
-                                "Fim": n_max, 
-                                "Quantidade": len(ns), 
-                                "Valor Contábil (R$)": round(dados["valor"], 2)
-                            })
-                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                fal_final.append({"Tipo": t, "Série": s, "Nº Faltante": b})
-                                
-                    st.session_state.update({
-                        'df_resumo': pd.DataFrame(res_final), 
-                        'df_faltantes': pd.DataFrame(fal_final), 
-                        'df_canceladas': pd.DataFrame(canc_list), 
-                        'df_inutilizadas': pd.DataFrame(inut_list), 
-                        'df_autorizadas': pd.DataFrame(aut_list), 
-                        'df_geral': pd.DataFrame(geral_list), 
-                        'st_counts': {
-                            "CANCELADOS": len(canc_list), 
-                            "INUTILIZADOS": len(inut_list), 
-                            "AUTORIZADAS": len(aut_list)
-                        }
-                    })
+        df_g_base = st.session_state["df_geral"]
+        todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
+        anos_meses = sorted(
+            list(
+                set(
+                    [
+                        f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}"
+                        for r in st.session_state["relatorio"]
+                        if r.get("Ano", "0000") != "0000"
+                    ]
+                )
+            )
+        )
+        modelos = sorted(list(set([r.get("Tipo", "") for r in st.session_state["relatorio"]])))
+        series = sorted(list(set([str(r.get("Série", "0")) for r in st.session_state["relatorio"]])))
+        if not df_g_base.empty and "Status Final" in df_g_base.columns:
+            status_opcoes = sorted(
+                {str(x) for x in df_g_base["Status Final"].tolist() if str(x) not in ("", "nan", "None")}
+            )
+        else:
+            status_opcoes = sorted(
+                {str(r.get("Status", "")) for r in st.session_state["relatorio"] if r.get("Status")}
+            )
+        operacoes_opts = []
+        if not df_g_base.empty and "Operação" in df_g_base.columns:
+            operacoes_opts = sorted(
+                {str(x) for x in df_g_base["Operação"].tolist() if str(x) not in ("", "nan", "None")}
+            )
+
+        with st.expander("Atalhos — acrescentam às listas (várias combinações)", expanded=True):
+            st.caption(
+                "Cada «+ …» junta esse valor ao multiselect correspondente. "
+                "«Marcar todas / todos» preenche a lista inteira daquele critério. "
+                "«Limpar …» só esvazia aquele critério."
+            )
+            st.markdown("**Origem**")
+            o1, o2, o3, o4 = st.columns(4)
+            with o1:
+                if st.button("+ EMISSÃO PRÓPRIA", key="v2_add_o_prop", use_container_width=True):
+                    v2_acrescentar_filtro_sessao("v2_f_orig", "EMISSÃO PRÓPRIA", todas_origens)
+                    st.rerun()
+            with o2:
+                if st.button("+ TERCEIROS", key="v2_add_o_terc", use_container_width=True):
+                    v2_acrescentar_filtro_sessao("v2_f_orig", "TERCEIROS", todas_origens)
+                    st.rerun()
+            with o3:
+                if st.button("Origem: marcar todas", key="v2_all_o", use_container_width=True):
+                    st.session_state["v2_f_orig"] = list(todas_origens)
+                    st.rerun()
+            with o4:
+                if st.button("Limpar origem", key="v2_clr_o", use_container_width=True):
+                    st.session_state["v2_f_orig"] = []
                     st.rerun()
 
-        st.divider()
+            st.markdown("**Modelo**")
+            _mods_ordem = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
+            _mods_existentes = [m for m in _mods_ordem if m in modelos]
+            _resto_mod = [m for m in modelos if m not in _mods_ordem]
+            _linha_mod = _mods_existentes + _resto_mod
+            if _linha_mod:
+                for mi in range(0, len(_linha_mod), 4):
+                    chunk = _linha_mod[mi : mi + 4]
+                    mc = st.columns(len(chunk))
+                    for mj, m in enumerate(chunk):
+                        with mc[mj]:
+                            sid = hashlib.md5(m.encode()).hexdigest()[:12]
+                            if st.button(f"+ {m}", key=f"v2_bm_{mi}_{mj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_mod", m, modelos)
+                                st.rerun()
+                m1, m2 = st.columns(2)
+                with m1:
+                    if st.button("Modelos: todos", key="v2_all_m", use_container_width=True):
+                        st.session_state["v2_f_mod"] = list(modelos)
+                        st.rerun()
+                with m2:
+                    if st.button("Limpar modelos", key="v2_clr_m", use_container_width=True):
+                        st.session_state["v2_f_mod"] = []
+                        st.rerun()
+            else:
+                st.caption("Sem modelos no relatório.")
 
-        # =====================================================================
-        # ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO (NOVO PAINEL DE CONTROLE)
-        # =====================================================================
-        st.markdown("### ⚙️ ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO")
-        
-        todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
-        anos_meses = sorted(list(set([f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}" for r in st.session_state['relatorio'] if r.get('Ano', '0000') != '0000'])))
-        modelos = sorted(list(set([r.get('Tipo', '') for r in st.session_state['relatorio']])))
-        series = sorted(list(set([str(r.get('Série', '0')) for r in st.session_state['relatorio']])))
-        status_opcoes = sorted(list(set([r.get('Status', '') for r in st.session_state['relatorio']]))) 
-        
+            st.markdown("**Status Final**")
+            if status_opcoes:
+                for si in range(0, len(status_opcoes), 4):
+                    chunk = status_opcoes[si : si + 4]
+                    sc = st.columns(len(chunk))
+                    for sj, stt in enumerate(chunk):
+                        with sc[sj]:
+                            sid = hashlib.md5(stt.encode()).hexdigest()[:16]
+                            if st.button(f"+ {stt}", key=f"v2_bs_{si}_{sj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_stat", stt, status_opcoes)
+                                st.rerun()
+                s1, s2 = st.columns(2)
+                with s1:
+                    if st.button("Status: todos", key="v2_all_s", use_container_width=True):
+                        st.session_state["v2_f_stat"] = list(status_opcoes)
+                        st.rerun()
+                with s2:
+                    if st.button("Limpar status", key="v2_clr_s", use_container_width=True):
+                        st.session_state["v2_f_stat"] = []
+                        st.rerun()
+            else:
+                st.caption("Sem valores de status no relatório.")
+
+            st.markdown("**Ano / mês**")
+            y1, y2, y3 = st.columns(3)
+            with y1:
+                if st.button("+ Mês atual (PC)", key="v2_add_mes_hoje", use_container_width=True):
+                    hm = f"{date.today().year}/{date.today().month:02d}"
+                    if hm in anos_meses:
+                        v2_acrescentar_filtro_sessao("v2_f_mes", hm, anos_meses)
+                    else:
+                        st.session_state["v2_preset_warn"] = (
+                            f"Nenhuma linha com Ano/Mês = {hm} neste lote. "
+                            f"Valor: date.today() do PC → {hm}."
+                        )
+                    st.rerun()
+            with y2:
+                if st.button("Ano/mês: todos no lote", key="v2_all_y", use_container_width=True):
+                    st.session_state["v2_f_mes"] = list(anos_meses)
+                    st.rerun()
+            with y3:
+                if st.button("Limpar ano/mês", key="v2_clr_y", use_container_width=True):
+                    st.session_state["v2_f_mes"] = []
+                    st.rerun()
+
+            st.markdown("**Série**")
+            s1, s2 = st.columns(2)
+            with s1:
+                if st.button("Série: todas no lote", key="v2_all_sr", use_container_width=True):
+                    st.session_state["v2_f_ser"] = list(series)
+                    st.rerun()
+            with s2:
+                if st.button("Limpar séries", key="v2_clr_sr", use_container_width=True):
+                    st.session_state["v2_f_ser"] = []
+                    st.rerun()
+
+            if operacoes_opts:
+                st.markdown("**Operação**")
+                for oi in range(0, len(operacoes_opts), 4):
+                    chunk = operacoes_opts[oi : oi + 4]
+                    oc = st.columns(len(chunk))
+                    for oj, opv in enumerate(chunk):
+                        with oc[oj]:
+                            sid = hashlib.md5(opv.encode()).hexdigest()[:16]
+                            if st.button(f"+ {opv}", key=f"v2_bo_{oi}_{oj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_op", opv, operacoes_opts)
+                                st.rerun()
+                op1, op2 = st.columns(2)
+                with op1:
+                    if st.button("Operação: todas", key="v2_all_op", use_container_width=True):
+                        st.session_state["v2_f_op"] = list(operacoes_opts)
+                        st.rerun()
+                with op2:
+                    if st.button("Limpar operação", key="v2_clr_op", use_container_width=True):
+                        st.session_state["v2_f_op"] = []
+                        st.rerun()
+
+            st.divider()
+            if st.button("Repor todos os filtros (listas vazias)", key="v2_pre_clr", use_container_width=True):
+                for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
+                    if _kx in st.session_state:
+                        st.session_state[_kx] = []
+                st.session_state["v2_apenas_mes_propria"] = True
+                st.rerun()
+
         with st.container():
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
-                filtro_origem = st.multiselect("📌 Origem:", todas_origens)
+                filtro_origem = st.multiselect(
+                    "Origem (uma ou mais)",
+                    todas_origens,
+                    key="v2_f_orig",
+                    help="Várias origens = união (inclui linha se coincidir com qualquer uma). "
+                    "EMISSÃO PRÓPRIA: emitente = CNPJ da sidebar. TERCEIROS: resto nesta sessão.",
+                )
             with f_col2:
-                filtro_meses = st.multiselect("📅 Ano/Mês:", anos_meses)
-                aplicar_mes_so_na_propria = st.checkbox("Aplicar Mês APENAS na Emissão Própria?", value=True)
+                filtro_meses = st.multiselect(
+                    "Ano / mês (uma ou mais competências)",
+                    anos_meses,
+                    key="v2_f_mes",
+                    help="Vários meses = união. Valores vêm da data de emissão dos XML desta sessão.",
+                )
             with f_col3:
-                filtro_modelos = st.multiselect("📄 Modelo:", modelos)
+                filtro_modelos = st.multiselect(
+                    "Modelo (uma ou mais)",
+                    modelos,
+                    key="v2_f_mod",
+                    help="Ex.: NF-e e NFC-e ao mesmo tempo — exporta linhas de ambos.",
+                )
             with f_col4:
-                filtro_series = st.multiselect("🔢 Série:", series)
+                filtro_series = st.multiselect(
+                    "Série (uma ou mais)",
+                    series,
+                    key="v2_f_ser",
+                    help="Várias séries = união (OR).",
+                )
             with f_col5:
-                filtro_status = st.multiselect("✅ Status:", status_opcoes) 
+                filtro_status = st.multiselect(
+                    "Status Final (uma ou mais)",
+                    status_opcoes,
+                    key="v2_f_stat",
+                    help="Vários status = união. Coluna Status Final na planilha exportada.",
+                )
 
-        if st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
-            
-            with st.spinner("Buscando no HD e montando pacotes..."):
-                
-                # Limpa zips antigos
-                for f in os.listdir('.'):
-                    if f.startswith('z_org_final') or f.startswith('z_todos_final'):
-                        try: os.remove(f)
-                        except: pass
+        aplicar_mes_so_na_propria = st.checkbox(
+            "Com Ano/mês selecionado: excluir do filtro de mês as linhas cuja Origem contém TERCEIROS "
+            "(ficam sempre incluídas). Desmarcado: Ano/mês filtra todas as linhas, inclusive TERCEIROS.",
+            value=True,
+            key="v2_apenas_mes_propria",
+        )
 
-                # --- 1. APLICA FILTROS NO EXCEL ---
-                df_geral_filtrado = st.session_state['df_geral'].copy()
-                
-                if not df_geral_filtrado.empty:
-                    if len(filtro_origem) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Origem'].str.contains('|'.join([o.split()[0] for o in filtro_origem]))]
-                            
-                    if len(filtro_meses) > 0:
-                        df_geral_filtrado['Mes_Comp'] = df_geral_filtrado['Ano'] + "/" + df_geral_filtrado['Mes']
-                        if aplicar_mes_so_na_propria:
-                            df_geral_filtrado = df_geral_filtrado[(df_geral_filtrado['Mes_Comp'].isin(filtro_meses)) | (df_geral_filtrado['Origem'].str.contains('TERCEIROS'))]
-                        else:
-                            df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Mes_Comp'].isin(filtro_meses)]
-                            
-                    if len(filtro_modelos) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Modelo'].isin(filtro_modelos)]
-                        
-                    if len(filtro_series) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Série'].astype(str).isin(filtro_series)]
+        if operacoes_opts:
+            filtro_operacao = st.multiselect(
+                "Operação (uma ou mais, se existir no relatório)",
+                operacoes_opts,
+                key="v2_f_op",
+                help="Valores do XML. Várias opções = união.",
+            )
+        else:
+            filtro_operacao = []
 
-                    if len(filtro_status) > 0: 
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Status Final'].isin(filtro_status)]
+        df_preview = filtrar_df_geral_para_exportacao(
+            df_g_base,
+            filtro_origem,
+            filtro_meses,
+            aplicar_mes_so_na_propria,
+            filtro_modelos,
+            filtro_series,
+            filtro_status,
+            filtro_operacao,
+        )
+        pv1, pv2, pv3 = st.columns(3)
+        _n_lin = len(df_preview) if df_preview is not None and not df_preview.empty else 0
+        _n_ch = (
+            int(df_preview["Chave"].nunique())
+            if df_preview is not None and not df_preview.empty
+            else 0
+        )
+        pv1.metric("Linhas após filtros (folha Filtrado)", _n_lin)
+        pv2.metric("Chaves 44 dígitos distintas (após filtros)", _n_ch)
+        pv3.metric("Linhas no relatório geral (sem filtros)", len(df_g_base) if not df_g_base.empty else 0)
 
-                # Excel Master
-                buffer_excel = io.BytesIO()
-                with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
-                    df_geral_filtrado.to_excel(writer, sheet_name='Filtrado', index=False)
-                st.session_state['excel_buffer'] = buffer_excel.getvalue()
+        nenhum_filtro = (
+            len(filtro_origem) == 0
+            and len(filtro_meses) == 0
+            and len(filtro_modelos) == 0
+            and len(filtro_series) == 0
+            and len(filtro_status) == 0
+            and len(filtro_operacao) == 0
+        )
+        if nenhum_filtro:
+            st.info(
+                "Todos os multiselects vazios: nenhum critério extra; exportação = todas as linhas atuais do relatório geral."
+            )
+            confirm_export_total = st.checkbox(
+                "Confirmo exportar todas as linhas do relatório geral (nenhum critério de coluna aplicado).",
+                value=True,
+                key="v2_confirm_full",
+            )
+        else:
+            confirm_export_total = True
 
-                # --- 2. FILTRAGEM FÍSICA PARA ZIP (Zero RAM) ---
-                org_parts, todos_parts, org_count, todos_count, curr_org_part, curr_todos_part = [], [], 0, 0, 1, 1
-                org_name, todos_name = f'z_org_final_pt{curr_org_part}.zip', f'z_todos_final_pt{curr_todos_part}.zip'
-                
-                z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
-                z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
-                org_parts.append(org_name); todos_parts.append(todos_name)
-                
-                filtro_chaves = set(df_geral_filtrado['Chave'].tolist())
+        ox1, ox2, ox3 = st.columns(3)
+        with ox1:
+            v2_zip_org = st.checkbox(
+                "ZIP: caminho Pasta/nome dentro do arquivo (estrutura de pastas)",
+                value=True,
+                key="v2_zip_org",
+            )
+        with ox2:
+            v2_zip_plano = st.checkbox(
+                "ZIP: só nome do ficheiro na raiz (sem subpastas; possível colisão se nomes repetidos)",
+                value=True,
+                key="v2_zip_plano",
+            )
+        with ox3:
+            v2_incl_csv = st.checkbox(
+                "Incluir CSV (mesmas colunas que a folha Filtrado do Excel)",
+                value=False,
+                key="v2_incl_csv",
+            )
 
-                if os.path.exists(TEMP_UPLOADS_DIR):
-                    for f_name in os.listdir(TEMP_UPLOADS_DIR):
-                        f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
-                        with open(f_path, "rb") as f_temp:
-                            for name, xml_data in extrair_recursivo(f_temp, f_name):
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res and res["Chave"] in filtro_chaves:
-                                    if org_count >= MAX_XML_PER_ZIP:
-                                        z_org.close(); curr_org_part += 1; org_name = f'z_org_final_pt{curr_org_part}.zip'
-                                        z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED); org_parts.append(org_name); org_count = 0
-                                    if todos_count >= MAX_XML_PER_ZIP:
-                                        z_todos.close(); curr_todos_part += 1; todos_name = f'z_todos_final_pt{curr_todos_part}.zip'
-                                        z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED); todos_parts.append(todos_name); todos_count = 0
+        if not v2_zip_org and not v2_zip_plano:
+            st.caption("Nenhum tipo de ZIP marcado: gera-se apenas Excel e, se marcado, CSV.")
 
-                                    z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
-                                    z_todos.writestr(name, xml_data)
-                                    org_count += 1; todos_count += 1
-                                del xml_data
-                
-                z_org.close(); z_todos.close()
-                st.session_state.update({'org_zip_parts': org_parts, 'todos_zip_parts': todos_parts, 'export_ready': True})
+        _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
+
+        if st.button(
+            "Gerar Excel / CSV / ZIP conforme opções acima",
+            type="primary",
+            key="v2_btn_export",
+            disabled=_btn_dis,
+        ):
+            df_geral_filtrado = filtrar_df_geral_para_exportacao(
+                df_g_base,
+                filtro_origem,
+                filtro_meses,
+                aplicar_mes_so_na_propria,
+                filtro_modelos,
+                filtro_series,
+                filtro_status,
+                filtro_operacao,
+            )
+            if df_geral_filtrado is None or df_geral_filtrado.empty:
+                st.warning("Resultado filtrado: 0 linhas. Altere os multiselects ou o checkbox de mês/terceiros.")
+            else:
+                with st.spinner("A gerar Excel, CSV e ZIPs…"):
+                    st.session_state["excel_buffer"] = None
+                    st.session_state["export_csv_buffer"] = None
+                    gc.collect()
+
+                    ts = datetime.now().strftime("%Y%m%d_%H%M")
+                    st.session_state["export_excel_name"] = f"relatorio_{ts}.xlsx"
+                    st.session_state["export_csv_name"] = f"relatorio_{ts}.csv"
+
+                    buffer_excel = io.BytesIO()
+                    with pd.ExcelWriter(buffer_excel, engine="xlsxwriter") as writer:
+                        df_geral_filtrado.to_excel(writer, sheet_name="Filtrado", index=False)
+                        rs = (
+                            df_geral_filtrado.groupby("Status Final", dropna=False)
+                            .size()
+                            .reset_index(name="Quantidade")
+                        )
+                        rs.to_excel(writer, sheet_name="Resumo_status", index=False)
+                    st.session_state["excel_buffer"] = buffer_excel.getvalue()
+
+                    if v2_incl_csv:
+                        buf_csv = io.StringIO()
+                        df_geral_filtrado.to_csv(buf_csv, index=False, encoding="utf-8-sig")
+                        st.session_state["export_csv_buffer"] = buf_csv.getvalue().encode("utf-8-sig")
+                    else:
+                        st.session_state["export_csv_buffer"] = None
+
+                    for f in os.listdir("."):
+                        if f.startswith("z_org_final") or f.startswith("z_todos_final"):
+                            try:
+                                os.remove(f)
+                            except OSError:
+                                pass
+
+                    filtro_chaves = set(df_geral_filtrado["Chave"].tolist())
+                    org_parts, todos_parts = [], []
+                    curr_org_part, curr_todos_part = 1, 1
+                    org_count, todos_count = 0, 0
+                    z_org, z_todos = None, None
+
+                    if v2_zip_org:
+                        org_name = f"z_org_final_pt{curr_org_part}.zip"
+                        z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+                        org_parts.append(org_name)
+                    if v2_zip_plano:
+                        todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
+                        z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+                        todos_parts.append(todos_name)
+
+                    if os.path.exists(TEMP_UPLOADS_DIR) and (v2_zip_org or v2_zip_plano):
+                        for f_name in os.listdir(TEMP_UPLOADS_DIR):
+                            f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
+                            with open(f_path, "rb") as f_temp:
+                                for name, xml_data in extrair_recursivo(f_temp, f_name):
+                                    res, _ = identify_xml_info(xml_data, cnpj_limpo, name)
+                                    if res and res["Chave"] in filtro_chaves:
+                                        if v2_zip_org and z_org is not None:
+                                            if org_count >= MAX_XML_PER_ZIP:
+                                                z_org.close()
+                                                curr_org_part += 1
+                                                org_name = f"z_org_final_pt{curr_org_part}.zip"
+                                                z_org = zipfile.ZipFile(
+                                                    org_name, "w", zipfile.ZIP_DEFLATED
+                                                )
+                                                org_parts.append(org_name)
+                                                org_count = 0
+                                            z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
+                                            org_count += 1
+                                        if v2_zip_plano and z_todos is not None:
+                                            if todos_count >= MAX_XML_PER_ZIP:
+                                                z_todos.close()
+                                                curr_todos_part += 1
+                                                todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
+                                                z_todos = zipfile.ZipFile(
+                                                    todos_name, "w", zipfile.ZIP_DEFLATED
+                                                )
+                                                todos_parts.append(todos_name)
+                                                todos_count = 0
+                                            z_todos.writestr(name, xml_data)
+                                            todos_count += 1
+                                    del xml_data
+
+                    if z_org is not None:
+                        try:
+                            z_org.close()
+                        except OSError:
+                            pass
+                    if z_todos is not None:
+                        try:
+                            z_todos.close()
+                        except OSError:
+                            pass
+
+                    if v2_zip_org and org_count == 0 and org_parts:
+                        try:
+                            os.remove(org_parts[-1])
+                        except OSError:
+                            pass
+                        org_parts = []
+                    if v2_zip_plano and todos_count == 0 and todos_parts:
+                        try:
+                            os.remove(todos_parts[-1])
+                        except OSError:
+                            pass
+                        todos_parts = []
+
+                    st.session_state.update(
+                        {
+                            "org_zip_parts": org_parts,
+                            "todos_zip_parts": todos_parts,
+                            "export_ready": True,
+                        }
+                    )
+                    gc.collect()
                 st.rerun()
 
-        if st.session_state.get('export_ready'):
-            st.success("✅ Pacotes prontos!")
-            st.markdown("### 📂 DOWNLOAD: ORGANIZADO")
-            for row in chunk_list(st.session_state['org_zip_parts'], 3):
-                cols = st.columns(len(row))
-                for idx, part in enumerate(row):
-                    with open(part, 'rb') as f:
-                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
+        if st.session_state.get("export_ready"):
+            st.success("Geração concluída. Use os botões abaixo para descarregar.")
+            _parts_o = st.session_state.get("org_zip_parts") or []
+            _parts_t = st.session_state.get("todos_zip_parts") or []
+            _dl_i = 0
+            if _parts_o:
+                st.markdown("### ZIP com subpastas (entrada: campo Pasta + nome do XML)")
+                st.caption("Cada parte ≤ 10 000 XMLs.")
+                for row in chunk_list(_parts_o, 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        _dl_i += 1
+                        if os.path.exists(part):
+                            with open(part, "rb") as fp:
+                                cols[idx].download_button(
+                                    rotulo_download_zip_parte(part),
+                                    fp.read(),
+                                    file_name=os.path.basename(part),
+                                    key=f"v2_dlo_{_dl_i}",
+                                    use_container_width=True,
+                                )
+            if _parts_t:
+                st.markdown("### ZIP sem subpastas (entrada: só nome do ficheiro)")
+                st.caption("Cada parte ≤ 10 000 XMLs.")
+                for row in chunk_list(_parts_t, 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        _dl_i += 1
+                        if os.path.exists(part):
+                            with open(part, "rb") as fp:
+                                cols[idx].download_button(
+                                    rotulo_download_zip_parte(part),
+                                    fp.read(),
+                                    file_name=os.path.basename(part),
+                                    key=f"v2_dlt_{_dl_i}",
+                                    use_container_width=True,
+                                )
 
-            st.markdown("### 📦 DOWNLOAD: SÓ XML")
-            for row in chunk_list(st.session_state['todos_zip_parts'], 3):
-                cols = st.columns(len(row))
-                for idx, part in enumerate(row):
-                    with open(part, 'rb') as f:
-                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
-
-            st.download_button("📊 RELATÓRIO EXCEL", st.session_state['excel_buffer'], "relatorio.xlsx", use_container_width=True)
+            _xbuf = st.session_state.get("excel_buffer")
+            if _xbuf:
+                st.download_button(
+                    "Descarregar Excel",
+                    _xbuf,
+                    file_name=st.session_state.get("export_excel_name", "relatorio.xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="v2_dl_xlsx",
+                    use_container_width=True,
+                )
+            if st.session_state.get("export_csv_buffer"):
+                st.download_button(
+                    "Descarregar CSV",
+                    st.session_state["export_csv_buffer"],
+                    file_name=st.session_state.get("export_csv_name", "relatorio.csv"),
+                    mime="text/csv",
+                    key="v2_dl_csv",
+                    use_container_width=True,
+                )
 
         if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
             limpar_arquivos_temp(); st.session_state.clear(); st.rerun()
 
         # =====================================================================
-        # BLOCO 4: CRUZAMENTO FALTANTES DOMÍNIO SISTEMAS (CORREÇÃO DE DISCO)
+        # BLOCO 4: EXPORTAR LISTA ESPECÍFICA (PDF / EXCEL)
         # =====================================================================
         st.divider()
-        st.markdown("### 🔎 CRUZAMENTO FALTANTES DOMÍNIO SISTEMAS")
-        with st.expander("Suba o relatório da Domínio para baixar os XMLs organizados por pastas"):
-            pdf_dominio = st.file_uploader("Relatório de notas não lançadas (PDF):", type=["pdf"], key="pdf_dom_final")
-            
-            if pdf_dominio and st.button("🔎 BUSCAR XMLS NO LOTE", key="btn_run_dom"):
-                with st.spinner("Analisando e organizando arquivos..."):
-                    notas_pdf = extrair_notas_faltantes_dominio(pdf_dominio)
-                    if notas_pdf:
-                        ch_encontradas = []
-                        df_base = st.session_state['df_geral']
-                        for n in notas_pdf:
-                            f = df_base[(df_base['Série'].astype(str) == n['Série']) & 
-                                        (df_base['Nota'] == n['Número']) & 
-                                        (df_base['Status Final'] == 'NORMAIS')]
-                            if not f.empty: 
-                                ch_encontradas.append(f.iloc[0]['Chave'])
-                        
-                        if ch_encontradas:
-                            st.session_state['ch_falt_dom'] = ch_encontradas
-                            
-                            # ESTRATÉGIA DE DISCO PARA EVITAR AXIOS ERROR 502
-                            nome_arquivo_zip = "faltantes_dominio_final.zip"
-                            ch_set = set(ch_encontradas)
-                            
-                            # Criamos o arquivo físico no servidor
-                            with zipfile.ZipFile(nome_arquivo_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                                for fn in os.listdir(TEMP_UPLOADS_DIR):
-                                    f_path = os.path.join(TEMP_UPLOADS_DIR, fn)
-                                    with open(f_path, "rb") as ft:
-                                        for name, data in extrair_recursivo(ft, fn):
-                                            res, _ = identify_xml_info(data, cnpj_limpo, name)
-                                            if res and res["Chave"] in ch_set: 
-                                                zf.writestr(f"{res['Pasta']}/{name}", data)
-                            
-                            st.session_state['zip_dom_pronto'] = nome_arquivo_zip
-                            st.success(f"✅ Sucesso! {len(ch_encontradas)} notas organizadas e prontas para baixar.")
-                        else:
-                            st.warning("⚠️ Nenhum XML correspondente encontrado no lote.")
+        st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
+        with st.expander("Suba planilha com chaves na coluna A para baixar os XMLs"):
+            tab_pdf, tab_xlsx = st.tabs(["📄 PDF (Domínio)", "📊 Excel (chaves)"])
 
-            # Botão de download lendo direto do arquivo físico (Zero erro de memória)
-            if st.session_state.get('zip_dom_pronto'):
-                nome_zip = st.session_state['zip_dom_pronto']
-                if os.path.exists(nome_zip):
-                    with open(nome_zip, "rb") as f_final:
-                        st.download_button(
-                            label="📥 BAIXAR XMLS ORGANIZADOS (ZIP)",
-                            data=f_final,
-                            file_name="faltantes_dominio_organizados.zip",
-                            mime="application/zip",
-                            key="btn_dl_final_disco",
-                            use_container_width=True
-                        )
+            with tab_pdf:
+                pdf_dominio = st.file_uploader("Relatório de notas não lançadas (PDF):", type=["pdf"], key="pdf_dom_final")
+                st.caption(
+                    "O PDF é lido por texto: se o relatório for só imagem ou tiver outro layout, use o separador **Excel** com chaves de 44 dígitos."
+                )
+                if st.button("🔎 BUSCAR XMLS NO LOTE", key="btn_run_dom"):
+                    if pdf_dominio is None:
+                        st.warning("Selecione um ficheiro PDF antes de clicar em buscar.")
+                    else:
+                        with st.spinner("Analisando e organizando arquivos..."):
+                            notas_pdf, info_dom = extrair_notas_faltantes_dominio(pdf_dominio)
+                            if info_dom.get("erro"):
+                                st.error(f"Erro ao abrir o PDF: {info_dom['erro']}")
+                            elif not notas_pdf:
+                                st.warning(
+                                    "Não encontrámos no PDF o padrão **número + número + série + NF-e/NFC-e/CT-e**. "
+                                    "O Domínio pode exportar noutro formato, ou o PDF não tem texto selecionável."
+                                )
+                                with st.expander("Diagnóstico (amostra do texto extraído)", expanded=False):
+                                    st.text(info_dom.get("texto_amostra") or "(vazio — possível PDF só com imagem)")
+                                    st.caption(
+                                        f"Páginas: {info_dom.get('n_paginas', 0)} | "
+                                        f"Caracteres: {info_dom.get('n_chars', 0)} | "
+                                        f"Correspondências regex: {info_dom.get('n_tuplas_regex', 0)}"
+                                    )
+                            else:
+                                st.info(
+                                    f"PDF: **{len(notas_pdf)}** nota(s) identificada(s) para cruzar com o relatório geral."
+                                )
+                                ch_encontradas = []
+                                df_base = st.session_state["df_geral"]
+                                if df_base is None or df_base.empty:
+                                    st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                                else:
+                                    for n in notas_pdf:
+                                        f = df_base[
+                                            (df_base["Série"].astype(str) == str(n["Série"]))
+                                            & (df_base["Nota"] == n["Número"])
+                                            & (df_base["Status Final"] == "NORMAIS")
+                                        ]
+                                        if not f.empty:
+                                            ch_encontradas.append(f.iloc[0]["Chave"])
+
+                                    if not ch_encontradas:
+                                        st.warning(
+                                            "⚠️ Nenhuma dessas notas aparece no lote como **NORMAIS** "
+                                            "(série/número iguais ao PDF). Confira série, canceladas ou refaça o garimpo."
+                                        )
+                                    elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                        st.error(
+                                            "A pasta dos XML carregados não existe (ex.: sessão no Cloud reiniciou). "
+                                            "Volte a correr **Iniciar grande garimpo** ou **Incluir mais XML**."
+                                        )
+                                    else:
+                                        partes, n_xml = escrever_zip_dominio_por_chaves(
+                                            cnpj_limpo, ch_encontradas
+                                        )
+                                        if partes and n_xml > 0:
+                                            st.session_state["ch_falt_dom"] = ch_encontradas
+                                            st.session_state["zip_dom_parts"] = partes
+                                            nl = len(partes)
+                                            st.success(
+                                                f"✅ {len(ch_encontradas)} chave(s) no lote; {n_xml} XML(s) em "
+                                                f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                            )
+                                        else:
+                                            st.warning(
+                                                "⚠️ Há chaves no relatório, mas **nenhum XML** foi encontrado em disco "
+                                                f"(`{TEMP_UPLOADS_DIR}`). Refaça o garimpo com os mesmos ficheiros."
+                                            )
+
+            with tab_xlsx:
+                xlsx_dom = st.file_uploader(
+                    "Planilha (.xlsx ou .xls): coluna A = chave de 44 dígitos",
+                    type=["xlsx", "xls"],
+                    key="xlsx_dom_final",
+                )
+                if xlsx_dom and st.button("🔎 BUSCAR XMLS NO LOTE (EXCEL)", key="btn_run_dom_xlsx"):
+                    with st.spinner("Lendo chaves e organizando arquivos..."):
+                        chaves_lidas = extrair_chaves_de_excel(xlsx_dom)
+                        if not chaves_lidas:
+                            st.warning("⚠️ Nenhuma chave válida (44 dígitos) na primeira coluna.")
+                        else:
+                            partes, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lidas)
+                            if partes and n_xml > 0:
+                                st.session_state["ch_falt_dom"] = chaves_lidas
+                                st.session_state["zip_dom_parts"] = partes
+                                nl = len(partes)
+                                st.success(
+                                    f"✅ Sucesso! {len(chaves_lidas)} chave(s) na planilha; {n_xml} XML(s) em "
+                                    f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} XMLs por lote)."
+                                )
+                            else:
+                                st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
+
+            if st.session_state.get("zip_dom_parts"):
+                st.caption(f"Cada ficheiro tem no máximo {MAX_XML_PER_ZIP} XMLs.")
+                for row in chunk_list(st.session_state["zip_dom_parts"], 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        if os.path.exists(part):
+                            with open(part, "rb") as f_final:
+                                cols[idx].download_button(
+                                    label=f"📥 {os.path.basename(part)}",
+                                    data=f_final.read(),
+                                    file_name=os.path.basename(part),
+                                    mime="application/zip",
+                                    key=f"btn_dl_dom_{part}",
+                                    use_container_width=True,
+                                )
 else:
     st.warning("👈 Insira o CNPJ lateral para começar.")
+
+
