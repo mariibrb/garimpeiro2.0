@@ -10,7 +10,7 @@ import shutil
 import pdfplumber
 
 # --- CONFIGURAÃ‡ÃƒO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
-st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="â›ï¸")
+st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="\u26CF\uFE0F")
 
 def aplicar_estilo_premium():
     st.markdown("""
@@ -364,7 +364,7 @@ def escrever_zip_por_chaves(cnpj_limpo, chaves_lista):
 
 
 # --- INTERFACE ---
-st.markdown("<h1>â›ï¸ O GARIMPEIRO</h1>", unsafe_allow_html=True)
+st.markdown("<h1>\u26CF\uFE0F O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
