@@ -58,6 +58,21 @@ def aplicar_estilo_premium():
             color: #FF69B4 !important;
         }
 
+        /* Dentro de expanders: botões mais baixos e texto normal (atalhos Etapa 3, etc.) */
+        [data-testid="stExpander"] div.stButton > button {
+            min-height: 2rem !important;
+            height: auto !important;
+            padding: 0.25rem 0.5rem !important;
+            font-size: 0.78rem !important;
+            font-weight: 600 !important;
+            border-radius: 8px !important;
+            text-transform: none !important;
+            line-height: 1.25 !important;
+        }
+        [data-testid="stExpander"] div.stButton > button:hover {
+            transform: translateY(-2px) !important;
+        }
+
         [data-testid="stFileUploader"] { 
             border: 2px dashed #FF69B4 !important; 
             border-radius: 20px !important;
@@ -622,6 +637,39 @@ def v2_acrescentar_filtro_sessao(state_key, novos, permitidos=None):
         if v not in cur:
             cur.append(v)
     st.session_state[state_key] = cur
+
+
+def v2_resumo_filtros_html(
+    filtro_origem,
+    filtro_meses,
+    filtro_modelos,
+    filtro_series,
+    filtro_status,
+    filtro_operacao,
+    tem_col_operacao,
+):
+    """Uma linha legível: lista vazia = critério não restringe."""
+
+    def pedaco(nome, sel):
+        if not sel:
+            return f"<span style='opacity:0.6'>{nome}: <em>qualquer</em></span>"
+        mostrar = [str(x) for x in sel[:5]]
+        extra = len(sel) - len(mostrar)
+        txt = ", ".join(mostrar)
+        if extra > 0:
+            txt += f" <span style='opacity:0.75'>(+{extra})</span>"
+        return f"<strong>{nome}</strong>: {txt}"
+
+    partes = [
+        pedaco("Origem", filtro_origem),
+        pedaco("Ano/mês", filtro_meses),
+        pedaco("Modelo", filtro_modelos),
+        pedaco("Série", filtro_series),
+        pedaco("Status", filtro_status),
+    ]
+    if tem_col_operacao:
+        partes.append(pedaco("Operação", filtro_operacao))
+    return " &nbsp;·&nbsp; ".join(partes)
 
 
 def rotulo_download_zip_parte(caminho_ficheiro):
@@ -1745,23 +1793,24 @@ if st.session_state['confirmado']:
                 {str(x) for x in df_g_base["Operação"].tolist() if str(x) not in ("", "nan", "None")}
             )
 
-        with st.expander("Atalhos — acrescentam às listas (várias combinações)", expanded=True):
-            st.markdown("**Origem**")
+        with st.expander("Atalhos rápidos (opcional)", expanded=False):
+            st.caption("Cada botão acrescenta à lista correspondente.")
+            st.caption("Origem")
             o1, o2, o3, o4 = st.columns(4)
             with o1:
-                if st.button("+ EMISSÃO PRÓPRIA", key="v2_add_o_prop", use_container_width=True):
+                if st.button("+ Própria", key="v2_add_o_prop", use_container_width=True):
                     v2_acrescentar_filtro_sessao("v2_f_orig", "EMISSÃO PRÓPRIA", todas_origens)
             with o2:
-                if st.button("+ TERCEIROS", key="v2_add_o_terc", use_container_width=True):
+                if st.button("+ Terceiros", key="v2_add_o_terc", use_container_width=True):
                     v2_acrescentar_filtro_sessao("v2_f_orig", "TERCEIROS", todas_origens)
             with o3:
-                if st.button("Origem: marcar todas", key="v2_all_o", use_container_width=True):
+                if st.button("Todas", key="v2_all_o", use_container_width=True):
                     st.session_state["v2_f_orig"] = list(todas_origens)
             with o4:
-                if st.button("Limpar origem", key="v2_clr_o", use_container_width=True):
+                if st.button("Limpar", key="v2_clr_o", use_container_width=True):
                     st.session_state["v2_f_orig"] = []
 
-            st.markdown("**Modelo**")
+            st.caption("Modelo")
             _mods_ordem = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
             _mods_existentes = [m for m in _mods_ordem if m in modelos]
             _resto_mod = [m for m in modelos if m not in _mods_ordem]
@@ -1777,7 +1826,7 @@ if st.session_state['confirmado']:
                                 v2_acrescentar_filtro_sessao("v2_f_mod", m, modelos)
                 m1, m2 = st.columns(2)
                 with m1:
-                    if st.button("Modelos: todos", key="v2_all_m", use_container_width=True):
+                    if st.button("Todos modelos", key="v2_all_m", use_container_width=True):
                         st.session_state["v2_f_mod"] = list(modelos)
                 with m2:
                     if st.button("Limpar modelos", key="v2_clr_m", use_container_width=True):
@@ -1785,7 +1834,7 @@ if st.session_state['confirmado']:
             else:
                 st.caption("Sem modelos no relatório.")
 
-            st.markdown("**Status Final**")
+            st.caption("Status")
             if status_opcoes:
                 for si in range(0, len(status_opcoes), 4):
                     chunk = status_opcoes[si : si + 4]
@@ -1797,7 +1846,7 @@ if st.session_state['confirmado']:
                                 v2_acrescentar_filtro_sessao("v2_f_stat", stt, status_opcoes)
                 s1, s2 = st.columns(2)
                 with s1:
-                    if st.button("Status: todos", key="v2_all_s", use_container_width=True):
+                    if st.button("Todos status", key="v2_all_s", use_container_width=True):
                         st.session_state["v2_f_stat"] = list(status_opcoes)
                 with s2:
                     if st.button("Limpar status", key="v2_clr_s", use_container_width=True):
@@ -1805,10 +1854,10 @@ if st.session_state['confirmado']:
             else:
                 st.caption("Sem valores de status no relatório.")
 
-            st.markdown("**Ano / mês**")
+            st.caption("Ano / mês")
             y1, y2, y3 = st.columns(3)
             with y1:
-                if st.button("+ Mês atual (PC)", key="v2_add_mes_hoje", use_container_width=True):
+                if st.button("+ Mês PC", key="v2_add_mes_hoje", use_container_width=True):
                     hm = f"{date.today().year}/{date.today().month:02d}"
                     if hm in anos_meses:
                         v2_acrescentar_filtro_sessao("v2_f_mes", hm, anos_meses)
@@ -1818,23 +1867,23 @@ if st.session_state['confirmado']:
                             f"Valor: date.today() do PC → {hm}."
                         )
             with y2:
-                if st.button("Ano/mês: todos no lote", key="v2_all_y", use_container_width=True):
+                if st.button("Todos meses", key="v2_all_y", use_container_width=True):
                     st.session_state["v2_f_mes"] = list(anos_meses)
             with y3:
-                if st.button("Limpar ano/mês", key="v2_clr_y", use_container_width=True):
+                if st.button("Limpar meses", key="v2_clr_y", use_container_width=True):
                     st.session_state["v2_f_mes"] = []
 
-            st.markdown("**Série**")
+            st.caption("Série")
             s1, s2 = st.columns(2)
             with s1:
-                if st.button("Série: todas no lote", key="v2_all_sr", use_container_width=True):
+                if st.button("Todas séries", key="v2_all_sr", use_container_width=True):
                     st.session_state["v2_f_ser"] = list(series)
             with s2:
                 if st.button("Limpar séries", key="v2_clr_sr", use_container_width=True):
                     st.session_state["v2_f_ser"] = []
 
             if operacoes_opts:
-                st.markdown("**Operação**")
+                st.caption("Operação")
                 for oi in range(0, len(operacoes_opts), 4):
                     chunk = operacoes_opts[oi : oi + 4]
                     oc = st.columns(len(chunk))
@@ -1845,14 +1894,14 @@ if st.session_state['confirmado']:
                                 v2_acrescentar_filtro_sessao("v2_f_op", opv, operacoes_opts)
                 op1, op2 = st.columns(2)
                 with op1:
-                    if st.button("Operação: todas", key="v2_all_op", use_container_width=True):
+                    if st.button("Todas operações", key="v2_all_op", use_container_width=True):
                         st.session_state["v2_f_op"] = list(operacoes_opts)
                 with op2:
-                    if st.button("Limpar operação", key="v2_clr_op", use_container_width=True):
+                    if st.button("Limpar op.", key="v2_clr_op", use_container_width=True):
                         st.session_state["v2_f_op"] = []
 
             st.divider()
-            if st.button("Repor todos os filtros (listas vazias)", key="v2_pre_clr", use_container_width=True):
+            if st.button("Repor filtros (tudo vazio)", key="v2_pre_clr", use_container_width=True):
                 for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
                     if _kx in st.session_state:
                         st.session_state[_kx] = []
@@ -1866,57 +1915,72 @@ if st.session_state['confirmado']:
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
                 filtro_origem = st.multiselect(
-                    "Origem (uma ou mais)",
+                    "Origem",
                     todas_origens,
                     key="v2_f_orig",
-                    help="Várias origens = união (inclui linha se coincidir com qualquer uma). "
-                    "EMISSÃO PRÓPRIA: emitente = CNPJ da sidebar. TERCEIROS: resto nesta sessão.",
+                    help="Várias origens = união. Própria = emitente = CNPJ da sidebar.",
                 )
             with f_col2:
                 filtro_meses = st.multiselect(
-                    "Ano / mês (uma ou mais competências)",
+                    "Ano / mês",
                     anos_meses,
                     key="v2_f_mes",
-                    help="Vários meses = união. Valores vêm da data de emissão dos XML desta sessão.",
+                    help="Competências a partir da data de emissão dos XML desta sessão.",
                 )
             with f_col3:
                 filtro_modelos = st.multiselect(
-                    "Modelo (uma ou mais)",
+                    "Modelo",
                     modelos,
                     key="v2_f_mod",
-                    help="Ex.: NF-e e NFC-e ao mesmo tempo — exporta linhas de ambos.",
+                    help="Ex.: NF-e e NFC-e em simultâneo.",
                 )
             with f_col4:
                 filtro_series = st.multiselect(
-                    "Série (uma ou mais)",
+                    "Série",
                     series,
                     key="v2_f_ser",
-                    help="Várias séries = união (OR).",
+                    help="Várias séries = união.",
                 )
             with f_col5:
                 filtro_status = st.multiselect(
-                    "Status Final (uma ou mais)",
+                    "Status",
                     status_opcoes,
                     key="v2_f_stat",
-                    help="Vários status = união. Coluna Status Final na planilha exportada.",
+                    help="Coluna Status Final na exportação.",
                 )
 
         aplicar_mes_so_na_propria = st.checkbox(
-            "Com Ano/mês selecionado: excluir do filtro de mês as linhas cuja Origem contém TERCEIROS "
-            "(ficam sempre incluídas). Desmarcado: Ano/mês filtra todas as linhas, inclusive TERCEIROS.",
+            "Com mês escolhido: não aplicar esse mês às linhas de terceiros",
             value=True,
             key="v2_apenas_mes_propria",
+            help="Desmarcado: o filtro Ano/mês aplica também a TERCEIROS.",
         )
 
         if operacoes_opts:
             filtro_operacao = st.multiselect(
-                "Operação (uma ou mais, se existir no relatório)",
+                "Operação",
                 operacoes_opts,
                 key="v2_f_op",
-                help="Valores do XML. Várias opções = união.",
+                help="Valores do XML; várias = união.",
             )
         else:
             filtro_operacao = []
+
+        st.markdown(
+            "<div style='background:#f6f7f9;border:1px solid #e2e5ea;border-radius:8px;padding:10px 12px;margin:6px 0 10px 0;font-size:0.88rem;line-height:1.5;color:#333;'>"
+            "<strong>Estado dos filtros</strong> — <span style='opacity:0.85'>«qualquer» = critério em branco, não restringe.</span><br/>"
+            + v2_resumo_filtros_html(
+                filtro_origem,
+                filtro_meses,
+                filtro_modelos,
+                filtro_series,
+                filtro_status,
+                filtro_operacao,
+                bool(operacoes_opts),
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
         df_preview = filtrar_df_geral_para_exportacao(
             df_g_base,
@@ -1928,16 +1992,17 @@ if st.session_state['confirmado']:
             filtro_status,
             filtro_operacao,
         )
-        pv1, pv2, pv3 = st.columns(3)
         _n_lin = len(df_preview) if df_preview is not None and not df_preview.empty else 0
         _n_ch = (
             int(df_preview["Chave"].nunique())
             if df_preview is not None and not df_preview.empty
             else 0
         )
-        pv1.metric("Linhas após filtros (folha Filtrado)", _n_lin)
-        pv2.metric("Chaves 44 dígitos distintas (após filtros)", _n_ch)
-        pv3.metric("Linhas no relatório geral (sem filtros)", len(df_g_base) if not df_g_base.empty else 0)
+        _n_tot = len(df_g_base) if not df_g_base.empty else 0
+        st.caption(
+            f"Pré-visualização: **{_n_lin}** linhas (folha Filtrado) · **{_n_ch}** chaves distintas · "
+            f"relatório geral **{_n_tot}** linhas"
+        )
 
         nenhum_filtro = (
             len(filtro_origem) == 0
@@ -1948,11 +2013,11 @@ if st.session_state['confirmado']:
             and len(filtro_operacao) == 0
         )
         if nenhum_filtro:
-            st.info(
-                "Todos os multiselects vazios: nenhum critério extra; exportação = todas as linhas atuais do relatório geral."
+            st.caption(
+                "Todas as listas vazias → exportação inclui **todas** as linhas do relatório geral (confirmação abaixo)."
             )
             confirm_export_total = st.checkbox(
-                "Confirmo exportar todas as linhas do relatório geral (nenhum critério de coluna aplicado).",
+                "Confirmo exportar o relatório geral completo (sem filtrar por colunas).",
                 value=True,
                 key="v2_confirm_full",
             )
@@ -1962,25 +2027,27 @@ if st.session_state['confirmado']:
         ox1, ox2, ox3 = st.columns(3)
         with ox1:
             v2_zip_org = st.checkbox(
-                "ZIP: caminho Pasta/nome dentro do arquivo (estrutura de pastas)",
+                "ZIP com pastas (Pasta/nome no arquivo)",
                 value=True,
                 key="v2_zip_org",
+                help="Estrutura de pastas dentro do ZIP.",
             )
         with ox2:
             v2_zip_plano = st.checkbox(
-                "ZIP: só nome do ficheiro na raiz (sem subpastas; possível colisão se nomes repetidos)",
+                "ZIP plano (só nomes na raiz)",
                 value=True,
                 key="v2_zip_plano",
+                help="Risco de colisão se houver ficheiros com o mesmo nome.",
             )
         with ox3:
             v2_incl_csv = st.checkbox(
-                "Incluir CSV (mesmas colunas que a folha Filtrado do Excel)",
+                "Incluir CSV (igual à folha Filtrado)",
                 value=False,
                 key="v2_incl_csv",
             )
 
         if not v2_zip_org and not v2_zip_plano:
-            st.caption("Nenhum tipo de ZIP marcado: gera-se apenas Excel e, se marcado, CSV.")
+            st.caption("Sem ZIP: só Excel e CSV (se marcado).")
 
         _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
 
