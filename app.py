@@ -371,7 +371,7 @@ with st.container():
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>ðŸ“– Como usar o sistema (Passo a Passo)</h3>
+            <h3>📖 Como usar o sistema (Passo a Passo)</h3>
             <ol>
                 <li><b>Identificar a Empresa:</b> No menu branco Ã  esquerda, escreva o CNPJ do cliente.</li>
                 <li><b>Enviar as Notas:</b> Arraste sua pasta de notas (ZIP ou XML soltos). Suporta grandes volumes (+300MB).</li>
@@ -384,7 +384,7 @@ with st.container():
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>ðŸ“Š O que o sistema faz por si</h3>
+            <h3>📊 O que o sistema faz por si</h3>
             <ul>
                 <li><b>Acha Notas Perdidas:</b> Identifica buracos na numeraÃ§Ã£o.</li>
                 <li><b>Limpa Cancelamentos:</b> Separa as notas canceladas da apuraÃ§Ã£o.</li>
@@ -428,28 +428,28 @@ for k in keys_to_init:
             st.session_state[k] = False
 
 with st.sidebar:
-    st.markdown("### ðŸ” ConfiguraÃ§Ã£o")
+    st.markdown("### 🔍 ConfiguraÃ§Ã£o")
     cnpj_input = st.text_input("CNPJ DO CLIENTE", placeholder="00.000.000/0001-00")
     cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
     
     if cnpj_input and len(cnpj_limpo) != 14: 
-        st.error("âš ï¸ CNPJ InvÃ¡lido.")
+        st.error("⚠️ CNPJ InvÃ¡lido.")
         
     if len(cnpj_limpo) == 14:
-        if st.button("âœ… LIBERAR OPERAÃ‡ÃƒO"): 
+        if st.button("✅ LIBERAR OPERAÃ‡ÃƒO"): 
             st.session_state['confirmado'] = True
             
     st.divider()
     
-    if st.button("ðŸ—‘ï¸ RESETAR SISTEMA"):
+    if st.button("🗑️ RESETAR SISTEMA"):
         limpar_arquivos_temp()
         st.session_state.clear()
         st.rerun()
 
 if st.session_state['confirmado']:
     if not st.session_state['garimpo_ok']:
-        uploaded_files = st.file_uploader("ðŸ“‚ ARQUIVOS XML/ZIP (Suporta grandes volumes):", accept_multiple_files=True)
-        if uploaded_files and st.button("ðŸš€ INICIAR GRANDE GARIMPO"):
+        uploaded_files = st.file_uploader("📂 ARQUIVOS XML/ZIP (Suporta grandes volumes):", accept_multiple_files=True)
+        if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
             limpar_arquivos_temp() 
             os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
             
@@ -458,7 +458,7 @@ if st.session_state['confirmado']:
             status_text = st.empty()
             total_arquivos = len(uploaded_files)
             
-            with st.status("â›ï¸ Minerando e salvando fisicamente...", expanded=True) as status_box:
+            with st.status("⛏️ Minerando e salvando fisicamente...", expanded=True) as status_box:
                 
                 # 1. Salva uploads fisicamente no disco para evitar estouro de RAM
                 for i, f in enumerate(uploaded_files):
@@ -475,7 +475,7 @@ if st.session_state['confirmado']:
                         gc.collect()
                         
                     progresso_bar.progress((i + 1) / total_salvos)
-                    status_text.text(f"â›ï¸ Lendo conteÃºdo: {f_name}")
+                    status_text.text(f"⛏️ Lendo conteÃºdo: {f_name}")
                     
                     caminho_leitura = os.path.join(TEMP_UPLOADS_DIR, f_name)
                     try:
@@ -494,7 +494,7 @@ if st.session_state['confirmado']:
                     except Exception as e: 
                         continue
                 
-                status_box.update(label="âœ… Leitura ConcluÃ­da!", state="complete", expanded=False)
+                status_box.update(label="✅ Leitura ConcluÃ­da!", state="complete", expanded=False)
                 progresso_bar.empty()
                 status_text.empty()
 
@@ -603,11 +603,11 @@ if st.session_state['confirmado']:
         # --- RESULTADOS TELA INICIAL ---
         sc = st.session_state['st_counts']
         c1, c2, c3 = st.columns(3)
-        c1.metric("ðŸ“¦ AUTORIZADAS (PRÃ“PRIAS)", sc.get("AUTORIZADAS", 0))
-        c2.metric("âŒ CANCELADAS (PRÃ“PRIAS)", sc.get("CANCELADOS", 0))
-        c3.metric("ðŸš« INUTILIZADAS (PRÃ“PRIAS)", sc.get("INUTILIZADOS", 0))
+        c1.metric("📦 AUTORIZADAS (PRÃ“PRIAS)", sc.get("AUTORIZADAS", 0))
+        c2.metric("❌ CANCELADAS (PRÃ“PRIAS)", sc.get("CANCELADOS", 0))
+        c3.metric("🚫 INUTILIZADAS (PRÃ“PRIAS)", sc.get("INUTILIZADOS", 0))
         
-        st.markdown("### ðŸ“Š RESUMO POR SÃ‰RIE")
+        st.markdown("### 📊 RESUMO POR SÃ‰RIE")
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
         
         st.markdown("---")
@@ -615,25 +615,25 @@ if st.session_state['confirmado']:
         
         with col_audit:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
-            st.markdown(f"### âš ï¸ BURACOS ({qtd_buracos})")
+            st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else: 
-                st.info("âœ… Tudo em ordem.")
+                st.info("✅ Tudo em ordem.")
                 
         with col_canc:
-            st.markdown("### âŒ CANCELADAS")
+            st.markdown("### ❌ CANCELADAS")
             if not st.session_state['df_canceladas'].empty:
                 st.dataframe(st.session_state['df_canceladas'], use_container_width=True, hide_index=True)
             else: 
-                st.info("â„¹ï¸ Nenhuma nota.")
+                st.info("ℹ️ Nenhuma nota.")
                 
         with col_inut:
-            st.markdown("### ðŸš« INUTILIZADAS")
+            st.markdown("### 🚫 INUTILIZADAS")
             if not st.session_state['df_inutilizadas'].empty:
                 st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True)
             else: 
-                st.info("â„¹ï¸ Nenhuma nota.")
+                st.info("ℹ️ Nenhuma nota.")
 
         st.divider()
 
@@ -641,7 +641,7 @@ if st.session_state['confirmado']:
         # MÃ“DULO: DECLARAR INUTILIZADAS MANUAIS
         # =====================================================================
         if not st.session_state['df_faltantes'].empty:
-            st.markdown("### ðŸ› ï¸ INFORMAR NOTAS INUTILIZADAS (SEM XML)")
+            st.markdown("### 🛠️ INFORMAR NOTAS INUTILIZADAS (SEM XML)")
             with st.expander("Consulte a Sefaz e selecione abaixo as notas que constam como inutilizadas."):
                 opcoes_buracos = []
                 for idx, row in st.session_state['df_faltantes'].iterrows():
@@ -786,7 +786,7 @@ if st.session_state['confirmado']:
         # =====================================================================
         inut_manuais = [item for item in st.session_state['relatorio'] if item.get('Arquivo') == "REGISTRO_MANUAL"]
         if inut_manuais:
-            with st.expander("ðŸ”™ DESFAZER INUTILIZAÃ‡ÃƒO MANUAL"):
+            with st.expander("🔙 DESFAZER INUTILIZAÃ‡ÃƒO MANUAL"):
                 opcoes_desfazer = []
                 for item in inut_manuais:
                     opcoes_desfazer.append(f"{item['Tipo']} | SÃ©rie {item['SÃ©rie']} | Nota {item['NÃºmero']}")
@@ -913,17 +913,17 @@ if st.session_state['confirmado']:
         # =====================================================================
         # ETAPA 2: VALIDAR COM RELATÃ“RIO DE AUTENTICIDADE
         # =====================================================================
-        st.markdown("### ðŸ•µï¸ ETAPA 2: VALIDAR COM RELATÃ“RIO DE AUTENTICIDADE")
+        st.markdown("### 🕵️ ETAPA 2: VALIDAR COM RELATÃ“RIO DE AUTENTICIDADE")
         
         if st.session_state.get('validation_done'):
             if len(st.session_state['df_divergencias']) > 0: 
-                st.warning("âš ï¸ Status atualizados baseados no relatÃ³rio de autenticidade.")
+                st.warning("⚠️ Status atualizados baseados no relatÃ³rio de autenticidade.")
             else: 
-                st.success("âœ… O status dos XMLs estÃ¡ alinhado com a SEFAZ.")
+                st.success("✅ O status dos XMLs estÃ¡ alinhado com a SEFAZ.")
 
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
             auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
-            if auth_file and st.button("ðŸ”„ VALIDAR E ATUALIZAR"):
+            if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
                 df_auth = pd.read_excel(auth_file)
                 auth_dict = {}
                 
@@ -1055,7 +1055,7 @@ if st.session_state['confirmado']:
         # =====================================================================
         # MÃ“DULO: ADICIONAR MAIS ARQUIVOS (CARGA INCREMENTAL)
         # =====================================================================
-        with st.expander("âž• ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
+        with st.expander("\u2795 ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
             extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
             if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
                 with st.spinner("Adicionando..."):
@@ -1187,7 +1187,7 @@ if st.session_state['confirmado']:
         # =====================================================================
         # ETAPA 3: FILTROS AVANÃ‡ADOS E EXPORTAÃ‡ÃƒO (NOVO PAINEL DE CONTROLE)
         # =====================================================================
-        st.markdown("### âš™ï¸ ETAPA 3: FILTROS AVANÃ‡ADOS E EXPORTAÃ‡ÃƒO")
+        st.markdown("### ⚙️ ETAPA 3: FILTROS AVANÃ‡ADOS E EXPORTAÃ‡ÃƒO")
         
         todas_origens = ["EMISSÃƒO PRÃ“PRIA", "TERCEIROS"]
         anos_meses = sorted(list(set([f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}" for r in st.session_state['relatorio'] if r.get('Ano', '0000') != '0000'])))
@@ -1198,18 +1198,18 @@ if st.session_state['confirmado']:
         with st.container():
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
-                filtro_origem = st.multiselect("ðŸ“Œ Origem:", todas_origens)
+                filtro_origem = st.multiselect("📌 Origem:", todas_origens)
             with f_col2:
-                filtro_meses = st.multiselect("ðŸ“… Ano/MÃªs:", anos_meses)
+                filtro_meses = st.multiselect("📅 Ano/MÃªs:", anos_meses)
                 aplicar_mes_so_na_propria = st.checkbox("Aplicar MÃªs APENAS na EmissÃ£o PrÃ³pria?", value=True)
             with f_col3:
-                filtro_modelos = st.multiselect("ðŸ“„ Modelo:", modelos)
+                filtro_modelos = st.multiselect("\U0001F4C4 Modelo:", modelos)
             with f_col4:
-                filtro_series = st.multiselect("ðŸ”¢ SÃ©rie:", series)
+                filtro_series = st.multiselect("🔢 SÃ©rie:", series)
             with f_col5:
-                filtro_status = st.multiselect("âœ… Status:", status_opcoes) 
+                filtro_status = st.multiselect("✅ Status:", status_opcoes) 
 
-        if st.button("ðŸš€ PROCESSAR E GERAR ARQUIVOS FINAIS"):
+        if st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
             
             with st.spinner("Buscando no HD e montando pacotes..."):
                 
@@ -1282,37 +1282,37 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         if st.session_state.get('export_ready'):
-            st.success("âœ… Pacotes prontos!")
-            st.markdown("### ðŸ“‚ DOWNLOAD: ORGANIZADO")
+            st.success("✅ Pacotes prontos!")
+            st.markdown("### 📂 DOWNLOAD: ORGANIZADO")
             for row in chunk_list(st.session_state['org_zip_parts'], 3):
                 cols = st.columns(len(row))
                 for idx, part in enumerate(row):
                     with open(part, 'rb') as f:
-                        cols[idx].download_button(f"ðŸ“¥ LOTE {part[-5]}", f.read(), part, use_container_width=True)
+                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
 
-            st.markdown("### ðŸ“¦ DOWNLOAD: SÃ“ XML")
+            st.markdown("### 📦 DOWNLOAD: SÃ“ XML")
             for row in chunk_list(st.session_state['todos_zip_parts'], 3):
                 cols = st.columns(len(row))
                 for idx, part in enumerate(row):
                     with open(part, 'rb') as f:
-                        cols[idx].download_button(f"ðŸ“¥ LOTE {part[-5]}", f.read(), part, use_container_width=True)
+                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
 
-            st.download_button("ðŸ“Š RELATÃ“RIO EXCEL", st.session_state['excel_buffer'], "relatorio.xlsx", use_container_width=True)
+            st.download_button("📊 RELATÃ“RIO EXCEL", st.session_state['excel_buffer'], "relatorio.xlsx", use_container_width=True)
 
-        if st.button("â›ï¸ NOVO GARIMPO / LIMPAR TUDO"):
+        if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
             limpar_arquivos_temp(); st.session_state.clear(); st.rerun()
 
         # =====================================================================
         # BLOCO 4: CRUZAMENTO FALTANTES DOMÃNIO SISTEMAS (CORREÃ‡ÃƒO DE DISCO)
         # =====================================================================
         st.divider()
-        st.markdown("### ðŸ”Ž CRUZAMENTO FALTANTES DOMÃNIO SISTEMAS")
+        st.markdown("### 🔎 CRUZAMENTO FALTANTES DOMÃNIO SISTEMAS")
         with st.expander("PDF (DomÃ­nio) ou Excel com chaves (col. A = 44 dÃ­gitos) para baixar XMLs organizados"):
-            tab_pdf, tab_xlsx = st.tabs(["ðŸ“„ PDF (DomÃ­nio)", "ðŸ“Š Excel (lista de chaves)"])
+            tab_pdf, tab_xlsx = st.tabs(["\U0001F4C4 PDF (Domínio)", "\U0001F4CA Excel (lista de chaves)"])
 
             with tab_pdf:
                 pdf_dominio = st.file_uploader("RelatÃ³rio de notas nÃ£o lanÃ§adas (PDF):", type=["pdf"], key="pdf_dom_final")
-                if pdf_dominio and st.button("ðŸ”Ž BUSCAR XMLS NO LOTE (PDF)", key="btn_run_dom"):
+                if pdf_dominio and st.button("🔎 BUSCAR XMLS NO LOTE (PDF)", key="btn_run_dom"):
                     with st.spinner("Analisando e organizando arquivos..."):
                         notas_pdf = extrair_notas_faltantes_dominio(pdf_dominio)
                         ch_encontradas = []
@@ -1332,12 +1332,12 @@ if st.session_state['confirmado']:
                                 st.session_state["ch_falt_dom"] = ch_encontradas
                                 st.session_state["zip_dom_pronto"] = nome_zip
                                 st.success(
-                                    f"âœ… Sucesso! {len(ch_encontradas)} nota(s) encontrada(s); {n_xml} XML(s) no ZIP."
+                                    f"✅ Sucesso! {len(ch_encontradas)} nota(s) encontrada(s); {n_xml} XML(s) no ZIP."
                                 )
                             else:
-                                st.warning("âš ï¸ Nenhum XML correspondente encontrado no lote.")
+                                st.warning("⚠️ Nenhum XML correspondente encontrado no lote.")
                         else:
-                            st.warning("âš ï¸ Nenhuma nota do PDF bateu com NF NORMAIS no garimpo (ou PDF sem faixas legÃ­veis).")
+                            st.warning("⚠️ Nenhuma nota do PDF bateu com NF NORMAIS no garimpo (ou PDF sem faixas legÃ­veis).")
 
             with tab_xlsx:
                 xlsx_chaves = st.file_uploader(
@@ -1345,11 +1345,11 @@ if st.session_state['confirmado']:
                     type=["xlsx", "xls"],
                     key="xlsx_chaves_dom",
                 )
-                if xlsx_chaves and st.button("ðŸ”Ž BUSCAR XMLS NO LOTE (EXCEL)", key="btn_run_dom_xlsx"):
+                if xlsx_chaves and st.button("🔎 BUSCAR XMLS NO LOTE (EXCEL)", key="btn_run_dom_xlsx"):
                     with st.spinner("Lendo chaves e organizando arquivos..."):
                         chaves_lidas = extrair_chaves_de_excel(xlsx_chaves)
                         if not chaves_lidas:
-                            st.warning("âš ï¸ Nenhuma chave vÃ¡lida (44 dÃ­gitos) na primeira coluna.")
+                            st.warning("⚠️ Nenhuma chave vÃ¡lida (44 dÃ­gitos) na primeira coluna.")
                         else:
                             rel_keys = set()
                             for item in st.session_state["relatorio"]:
@@ -1363,18 +1363,18 @@ if st.session_state['confirmado']:
                                 st.session_state["ch_falt_dom"] = chaves_lidas
                                 st.session_state["zip_dom_pronto"] = nome_zip
                                 st.success(
-                                    f"âœ… Sucesso! {len(chaves_lidas)} chave(s) na planilha; "
+                                    f"✅ Sucesso! {len(chaves_lidas)} chave(s) na planilha; "
                                     f"{no_lote} constam no garimpo; {n_xml} XML(s) no ZIP."
                                 )
                             else:
-                                st.warning("âš ï¸ Nenhum XML encontrado no lote para essas chaves.")
+                                st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
 
             if st.session_state.get("zip_dom_pronto"):
                 nome_zip = st.session_state["zip_dom_pronto"]
                 if os.path.exists(nome_zip):
                     with open(nome_zip, "rb") as f_final:
                         st.download_button(
-                            label="ðŸ“¥ BAIXAR XMLS ORGANIZADOS (ZIP)",
+                            label="📥 BAIXAR XMLS ORGANIZADOS (ZIP)",
                             data=f_final,
                             file_name="faltantes_dominio_organizados.zip",
                             mime="application/zip",
@@ -1382,6 +1382,6 @@ if st.session_state['confirmado']:
                             use_container_width=True,
                         )
 else:
-    st.warning("ðŸ‘ˆ Insira o CNPJ lateral para comeÃ§ar.")
+    st.warning("👈 Insira o CNPJ lateral para comeÃ§ar.")
 
 
