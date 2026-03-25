@@ -1,4 +1,3 @@
-import hashlib
 import streamlit as st
 import zipfile
 import io
@@ -58,7 +57,7 @@ def aplicar_estilo_premium():
             color: #FF69B4 !important;
         }
 
-        /* Dentro de expanders: botões mais baixos e texto normal (atalhos Etapa 3, etc.) */
+        /* Dentro de expanders: botões mais baixos (Etapa 2, lateral, etc.) */
         [data-testid="stExpander"] [data-testid="stButton"] button,
         [data-testid="stExpander"] div.stButton > button {
             min-height: 2rem !important;
@@ -74,20 +73,19 @@ def aplicar_estilo_premium():
         [data-testid="stExpander"] div.stButton > button:hover {
             transform: translateY(-2px) !important;
         }
-        /* Atalhos: type=primary (já no filtro) → rosa forte (Base Web / Streamlit 1.5x) */
-        [data-testid="stExpander"] [data-testid="stButton"] button[kind="primary"],
-        [data-testid="stExpander"] div.stButton > button[kind="primary"] {
-            background: linear-gradient(180deg, #ff7eb8, #e91e8c) !important;
+        /* Primary do Streamlit (vermelho por defeito) → rosa Garimpeiro */
+        [data-testid="stButton"] button[kind="primary"],
+        div.stButton > button[kind="primary"] {
+            background: linear-gradient(180deg, #ff8cc8, #ff69b4) !important;
             color: #ffffff !important;
-            border: 1px solid #c2185c !important;
-            box-shadow: 0 2px 10px rgba(233, 30, 140, 0.4) !important;
-            font-weight: 700 !important;
+            border: 1px solid #f06292 !important;
+            box-shadow: 0 2px 12px rgba(255, 105, 180, 0.4) !important;
         }
-        [data-testid="stExpander"] [data-testid="stButton"] button[kind="primary"]:hover,
-        [data-testid="stExpander"] div.stButton > button[kind="primary"]:hover {
+        [data-testid="stButton"] button[kind="primary"]:hover,
+        div.stButton > button[kind="primary"]:hover {
             filter: brightness(1.06) !important;
             color: #ffffff !important;
-            border-color: #ad1457 !important;
+            border-color: #ec407a !important;
         }
 
         [data-testid="stFileUploader"] { 
@@ -780,53 +778,6 @@ def v2_sanear_selecoes_contra_opcoes(
             st.session_state[key] = novo
 
 
-def v2_acrescentar_filtro_sessao(state_key, novos, permitidos=None):
-    """Acrescenta um ou mais valores à lista em session_state sem duplicar."""
-    if isinstance(novos, str):
-        novos = [novos]
-    perm = set(permitidos) if permitidos is not None else None
-    cur = list(st.session_state.get(state_key) or [])
-    for v in novos:
-        if perm is not None and v not in perm:
-            continue
-        if v not in cur:
-            cur.append(v)
-    st.session_state[state_key] = cur
-
-
-def v2_resumo_filtros_html(
-    filtro_origem,
-    filtro_meses,
-    filtro_modelos,
-    filtro_series,
-    filtro_status,
-    filtro_operacao,
-    tem_col_operacao,
-):
-    """Uma linha legível: lista vazia = critério não restringe."""
-
-    def pedaco(nome, sel):
-        if not sel:
-            return f"<span style='opacity:0.6'>{nome}: <em>qualquer</em></span>"
-        mostrar = [str(x) for x in sel[:5]]
-        extra = len(sel) - len(mostrar)
-        txt = ", ".join(mostrar)
-        if extra > 0:
-            txt += f" <span style='opacity:0.75'>(+{extra})</span>"
-        return f"<strong>{nome}</strong>: {txt}"
-
-    partes = [
-        pedaco("Origem", filtro_origem),
-        pedaco("Ano/mês", filtro_meses),
-        pedaco("Modelo", filtro_modelos),
-        pedaco("Série", filtro_series),
-        pedaco("Status", filtro_status),
-    ]
-    if tem_col_operacao:
-        partes.append(pedaco("Operação", filtro_operacao))
-    return " &nbsp;·&nbsp; ".join(partes)
-
-
 def rotulo_download_zip_parte(caminho_ficheiro):
     m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
     return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
@@ -1129,7 +1080,7 @@ PASSO A PASSO
 4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: multiselects em cascata — ao escolher Origem (ex.: só emissão própria), as listas de Série, Modelo, mês, etc. mostram só valores que ainda existem nesse subconjunto do relatório. Caixa «Estado dos filtros»; atalhos com rosa = já selecionado; pré-visualização numa linha; checkbox mês/terceiros; confirmação se exportar com tudo vazio. Excel, CSV opcional, ZIP; até 10 mil XMLs por ZIP.
+7. Etapa 3: multiselects em cascata; «Repor filtros»; pré-visualização; checkbox mês/terceiros; confirmação se exportar com tudo vazio. Excel; CSV opcional (mesma tabela que a primeira folha do Excel); ZIP com pastas ou ZIP só com ficheiros na raiz; até 10 mil XMLs por ZIP.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
@@ -1161,7 +1112,7 @@ with st.container():
                 <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 — multiselects em <b>cascata</b> (ex.: só emissão própria → só séries/modelos/meses desse subconjunto), «Estado dos filtros», atalhos (rosa = já no filtro), Excel/ZIP/CSV; ou lista específica (chaves na col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 — multiselects em <b>cascata</b>, «Repor filtros», Excel, ZIP (pastas ou tudo solto) e CSV opcional; ou lista específica (chaves na col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1956,252 +1907,6 @@ if st.session_state['confirmado']:
             key=lambda x: (len(str(x)), str(x)),
         )
 
-        with st.expander("Atalhos rápidos (opcional)", expanded=False):
-            st.caption(
-                "Rosa forte = já está no filtro. As opções aqui seguem a mesma cascata dos multiselects "
-                "(só aparece o que ainda existe no relatório com os critérios atuais)."
-            )
-            _v2_o = list(st.session_state.get("v2_f_orig") or [])
-            _v2_m = list(st.session_state.get("v2_f_mod") or [])
-            _v2_st = list(st.session_state.get("v2_f_stat") or [])
-            _v2_y = list(st.session_state.get("v2_f_mes") or [])
-            _v2_sr = list(st.session_state.get("v2_f_ser") or [])
-            _v2_op = list(st.session_state.get("v2_f_op") or [])
-            _hm_pc = f"{date.today().year}/{date.today().month:02d}"
-
-            st.caption("Origem")
-            o1, o2, o3, o4 = st.columns(4)
-            with o1:
-                if st.button(
-                    "+ Própria",
-                    key="v2_add_o_prop",
-                    use_container_width=True,
-                    type="primary" if "EMISSÃO PRÓPRIA" in _v2_o else "secondary",
-                ):
-                    v2_acrescentar_filtro_sessao("v2_f_orig", "EMISSÃO PRÓPRIA", todas_origens)
-            with o2:
-                if st.button(
-                    "+ Terceiros",
-                    key="v2_add_o_terc",
-                    use_container_width=True,
-                    type="primary" if "TERCEIROS" in _v2_o else "secondary",
-                ):
-                    v2_acrescentar_filtro_sessao("v2_f_orig", "TERCEIROS", todas_origens)
-            with o3:
-                if st.button(
-                    "Todas",
-                    key="v2_all_o",
-                    use_container_width=True,
-                    type="primary"
-                    if len(_v2_o) >= len(todas_origens) and set(_v2_o) >= set(todas_origens)
-                    else "secondary",
-                ):
-                    st.session_state["v2_f_orig"] = list(todas_origens)
-            with o4:
-                if st.button(
-                    "Limpar",
-                    key="v2_clr_o",
-                    use_container_width=True,
-                    type="primary" if not _v2_o else "secondary",
-                ):
-                    st.session_state["v2_f_orig"] = []
-
-            st.caption("Modelo")
-            _mods_ordem = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
-            _mods_existentes = [m for m in _mods_ordem if m in modelos]
-            _resto_mod = [m for m in modelos if m not in _mods_ordem]
-            _linha_mod = _mods_existentes + _resto_mod
-            if _linha_mod:
-                for mi in range(0, len(_linha_mod), 4):
-                    chunk = _linha_mod[mi : mi + 4]
-                    mc = st.columns(len(chunk))
-                    for mj, m in enumerate(chunk):
-                        with mc[mj]:
-                            sid = hashlib.md5(m.encode()).hexdigest()[:12]
-                            if st.button(
-                                f"+ {m}",
-                                key=f"v2_bm_{mi}_{mj}_{sid}",
-                                use_container_width=True,
-                                type="primary" if m in _v2_m else "secondary",
-                            ):
-                                v2_acrescentar_filtro_sessao("v2_f_mod", m, modelos)
-                m1, m2 = st.columns(2)
-                with m1:
-                    if st.button(
-                        "Todos modelos",
-                        key="v2_all_m",
-                        use_container_width=True,
-                        type="primary"
-                        if modelos and len(_v2_m) >= len(modelos) and set(_v2_m) >= set(modelos)
-                        else "secondary",
-                    ):
-                        st.session_state["v2_f_mod"] = list(modelos)
-                with m2:
-                    if st.button(
-                        "Limpar modelos",
-                        key="v2_clr_m",
-                        use_container_width=True,
-                        type="primary" if not _v2_m else "secondary",
-                    ):
-                        st.session_state["v2_f_mod"] = []
-            else:
-                st.caption("Sem modelos no relatório.")
-
-            st.caption("Status")
-            if status_opcoes:
-                for si in range(0, len(status_opcoes), 4):
-                    chunk = status_opcoes[si : si + 4]
-                    sc = st.columns(len(chunk))
-                    for sj, stt in enumerate(chunk):
-                        with sc[sj]:
-                            sid = hashlib.md5(stt.encode()).hexdigest()[:16]
-                            if st.button(
-                                f"+ {stt}",
-                                key=f"v2_bs_{si}_{sj}_{sid}",
-                                use_container_width=True,
-                                type="primary" if stt in _v2_st else "secondary",
-                            ):
-                                v2_acrescentar_filtro_sessao("v2_f_stat", stt, status_opcoes)
-                s1, s2 = st.columns(2)
-                with s1:
-                    if st.button(
-                        "Todos status",
-                        key="v2_all_s",
-                        use_container_width=True,
-                        type="primary"
-                        if status_opcoes
-                        and len(_v2_st) >= len(status_opcoes)
-                        and set(_v2_st) >= set(status_opcoes)
-                        else "secondary",
-                    ):
-                        st.session_state["v2_f_stat"] = list(status_opcoes)
-                with s2:
-                    if st.button(
-                        "Limpar status",
-                        key="v2_clr_s",
-                        use_container_width=True,
-                        type="primary" if not _v2_st else "secondary",
-                    ):
-                        st.session_state["v2_f_stat"] = []
-            else:
-                st.caption("Sem valores de status no relatório.")
-
-            st.caption("Ano / mês")
-            y1, y2, y3 = st.columns(3)
-            with y1:
-                if st.button(
-                    "+ Mês PC",
-                    key="v2_add_mes_hoje",
-                    use_container_width=True,
-                    type="primary" if _hm_pc in _v2_y else "secondary",
-                ):
-                    hm = f"{date.today().year}/{date.today().month:02d}"
-                    if hm in anos_meses:
-                        v2_acrescentar_filtro_sessao("v2_f_mes", hm, anos_meses)
-                    else:
-                        st.session_state["v2_preset_warn"] = (
-                            f"Nenhuma linha com Ano/Mês = {hm} neste lote. "
-                            f"Valor: date.today() do PC → {hm}."
-                        )
-            with y2:
-                if st.button(
-                    "Todos meses",
-                    key="v2_all_y",
-                    use_container_width=True,
-                    type="primary"
-                    if anos_meses and len(_v2_y) >= len(anos_meses) and set(_v2_y) >= set(anos_meses)
-                    else "secondary",
-                ):
-                    st.session_state["v2_f_mes"] = list(anos_meses)
-            with y3:
-                if st.button(
-                    "Limpar meses",
-                    key="v2_clr_y",
-                    use_container_width=True,
-                    type="primary" if not _v2_y else "secondary",
-                ):
-                    st.session_state["v2_f_mes"] = []
-
-            st.caption("Série")
-            s1, s2 = st.columns(2)
-            with s1:
-                if st.button(
-                    "Todas séries",
-                    key="v2_all_sr",
-                    use_container_width=True,
-                    type="primary"
-                    if series and len(_v2_sr) >= len(series) and set(_v2_sr) >= set(series)
-                    else "secondary",
-                ):
-                    st.session_state["v2_f_ser"] = list(series)
-            with s2:
-                if st.button(
-                    "Limpar séries",
-                    key="v2_clr_sr",
-                    use_container_width=True,
-                    type="primary" if not _v2_sr else "secondary",
-                ):
-                    st.session_state["v2_f_ser"] = []
-
-            if operacoes_opts:
-                st.caption("Operação")
-                for oi in range(0, len(operacoes_opts), 4):
-                    chunk = operacoes_opts[oi : oi + 4]
-                    oc = st.columns(len(chunk))
-                    for oj, opv in enumerate(chunk):
-                        with oc[oj]:
-                            sid = hashlib.md5(opv.encode()).hexdigest()[:16]
-                            if st.button(
-                                f"+ {opv}",
-                                key=f"v2_bo_{oi}_{oj}_{sid}",
-                                use_container_width=True,
-                                type="primary" if opv in _v2_op else "secondary",
-                            ):
-                                v2_acrescentar_filtro_sessao("v2_f_op", opv, operacoes_opts)
-                op1, op2 = st.columns(2)
-                with op1:
-                    if st.button(
-                        "Todas operações",
-                        key="v2_all_op",
-                        use_container_width=True,
-                        type="primary"
-                        if operacoes_opts
-                        and len(_v2_op) >= len(operacoes_opts)
-                        and set(_v2_op) >= set(operacoes_opts)
-                        else "secondary",
-                    ):
-                        st.session_state["v2_f_op"] = list(operacoes_opts)
-                with op2:
-                    if st.button(
-                        "Limpar op.",
-                        key="v2_clr_op",
-                        use_container_width=True,
-                        type="primary" if not _v2_op else "secondary",
-                    ):
-                        st.session_state["v2_f_op"] = []
-
-            st.divider()
-            _v2_tudo_vazio = not any(
-                (
-                    _v2_o,
-                    _v2_m,
-                    _v2_st,
-                    _v2_y,
-                    _v2_sr,
-                    _v2_op,
-                )
-            )
-            if st.button(
-                "Repor filtros (tudo vazio)",
-                key="v2_pre_clr",
-                use_container_width=True,
-                type="primary" if _v2_tudo_vazio else "secondary",
-            ):
-                for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
-                    if _kx in st.session_state:
-                        st.session_state[_kx] = []
-                st.session_state["v2_apenas_mes_propria"] = True
-
         _wp = st.session_state.pop("v2_preset_warn", None)
         if _wp:
             st.warning(_wp)
@@ -2244,6 +1949,14 @@ if st.session_state['confirmado']:
                     help="Coluna Status Final na exportação.",
                 )
 
+        _c_rep, _ = st.columns([1, 5])
+        with _c_rep:
+            if st.button("Repor filtros", key="v2_pre_clr"):
+                for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
+                    if _kx in st.session_state:
+                        st.session_state[_kx] = []
+                st.session_state["v2_apenas_mes_propria"] = True
+
         aplicar_mes_so_na_propria = st.checkbox(
             "Com mês escolhido: não aplicar esse mês às linhas de terceiros",
             value=True,
@@ -2260,22 +1973,6 @@ if st.session_state['confirmado']:
             )
         else:
             filtro_operacao = []
-
-        st.markdown(
-            "<div style='background:#f6f7f9;border:1px solid #e2e5ea;border-radius:8px;padding:10px 12px;margin:6px 0 10px 0;font-size:0.88rem;line-height:1.5;color:#333;'>"
-            "<strong>Estado dos filtros</strong> — <span style='opacity:0.85'>«qualquer» = critério em branco, não restringe.</span><br/>"
-            + v2_resumo_filtros_html(
-                filtro_origem,
-                filtro_meses,
-                filtro_modelos,
-                filtro_series,
-                filtro_status,
-                filtro_operacao,
-                bool(operacoes_opts),
-            )
-            + "</div>",
-            unsafe_allow_html=True,
-        )
 
         df_preview = filtrar_df_geral_para_exportacao(
             df_g_base,
@@ -2295,8 +1992,8 @@ if st.session_state['confirmado']:
         )
         _n_tot = len(df_g_base) if not df_g_base.empty else 0
         st.caption(
-            f"Pré-visualização: **{_n_lin}** linhas (folha Filtrado) · **{_n_ch}** chaves distintas · "
-            f"relatório geral **{_n_tot}** linhas"
+            f"Pré-visualização: **{_n_lin}** linhas na exportação · **{_n_ch}** chaves distintas · "
+            f"**{_n_tot}** linhas no relatório geral (sem filtros)"
         )
 
         nenhum_filtro = (
@@ -2322,32 +2019,33 @@ if st.session_state['confirmado']:
         ox1, ox2, ox3 = st.columns(3)
         with ox1:
             v2_zip_org = st.checkbox(
-                "ZIP com pastas (Pasta/nome no arquivo)",
+                "ZIP organizado em pastas (igual à estrutura dos XML)",
                 value=True,
                 key="v2_zip_org",
-                help="Estrutura de pastas dentro do ZIP.",
+                help="Cada ficheiro fica dentro das pastas (emitido/recebido, ano, série, etc.). Melhor para não misturar milhares de XML no mesmo sítio.",
             )
         with ox2:
             v2_zip_plano = st.checkbox(
-                "ZIP plano (só nomes na raiz)",
+                "ZIP só com ficheiros (tudo na raiz, sem pastas dentro)",
                 value=True,
                 key="v2_zip_plano",
-                help="Risco de colisão se houver ficheiros com o mesmo nome.",
+                help="Todos os XML aparecem soltos, lado a lado. Mais simples de ver, mas se dois XML tiverem o mesmo nome um pode substituir o outro.",
             )
         with ox3:
             v2_incl_csv = st.checkbox(
-                "Incluir CSV (igual à folha Filtrado)",
+                "Também gerar CSV (tabela para Excel ou outros programas)",
                 value=False,
                 key="v2_incl_csv",
+                help="É a mesma tabela que a primeira folha do Excel exportado (os dados já filtrados), só que em ficheiro .csv em vez de .xlsx.",
             )
 
         if not v2_zip_org and not v2_zip_plano:
-            st.caption("Sem ZIP: só Excel e CSV (se marcado).")
+            st.caption("Nenhum ZIP marcado: gera só o Excel e, se quiser, o CSV.")
 
         _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
 
         if st.button(
-            "Gerar Excel / CSV / ZIP conforme opções acima",
+            "Gerar ficheiros (Excel, ZIP e CSV se marcou)",
             type="primary",
             key="v2_btn_export",
             disabled=_btn_dis,
@@ -2531,7 +2229,7 @@ if st.session_state['confirmado']:
                 )
             if st.session_state.get("export_csv_buffer"):
                 st.download_button(
-                    "Descarregar CSV",
+                    "Descarregar CSV (mesma tabela que no Excel)",
                     st.session_state["export_csv_buffer"],
                     file_name=st.session_state.get("export_csv_name", "relatorio.csv"),
                     mime="text/csv",
