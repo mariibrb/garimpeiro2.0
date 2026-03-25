@@ -21,7 +21,29 @@ def aplicar_estilo_premium():
 
         header, [data-testid="stHeader"] { display: none !important; }
         .stApp { 
-            background: radial-gradient(circle at top right, #FFDEEF 0%, #F8F9FA 100%) !important; 
+            background: radial-gradient(circle at top right, #FFDEEF 0%, #F8F9FA 100%) !important;
+            /* Primária do tema: Streamlit usa isto em multiselect, checkbox, focos, etc. */
+            --primary-color: #ff69b4 !important;
+            --accent-color: #ff69b4 !important;
+        }
+        /* Reforço no contentor principal (algumas versões lêem a variável aqui) */
+        section.main .block-container {
+            --primary-color: #ff69b4 !important;
+        }
+        /* Chips / etiquetas dos multiselects (Base Web) — continuavam vermelhos com o tema por defeito */
+        span[data-baseweb="tag"] {
+            background-color: #ff69b4 !important;
+            color: #ffffff !important;
+            border-color: #f06292 !important;
+        }
+        span[data-baseweb="tag"] svg,
+        span[data-baseweb="tag"] path {
+            fill: #ffffff !important;
+        }
+        /* Opções assinaladas ao abrir o multiselect */
+        li[role="option"][aria-selected="true"],
+        [role="listbox"] [aria-selected="true"] {
+            background-color: rgba(255, 105, 180, 0.2) !important;
         }
 
         [data-testid="stSidebar"] {
