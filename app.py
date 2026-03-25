@@ -731,6 +731,31 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
     return parts, count_xml
 
 
+# Texto espelhado nos cartões + área “copiar guia” (manter alinhado ao fluxo real da app)
+TEXTO_GUIA_GARIMPEIRO = """
+O GARIMPEIRO — Guia rápido (para copiar)
+
+PASSO A PASSO
+1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
+2. Envie ZIP ou XML soltos (volumes grandes são suportados). Depois do primeiro resultado, pode incluir mais ficheiros no topo da página, sem reiniciar o garimpo.
+3. Clique em Iniciar grande garimpo e aguarde a leitura.
+4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
+5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
+6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
+7. Etapa 3: filtros (mês, modelo, série, status) e exportação em ZIP/Excel; cada ZIP tem até 10 mil XMLs.
+8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
+
+O QUE O SISTEMA FAZ
+• Emissão própria (CNPJ da sidebar = emitente): resumo por série, buracos na numeração, canceladas e inutilizadas; buracos são calculados por “trechos” para evitar listas falsamente enormes.
+• Terceiros: totalizador por tipo (NF-e, NFC-e, CT-e, MDF-e).
+• Um mesmo documento pode gerar mais do que um XML no disco (ex.: nota e evento) — o mesmo número de chaves pode corresponder a vários ficheiros.
+
+DICAS
+• Resetar sistema limpa sessão e temporários; use se trocar de cliente ou quiser recomeçar do zero.
+• Modelos na app: NF-e, NFC-e, CT-e, MDF-e (use estes nomes nas tabelas e colagens).
+""".strip()
+
+
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 
@@ -739,28 +764,42 @@ with st.container():
     with m_col1:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📖 Como usar o sistema (Passo a Passo)</h3>
+            <h3>📖 Como usar (passo a passo)</h3>
             <ol>
-                <li><b>Identificar a Empresa:</b> No menu branco à esquerda, escreva o CNPJ do cliente.</li>
-                <li><b>Enviar as Notas:</b> Arraste sua pasta de notas (ZIP ou XML soltos). Suporta grandes volumes (+300MB).</li>
-                <li><b>Analisar:</b> Inicie o Garimpo. Ele lerá os arquivos em segurança.</li>
-                <li><b>Validar:</b> Confirme a Autenticidade (Sefaz) e preencha notas inutilizadas.</li>
-                <li><b>Filtrar e Exportar:</b> Na Etapa 3, escolha exatamente o que deseja baixar (Mês, Modelo, Série) e exporte.</li>
+                <li><b>CNPJ:</b> Na lateral, o CNPJ do <b>emitente</b> (cliente) → Liberar operação.</li>
+                <li><b>Lote:</b> Envie ZIP ou XML. Grandes volumes são suportados.</li>
+                <li><b>Garimpo:</b> Iniciar grande garimpo e aguardar.</li>
+                <li><b>Mais ficheiros:</b> No <b>topo dos resultados</b>, inclua XML/ZIP extra <b>sem reiniciar</b>.</li>
+                <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
+                <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
+                <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
+                <li><b>Exportar:</b> Etapa 3 (filtros + ZIP/Excel) ou “Exportar lista específica” (chaves na col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
     with m_col2:
         st.markdown("""
         <div class="instrucoes-card">
-            <h3>📊 O que o sistema faz por si</h3>
+            <h3>📊 O que o sistema faz</h3>
             <ul>
-                <li><b>Acha Notas Perdidas:</b> Identifica buracos na numeração.</li>
-                <li><b>Limpa Cancelamentos:</b> Separa as notas canceladas da apuração.</li>
-                <li><b>Filtros Granulares:</b> Baixe apenas NF-e, apenas CT-e, separe a Série 1 da Série 2, ou isente as notas de Terceiros do filtro de competência.</li>
-                <li><b>Auditoria Cruzada:</b> Confronta o status do seu arquivo físico com o que consta no site da SEFAZ.</li>
+                <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
+                <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
+                <li><b>Filtros e lotes:</b> Exportação à medida; ZIPs partidos em até 10 mil XMLs cada.</li>
+                <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
+                <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
+
+    with st.expander("📋 Guia em texto simples (para copiar)", expanded=False):
+        st.caption("Clique na caixa, Ctrl+A (Cmd+A no Mac) e Ctrl+C para copiar tudo.")
+        st.text_area(
+            "Guia",
+            value=TEXTO_GUIA_GARIMPEIRO,
+            height=320,
+            key="garimpeiro_guia_copiar",
+            label_visibility="collapsed",
+        )
 
 st.markdown("---")
 
@@ -1047,7 +1086,46 @@ if st.session_state['confirmado']:
         c1.metric("📦 AUTORIZADAS (PRÓPRIAS)", sc.get("AUTORIZADAS", 0))
         c2.metric("❌ CANCELADAS (PRÓPRIAS)", sc.get("CANCELADOS", 0))
         c3.metric("🚫 INUTILIZADAS (PRÓPRIAS)", sc.get("INUTILIZADOS", 0))
-        
+
+        st.caption(
+            "Se faltar XML ou ZIP, use o bloco abaixo sem reiniciar o garimpo: os totais e as tabelas atualizam na hora."
+        )
+        # =====================================================================
+        # MÓDULO: ADICIONAR MAIS ARQUIVOS (CARGA INCREMENTAL) — no topo dos resultados
+        # =====================================================================
+        with st.expander("➕ Incluir mais XML / ZIP no lote (sem resetar)", expanded=False):
+            extra_files = st.file_uploader(
+                "Ficheiros a acrescentar ao lote actual:",
+                accept_multiple_files=True,
+                key="extra_files",
+            )
+            if extra_files and st.button("Processar e atualizar", key="extra_btn_proc", type="primary"):
+                with st.spinner("A adicionar…"):
+                    os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
+                    for f in extra_files:
+                        caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
+                        with open(caminho_salvo, "wb") as out_f:
+                            out_f.write(f.read())
+
+                        f.seek(0)
+                        try:
+                            todos_xmls = extrair_recursivo(f, f.name)
+                            for name, xml_data in todos_xmls:
+                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                                if res:
+                                    ja_existe = any(
+                                        item["Chave"] == res["Chave"] for item in st.session_state["relatorio"]
+                                    )
+                                    if not ja_existe:
+                                        st.session_state["relatorio"].append(res)
+                                del xml_data
+                        except Exception:
+                            pass
+
+                    st.session_state["export_ready"] = False
+                    reconstruir_dataframes_relatorio_simples()
+                st.rerun()
+
         st.markdown("### 📊 RESUMO POR SÉRIE")
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
 
@@ -1102,9 +1180,7 @@ if st.session_state['confirmado']:
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
             st.caption(
                 "Somente emissão própria: o CNPJ do emitente do XML é o mesmo da sidebar (vale para NF-e de entrada e de saída emitidas pelo cliente). "
-                "Notas em que o cliente só é destinatário (terceiros) não entram nos buracos. "
-                f"Por trecho de numeração: saltos consecutivos maiores que {MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS} números quebram o trecho "
-                "(evita lista inflada por erro ou faixas muito distantes)."
+                "Notas em que o cliente só é destinatário (terceiros) não entram nos buracos."
             )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
@@ -1406,38 +1482,6 @@ if st.session_state['confirmado']:
                     'validation_done': True
                 })
                 st.rerun()
-
-        st.divider()
-
-        # =====================================================================
-        # MÓDULO: ADICIONAR MAIS ARQUIVOS (CARGA INCREMENTAL)
-        # =====================================================================
-        with st.expander("➕ ADICIONAR MAIS ARQUIVOS (SEM RESETAR)"):
-            extra_files = st.file_uploader("Adicionar arquivos ao lote atual:", accept_multiple_files=True, key="extra_files")
-            if extra_files and st.button("PROCESSAR E ATUALIZAR LISTA"):
-                with st.spinner("Adicionando..."):
-                    os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
-                    for f in extra_files:
-                        caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
-                        with open(caminho_salvo, "wb") as out_f:
-                            out_f.write(f.read())
-                        
-                        f.seek(0)
-                        try:
-                            todos_xmls = extrair_recursivo(f, f.name)
-                            for name, xml_data in todos_xmls:
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res:
-                                    ja_existe = any(item['Chave'] == res['Chave'] for item in st.session_state['relatorio'])
-                                    if not ja_existe:
-                                        st.session_state['relatorio'].append(res)
-                                del xml_data
-                        except: 
-                            pass
-                    
-                    st.session_state['export_ready'] = False
-                    reconstruir_dataframes_relatorio_simples()
-                    st.rerun()
 
         st.divider()
 
