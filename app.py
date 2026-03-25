@@ -8,6 +8,8 @@ import random
 import gc
 import shutil
 import pdfplumber
+from collections import defaultdict
+from datetime import date
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
 st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
@@ -98,7 +100,10 @@ aplicar_estilo_premium()
 # --- VARIÁVEIS DE SISTEMA DE ARQUIVOS (PREVENÇÃO DE QUEDA DE MEMÓRIA) ---
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 TEMP_UPLOADS_DIR = "temp_garimpo_uploads"
-MAX_XML_PER_ZIP = 8000  # Trava de segurança para impedir queda do Streamlit (gera zips de ~20MB)
+MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (Domínio e Etapa 3); reparte em vários lotes
+# Se dois números emitidos consecutivos (ordenados) diferem mais que isto, tratamos como outra faixa.
+# Assim evitamos milhões de "buracos" falsos (ex.: uma chave/XML errado com nº gigante ou duas séries distantes misturadas).
+MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS = 25000
 
 # --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
@@ -300,6 +305,161 @@ def chunk_list(lst, n):
     for i in range(0, len(lst), n): 
         yield lst[i:i + n]
 
+
+def _ym_tuple(ano, mes):
+    try:
+        return (int(ano), int(mes))
+    except (ValueError, TypeError):
+        return None
+
+
+def _ym_gt(ano_a, mes_a, ano_b, mes_b):
+    ta, tb = _ym_tuple(ano_a, mes_a), _ym_tuple(ano_b, mes_b)
+    if not ta or not tb:
+        return False
+    return ta > tb
+
+
+def _ym_eq(ano_a, mes_a, ano_b, mes_b):
+    ta, tb = _ym_tuple(ano_a, mes_a), _ym_tuple(ano_b, mes_b)
+    if not ta or not tb:
+        return False
+    return ta == tb
+
+
+def parse_linhas_referencia_ultimo(text):
+    """Linhas: MODELO | SÉRIE | ÚLTIMO_NÚMERO (ex.: NF-e | 1 | 4520)."""
+    out = {}
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        modelo, serie, ult = parts[0], parts[1], parts[2]
+        digitos = "".join(filter(str.isdigit, ult))
+        if not digitos:
+            continue
+        try:
+            u = int(digitos)
+        except ValueError:
+            continue
+        if u <= 0:
+            continue
+        out[f"{modelo}|{serie}"] = u
+    return out
+
+
+def coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref):
+    """Só emissão própria; números no mês de referência e nos meses posteriores."""
+    agg = defaultdict(lambda: {"no_mes_ref": set(), "apos_ref": set()})
+    for r in relatorio:
+        if "EMITIDOS_CLIENTE" not in r.get("Pasta", ""):
+            continue
+        ano = r.get("Ano", "2000")
+        mes = r.get("Mes", "01")
+        if str(ano) == "0000":
+            continue
+        tipo = r.get("Tipo") or ""
+        ser = str(r.get("Série", "0"))
+        key = (tipo, ser)
+        stt = r.get("Status", "")
+        if stt == "INUTILIZADOS":
+            ra, rb = r.get("Range", (r.get("Número", 0), r.get("Número", 0)))
+            try:
+                ra, rb = int(ra), int(rb)
+            except (TypeError, ValueError):
+                continue
+            for n in range(ra, rb + 1):
+                if _ym_eq(ano, mes, ano_ref, mes_ref):
+                    agg[key]["no_mes_ref"].add(n)
+                elif _ym_gt(ano, mes, ano_ref, mes_ref):
+                    agg[key]["apos_ref"].add(n)
+        else:
+            try:
+                n = int(r.get("Número", 0) or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n <= 0:
+                continue
+            if _ym_eq(ano, mes, ano_ref, mes_ref):
+                agg[key]["no_mes_ref"].add(n)
+            elif _ym_gt(ano, mes, ano_ref, mes_ref):
+                agg[key]["apos_ref"].add(n)
+    return agg
+
+
+def montar_df_conferencia_sequencia(relatorio, ano_ref, mes_ref, ref_map):
+    """ref_map: chave 'Modelo|Série' -> último nº informado ao fim do mês de referência."""
+    linhas = []
+    agg = coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref)
+    for kstr, ultimo_u in ref_map.items():
+        partes = kstr.split("|", 2)
+        if len(partes) < 2:
+            continue
+        tipo, ser = partes[0].strip(), partes[1].strip()
+        key = (tipo, ser)
+        bucket = agg.get(key, {"no_mes_ref": set(), "apos_ref": set()})
+        nr = bucket["no_mes_ref"]
+        ap = bucket["apos_ref"]
+        max_no_mes = max(nr) if nr else None
+        min_apos = min(ap) if ap else None
+        obs = []
+        if max_no_mes is None:
+            obs.append("Sem notas desta série no mês de referência nos XMLs.")
+        elif max_no_mes > ultimo_u:
+            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é maior que o último informado ({ultimo_u}).")
+        elif max_no_mes < ultimo_u:
+            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é menor que o último informado ({ultimo_u}).")
+        else:
+            obs.append("Máximo no mês de referência coincide com o último informado.")
+        esperado_proximo = ultimo_u + 1
+        if min_apos is None:
+            obs.append("Nenhuma nota após o mês de referência neste lote.")
+        elif min_apos > esperado_proximo:
+            obs.append(
+                f"Possível falta de sequência: primeiro nº após ref. nos XMLs é {min_apos}; esperado {esperado_proximo}."
+            )
+        elif min_apos < esperado_proximo:
+            obs.append(
+                f"Primeiro após ref. nos XMLs: {min_apos} (menor que {esperado_proximo} — verifique competência ou duplicados)."
+            )
+        else:
+            obs.append(f"Sequência coerente: primeiro após ref. = {esperado_proximo}.")
+        linhas.append(
+            {
+                "Modelo": tipo,
+                "Série": ser,
+                "Último informado (fim mês ref.)": ultimo_u,
+                "Máx. XML no mês ref.": max_no_mes if max_no_mes is not None else "—",
+                "Primeiro XML após ref.": min_apos if min_apos is not None else "—",
+                "Observações": " ".join(obs),
+            }
+        )
+    return pd.DataFrame(linhas)
+
+
+def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
+    """Buracos só dentro de cada trecho; saltos grandes quebram o trecho (não preenche o intervalo entre faixas)."""
+    out = []
+    if not nums_sorted:
+        return out
+    segmentos = [[nums_sorted[0]]]
+    for i in range(1, len(nums_sorted)):
+        if nums_sorted[i] - nums_sorted[i - 1] > gap_max:
+            segmentos.append([nums_sorted[i]])
+        else:
+            segmentos[-1].append(nums_sorted[i])
+    for seg in segmentos:
+        lo, hi = seg[0], seg[-1]
+        seg_set = set(seg)
+        for b in range(lo, hi + 1):
+            if b not in seg_set:
+                out.append({"Tipo": tipo_doc, "Serie": serie_str, "Num_Faltante": b})
+    return out
+
+
 # --- FUNÇÃO AUXILIAR PARA O BLOCO DOMÍNIO ---
 def extrair_notas_faltantes_dominio(pdf_file):
     notas_faltantes = []
@@ -341,26 +501,60 @@ def extrair_chaves_de_excel(arquivo_excel):
 
 
 def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
+    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada). Retorna (lista_caminhos, total_xml)."""
     if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
-        return None, 0
+        return [], 0
     ch_set = set(chaves_lista)
-    nome_arquivo_zip = "faltantes_dominio_final.zip"
     try:
-        if os.path.exists(nome_arquivo_zip):
-            os.remove(nome_arquivo_zip)
+        for f in os.listdir("."):
+            if f.endswith(".zip") and "faltantes_dominio_final" in f:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
     except Exception:
         pass
+
+    parts = []
+    part_idx = 1
     count_xml = 0
-    with zipfile.ZipFile(nome_arquivo_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+    no_lote = 0
+    nome = f"faltantes_dominio_final_pt{part_idx}.zip"
+    zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+    parts.append(nome)
+
+    try:
         for fn in os.listdir(TEMP_UPLOADS_DIR):
             f_path = os.path.join(TEMP_UPLOADS_DIR, fn)
             with open(f_path, "rb") as ft:
                 for name, data in extrair_recursivo(ft, fn):
                     res, _ = identify_xml_info(data, cnpj_limpo, name)
                     if res and res["Chave"] in ch_set:
+                        if no_lote >= MAX_XML_PER_ZIP:
+                            zf.close()
+                            part_idx += 1
+                            nome = f"faltantes_dominio_final_pt{part_idx}.zip"
+                            zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+                            parts.append(nome)
+                            no_lote = 0
                         zf.writestr(f"{res['Pasta']}/{name}", data)
                         count_xml += 1
-    return nome_arquivo_zip, count_xml
+                        no_lote += 1
+    finally:
+        try:
+            zf.close()
+        except Exception:
+            pass
+
+    if count_xml == 0:
+        for p in parts:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        return [], 0
+
+    return parts, count_xml
 
 
 # --- INTERFACE ---
@@ -413,19 +607,26 @@ keys_to_init = [
     'org_zip_parts',
     'todos_zip_parts',
     'ch_falt_dom',
-    'zip_dom_pronto'
+    'zip_dom_parts'
 ]
 
 for k in keys_to_init:
     if k not in st.session_state:
         if 'df' in k: 
             st.session_state[k] = pd.DataFrame()
-        elif k in ['relatorio', 'org_zip_parts', 'todos_zip_parts', 'ch_falt_dom']: 
+        elif k in ['relatorio', 'org_zip_parts', 'todos_zip_parts', 'ch_falt_dom', 'zip_dom_parts']: 
             st.session_state[k] = []
         elif k == 'st_counts': 
             st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
         else: 
             st.session_state[k] = False
+
+if "seq_ref_ultimos" not in st.session_state:
+    st.session_state["seq_ref_ultimos"] = None
+if "seq_ref_ano" not in st.session_state:
+    st.session_state["seq_ref_ano"] = None
+if "seq_ref_mes" not in st.session_state:
+    st.session_state["seq_ref_mes"] = None
 
 with st.sidebar:
     st.markdown("### 🔍 Configuração")
@@ -438,6 +639,40 @@ with st.sidebar:
     if len(cnpj_limpo) == 14:
         if st.button("✅ LIBERAR OPERAÇÃO"): 
             st.session_state['confirmado'] = True
+
+        with st.expander("📌 Último nº por série (mês de referência)"):
+            d = date.today()
+            def_ano = d.year - 1 if d.month == 1 else d.year
+            def_mes = 12 if d.month == 1 else d.month - 1
+            a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
+            m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
+            sr_ano = st.number_input("Ano de referência", min_value=2000, max_value=2100, value=int(a0), key="seq_in_ano")
+            sr_mes = st.number_input("Mês (1–12)", min_value=1, max_value=12, value=int(m0), key="seq_in_mes")
+            st.caption(
+                "Último número emitido ao fim desse mês (emissão própria). "
+                "Use o mesmo modelo que no sistema: NF-e, NFC-e, CT-e ou MDF-e."
+            )
+            sr_txt = st.text_area(
+                "Uma linha por série: MODELO | SÉRIE | NÚMERO",
+                placeholder="NF-e | 1 | 4520\nNFC-e | 1 | 890\nCT-e | 1 | 1200",
+                height=130,
+                key="seq_in_txt",
+            )
+            if st.button("Guardar referência", key="seq_btn_guardar"):
+                parsed = parse_linhas_referencia_ultimo(sr_txt)
+                if parsed:
+                    st.session_state["seq_ref_ano"] = int(sr_ano)
+                    st.session_state["seq_ref_mes"] = int(sr_mes)
+                    st.session_state["seq_ref_ultimos"] = parsed
+                    st.success(f"{len(parsed)} série(s) guardada(s).")
+                else:
+                    st.warning("Nenhuma linha válida. Use o formato: NF-e | 1 | 4520")
+            if st.session_state.get("seq_ref_ultimos"):
+                st.info(
+                    f"Referência ativa: {st.session_state['seq_ref_ano']}/"
+                    f"{int(st.session_state['seq_ref_mes']):02d} — "
+                    f"{len(st.session_state['seq_ref_ultimos'])} série(s)."
+                )
             
     st.divider()
     
@@ -579,8 +814,7 @@ if st.session_state['confirmado']:
                         "Valor Contábil (R$)": round(dados["valor"], 2)
                     })
                     
-                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
+                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
 
             st.session_state.update({
                 'relatorio': rel_list,
@@ -609,6 +843,33 @@ if st.session_state['confirmado']:
         
         st.markdown("### 📊 RESUMO POR SÉRIE")
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
+
+        if (
+            st.session_state.get("seq_ref_ultimos")
+            and st.session_state.get("seq_ref_ano") is not None
+            and st.session_state.get("seq_ref_mes") is not None
+        ):
+            st.markdown("### 🔗 Conferência de sequência (vs. mês de referência)")
+            ar = int(st.session_state["seq_ref_ano"])
+            mr = int(st.session_state["seq_ref_mes"])
+            st.caption(
+                f"Competência de referência: {ar}/{mr:02d}. "
+                "Só emissão própria; canceladas, autorizadas e inutilizadas entram na sequência."
+            )
+            df_seq = montar_df_conferencia_sequencia(
+                st.session_state["relatorio"], ar, mr, st.session_state["seq_ref_ultimos"]
+            )
+            if df_seq.empty:
+                st.info("Nenhuma série na referência para exibir.")
+            else:
+                st.dataframe(df_seq, use_container_width=True, hide_index=True)
+        else:
+            with st.expander("🔗 Conferência de sequência (opcional)", expanded=False):
+                st.markdown(
+                    "No menu lateral, em **Último nº por série (mês de referência)**, indique o **ano e mês base** "
+                    "(por exemplo o mês anterior ao que quer validar) e, em cada linha, **modelo | série | último número** "
+                    "daquele mês. Depois do garimpo, aparece uma tabela a comparar com os XMLs."
+                )
         
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
@@ -616,6 +877,12 @@ if st.session_state['confirmado']:
         with col_audit:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
+            st.caption(
+                "Somente emissão própria: o CNPJ do emitente do XML é o mesmo da sidebar (vale para NF-e de entrada e de saída emitidas pelo cliente). "
+                "Notas em que o cliente só é destinatário (terceiros) não entram nos buracos. "
+                f"Por trecho de numeração: saltos consecutivos maiores que {MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS} números quebram o trecho "
+                "(evita lista inflada por erro ou faixas muito distantes)."
+            )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else: 
@@ -763,8 +1030,7 @@ if st.session_state['confirmado']:
                                         "Quantidade": len(ns), 
                                         "Valor Contábil (R$)": round(dados["valor"], 2)
                                     })
-                                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
+                                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
 
                             st.session_state.update({
                                 'df_resumo': pd.DataFrame(res_final), 
@@ -890,8 +1156,7 @@ if st.session_state['confirmado']:
                                         "Quantidade": len(ns), 
                                         "Valor Contábil (R$)": round(dados["valor"], 2)
                                     })
-                                    for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
+                                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
                                         
                             st.session_state.update({
                                 'df_resumo': pd.DataFrame(res_final), 
@@ -1030,8 +1295,7 @@ if st.session_state['confirmado']:
                             "Quantidade": len(ns), 
                             "Valor Contábil (R$)": round(dados["valor"], 2)
                         })
-                        for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                            fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
+                        fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
                             
                 st.session_state.update({
                     'df_canceladas': pd.DataFrame(canc_list), 
@@ -1164,8 +1428,7 @@ if st.session_state['confirmado']:
                                 "Quantidade": len(ns), 
                                 "Valor Contábil (R$)": round(dados["valor"], 2)
                             })
-                            for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
+                            fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
                                 
                     st.session_state.update({
                         'df_resumo': pd.DataFrame(res_final), 
@@ -1328,12 +1591,14 @@ if st.session_state['confirmado']:
                                     ch_encontradas.append(f.iloc[0]["Chave"])
 
                             if ch_encontradas:
-                                nome_zip, _ = escrever_zip_dominio_por_chaves(cnpj_limpo, ch_encontradas)
-                                if nome_zip:
+                                partes, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, ch_encontradas)
+                                if partes:
                                     st.session_state["ch_falt_dom"] = ch_encontradas
-                                    st.session_state["zip_dom_pronto"] = nome_zip
+                                    st.session_state["zip_dom_parts"] = partes
+                                    nl = len(partes)
                                     st.success(
-                                        f"✅ Sucesso! {len(ch_encontradas)} notas organizadas e prontas para baixar."
+                                        f"✅ Sucesso! {len(ch_encontradas)} nota(s) na lista; {n_xml} XML(s) em "
+                                        f"{nl} ficheiro(s) ZIP (até {MAX_XML_PER_ZIP} XMLs por lote)."
                                     )
                                 else:
                                     st.warning("⚠️ Não foi possível gerar o ZIP.")
@@ -1352,32 +1617,33 @@ if st.session_state['confirmado']:
                         if not chaves_lidas:
                             st.warning("⚠️ Nenhuma chave válida (44 dígitos) na primeira coluna.")
                         else:
-                            nome_zip, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lidas)
-                            if nome_zip and n_xml > 0:
+                            partes, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lidas)
+                            if partes and n_xml > 0:
                                 st.session_state["ch_falt_dom"] = chaves_lidas
-                                st.session_state["zip_dom_pronto"] = nome_zip
+                                st.session_state["zip_dom_parts"] = partes
+                                nl = len(partes)
                                 st.success(
-                                    f"✅ Sucesso! {len(chaves_lidas)} chave(s) na planilha; {n_xml} XML(s) no ZIP."
+                                    f"✅ Sucesso! {len(chaves_lidas)} chave(s) na planilha; {n_xml} XML(s) em "
+                                    f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} XMLs por lote)."
                                 )
-                            elif nome_zip:
-                                st.session_state["ch_falt_dom"] = chaves_lidas
-                                st.session_state["zip_dom_pronto"] = nome_zip
-                                st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
                             else:
-                                st.warning("⚠️ Não foi possível gerar o ZIP.")
+                                st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
 
-            if st.session_state.get("zip_dom_pronto"):
-                nome_zip = st.session_state["zip_dom_pronto"]
-                if os.path.exists(nome_zip):
-                    with open(nome_zip, "rb") as f_final:
-                        st.download_button(
-                            label="📥 BAIXAR XMLS ORGANIZADOS (ZIP)",
-                            data=f_final,
-                            file_name="faltantes_dominio_organizados.zip",
-                            mime="application/zip",
-                            key="btn_dl_final_disco",
-                            use_container_width=True,
-                        )
+            if st.session_state.get("zip_dom_parts"):
+                st.caption(f"Cada ficheiro tem no máximo {MAX_XML_PER_ZIP} XMLs.")
+                for row in chunk_list(st.session_state["zip_dom_parts"], 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        if os.path.exists(part):
+                            with open(part, "rb") as f_final:
+                                cols[idx].download_button(
+                                    label=f"📥 {os.path.basename(part)}",
+                                    data=f_final.read(),
+                                    file_name=os.path.basename(part),
+                                    mime="application/zip",
+                                    key=f"btn_dl_dom_{part}",
+                                    use_container_width=True,
+                                )
 else:
     st.warning("👈 Insira o CNPJ lateral para começar.")
 
