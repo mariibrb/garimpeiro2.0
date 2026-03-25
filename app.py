@@ -580,7 +580,7 @@ if st.session_state['confirmado']:
                     })
                     
                     for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))):
-                        fal_final.append({"Tipo": t, "SÃ©rie": s, "NÂº Faltante": b})
+                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
 
             st.session_state.update({
                 'relatorio': rel_list,
@@ -645,7 +645,7 @@ if st.session_state['confirmado']:
             with st.expander("Consulte a Sefaz e selecione abaixo as notas que constam como inutilizadas."):
                 opcoes_buracos = []
                 for idx, row in st.session_state['df_faltantes'].iterrows():
-                    opcoes_buracos.append(f"{row['Tipo']} | SÃ©rie {row['SÃ©rie']} | Nota {row['NÂº Faltante']}")
+                    opcoes_buracos.append(f"{row['Tipo']} | Serie {row['Serie']} | Nota {row['Num_Faltante']}")
                 
                 buracos_selecionados = st.multiselect("Selecione as notas para marcÃ¡-las como Inutilizadas:", opcoes_buracos)
                 
@@ -655,7 +655,7 @@ if st.session_state['confirmado']:
                             for selecao in buracos_selecionados:
                                 partes = selecao.split(" | ")
                                 tipo_man = partes[0].strip()
-                                serie_man = partes[1].replace("SÃ©rie", "").strip()
+                                serie_man = partes[1].replace("Serie", "").strip()
                                 nota_man = int(partes[2].replace("Nota", "").strip())
                                 
                                 res_manual = {
@@ -764,7 +764,7 @@ if st.session_state['confirmado']:
                                         "Valor ContÃ¡bil (R$)": round(dados["valor"], 2)
                                     })
                                     for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "SÃ©rie": s, "NÂº Faltante": b})
+                                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
 
                             st.session_state.update({
                                 'df_resumo': pd.DataFrame(res_final), 
@@ -891,7 +891,7 @@ if st.session_state['confirmado']:
                                         "Valor ContÃ¡bil (R$)": round(dados["valor"], 2)
                                     })
                                     for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                        fal_final.append({"Tipo": t, "SÃ©rie": s, "NÂº Faltante": b})
+                                        fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
                                         
                             st.session_state.update({
                                 'df_resumo': pd.DataFrame(res_final), 
@@ -1031,7 +1031,7 @@ if st.session_state['confirmado']:
                             "Valor ContÃ¡bil (R$)": round(dados["valor"], 2)
                         })
                         for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                            fal_final.append({"Tipo": t, "SÃ©rie": s, "NÂº Faltante": b})
+                            fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
                             
                 st.session_state.update({
                     'df_canceladas': pd.DataFrame(canc_list), 
@@ -1165,7 +1165,7 @@ if st.session_state['confirmado']:
                                 "Valor ContÃ¡bil (R$)": round(dados["valor"], 2)
                             })
                             for b in sorted(list(set(range(n_min, n_max + 1)) - set(ns))): 
-                                fal_final.append({"Tipo": t, "SÃ©rie": s, "NÂº Faltante": b})
+                                fal_final.append({"Tipo": t, "Serie": s, "Num_Faltante": b})
                                 
                     st.session_state.update({
                         'df_resumo': pd.DataFrame(res_final), 
