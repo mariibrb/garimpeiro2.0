@@ -8,7 +8,7 @@ import random
 import gc
 import shutil
 import pdfplumber
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
@@ -369,6 +369,160 @@ def ref_map_from_dataframe(df):
             continue
         out[f"{modelo}|{serie}"] = u
     return out
+
+
+def item_registro_manual_inutilizado(cnpj_limpo, tipo_man, serie_man, nota_man):
+    serie_str = str(serie_man).strip()
+    return {
+        "Arquivo": "REGISTRO_MANUAL",
+        "Chave": f"MANUAL_INUT_{tipo_man}_{serie_str}_{nota_man}",
+        "Tipo": tipo_man,
+        "Série": serie_str,
+        "Número": int(nota_man),
+        "Status": "INUTILIZADOS",
+        "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/01/Serie_{serie_str}",
+        "Valor": 0.0,
+        "Conteúdo": b"",
+        "Ano": "0000",
+        "Mes": "01",
+        "Operacao": "SAIDA",
+        "Data_Emissao": "",
+        "CNPJ_Emit": cnpj_limpo,
+        "Nome_Emit": "INSERÇÃO MANUAL",
+        "Doc_Dest": "",
+        "Nome_Dest": "",
+    }
+
+
+def parse_linhas_inutil_manual(text):
+    """Linhas: MODELO|SÉRIE|NÚMERO (pipes opcionais com espaços)."""
+    triplas = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3:
+            continue
+        mod, ser, num = parts[0], parts[1], parts[2]
+        d = "".join(filter(str.isdigit, num))
+        if not d:
+            continue
+        try:
+            n = int(d)
+        except ValueError:
+            continue
+        if n <= 0 or not mod or not ser:
+            continue
+        triplas.append((mod, ser, n))
+    return triplas
+
+
+def reconstruir_dataframes_relatorio_simples():
+    """Recalcula tabelas a partir de st.session_state['relatorio'] (status no próprio item)."""
+    lote_recalc = {}
+    for item in st.session_state["relatorio"]:
+        key = item["Chave"]
+        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+        if key in lote_recalc:
+            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
+                lote_recalc[key] = (item, is_p)
+        else:
+            lote_recalc[key] = (item, is_p)
+
+    audit_map = {}
+    canc_list = []
+    inut_list = []
+    aut_list = []
+    geral_list = []
+
+    for k, (res, is_p) in lote_recalc.items():
+        if is_p:
+            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
+        else:
+            origem_label = f"TERCEIROS ({res['Operacao']})"
+
+        registro_detalhado = {
+            "Origem": origem_label,
+            "Operação": res["Operacao"],
+            "Modelo": res["Tipo"],
+            "Série": res["Série"],
+            "Nota": res["Número"],
+            "Data Emissão": res["Data_Emissao"],
+            "CNPJ Emitente": res["CNPJ_Emit"],
+            "Nome Emitente": res["Nome_Emit"],
+            "Doc Destinatário": res["Doc_Dest"],
+            "Nome Destinatário": res["Nome_Dest"],
+            "Chave": res["Chave"],
+            "Status Final": res["Status"],
+            "Valor": res["Valor"],
+            "Ano": res["Ano"],
+            "Mes": res["Mes"],
+        }
+
+        if res["Status"] == "INUTILIZADOS":
+            r = res.get("Range", (res["Número"], res["Número"]))
+            for n in range(r[0], r[1] + 1):
+                item_inut = registro_detalhado.copy()
+                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
+                geral_list.append(item_inut)
+        else:
+            geral_list.append(registro_detalhado)
+
+        if is_p:
+            sk = (res["Tipo"], res["Série"])
+            if sk not in audit_map:
+                audit_map[sk] = {"nums": set(), "valor": 0.0}
+
+            if res["Status"] == "INUTILIZADOS":
+                r = res.get("Range", (res["Número"], res["Número"]))
+                for n in range(r[0], r[1] + 1):
+                    audit_map[sk]["nums"].add(n)
+                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
+            else:
+                if res["Número"] > 0:
+                    audit_map[sk]["nums"].add(res["Número"])
+                    if res["Status"] == "CANCELADOS":
+                        canc_list.append(registro_detalhado)
+                    elif res["Status"] == "NORMAIS":
+                        aut_list.append(registro_detalhado)
+                    audit_map[sk]["valor"] += res["Valor"]
+
+    res_final = []
+    fal_final = []
+
+    for (t, s), dados in audit_map.items():
+        ns = sorted(list(dados["nums"]))
+        if ns:
+            n_min = ns[0]
+            n_max = ns[-1]
+            res_final.append(
+                {
+                    "Documento": t,
+                    "Série": s,
+                    "Início": n_min,
+                    "Fim": n_max,
+                    "Quantidade": len(ns),
+                    "Valor Contábil (R$)": round(dados["valor"], 2),
+                }
+            )
+            fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
+
+    st.session_state.update(
+        {
+            "df_resumo": pd.DataFrame(res_final),
+            "df_faltantes": pd.DataFrame(fal_final),
+            "df_canceladas": pd.DataFrame(canc_list),
+            "df_inutilizadas": pd.DataFrame(inut_list),
+            "df_autorizadas": pd.DataFrame(aut_list),
+            "df_geral": pd.DataFrame(geral_list),
+            "st_counts": {
+                "CANCELADOS": len(canc_list),
+                "INUTILIZADOS": len(inut_list),
+                "AUTORIZADAS": len(aut_list),
+            },
+        }
+    )
 
 
 def coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref):
@@ -897,6 +1051,22 @@ if st.session_state['confirmado']:
         st.markdown("### 📊 RESUMO POR SÉRIE")
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
 
+        st.markdown("### 📥 TERCEIROS — TOTAL POR TIPO")
+        _rels_terc = [
+            r
+            for r in st.session_state["relatorio"]
+            if "RECEBIDOS_TERCEIROS" in r.get("Pasta", "")
+        ]
+        if not _rels_terc:
+            st.info("Nenhum XML de terceiros no lote.")
+        else:
+            _cnt_terc = Counter((r.get("Tipo") or "Outros") for r in _rels_terc)
+            _df_terc = pd.DataFrame(
+                [{"Modelo": t, "Quantidade": n} for t, n in sorted(_cnt_terc.items(), key=lambda x: x[0])]
+            )
+            st.caption(f"Somatório geral (documentos lidos): {_df_terc['Quantidade'].sum()}")
+            st.dataframe(_df_terc, use_container_width=True, hide_index=True)
+
         if (
             st.session_state.get("seq_ref_ultimos")
             and st.session_state.get("seq_ref_ano") is not None
@@ -942,14 +1112,24 @@ if st.session_state['confirmado']:
                 st.info("✅ Tudo em ordem.")
                 
         with col_canc:
-            st.markdown("### ❌ CANCELADAS")
+            _q_canc = (
+                len(st.session_state["df_canceladas"])
+                if not st.session_state["df_canceladas"].empty
+                else 0
+            )
+            st.markdown(f"### ❌ CANCELADAS ({_q_canc})")
             if not st.session_state['df_canceladas'].empty:
                 st.dataframe(st.session_state['df_canceladas'], use_container_width=True, hide_index=True)
             else: 
                 st.info("ℹ️ Nenhuma nota.")
                 
         with col_inut:
-            st.markdown("### 🚫 INUTILIZADAS")
+            _q_inut = (
+                len(st.session_state["df_inutilizadas"])
+                if not st.session_state["df_inutilizadas"].empty
+                else 0
+            )
+            st.markdown(f"### 🚫 INUTILIZADAS ({_q_inut})")
             if not st.session_state['df_inutilizadas'].empty:
                 st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True)
             else: 
@@ -960,271 +1140,131 @@ if st.session_state['confirmado']:
         # =====================================================================
         # MÓDULO: DECLARAR INUTILIZADAS MANUAIS
         # =====================================================================
-        if not st.session_state['df_faltantes'].empty:
-            st.markdown("### 🛠️ INFORMAR NOTAS INUTILIZADAS (SEM XML)")
-            with st.expander("Consulte a Sefaz e selecione abaixo as notas que constam como inutilizadas."):
-                opcoes_buracos = []
-                for idx, row in st.session_state['df_faltantes'].iterrows():
-                    opcoes_buracos.append(f"{row['Tipo']} | Serie {row['Serie']} | Nota {row['Num_Faltante']}")
-                
-                buracos_selecionados = st.multiselect("Selecione as notas para marcá-las como Inutilizadas:", opcoes_buracos)
-                
-                if st.button("CONFIRMAR INUTILIZAÇÃO (ATUALIZAR TABELAS)"):
-                    if buracos_selecionados:
-                        with st.spinner("Atualizando..."):
-                            for selecao in buracos_selecionados:
-                                partes = selecao.split(" | ")
-                                tipo_man = partes[0].strip()
-                                serie_man = partes[1].replace("Serie", "").strip()
-                                nota_man = int(partes[2].replace("Nota", "").strip())
-                                
-                                res_manual = {
-                                    "Arquivo": "REGISTRO_MANUAL", 
-                                    "Chave": f"MANUAL_INUT_{tipo_man}_{serie_man}_{nota_man}",
-                                    "Tipo": tipo_man, 
-                                    "Série": serie_man, 
-                                    "Número": nota_man, 
-                                    "Status": "INUTILIZADOS",
-                                    "Pasta": f"EMITIDOS_CLIENTE/SAIDA/{tipo_man}/INUTILIZADOS/0000/01/Serie_{serie_man}",
-                                    "Valor": 0.0, 
-                                    "Conteúdo": b"", 
-                                    "Ano": "0000", 
-                                    "Mes": "01", 
-                                    "Operacao": "SAIDA",
-                                    "Data_Emissao": "", 
-                                    "CNPJ_Emit": cnpj_limpo, 
-                                    "Nome_Emit": "INSERÇÃO MANUAL",
-                                    "Doc_Dest": "", 
-                                    "Nome_Dest": ""
-                                }
-                                st.session_state['relatorio'].append(res_manual)
-                        
-                            lote_recalc = {}
-                            for item in st.session_state['relatorio']:
-                                key = item["Chave"]
-                                is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                                if key in lote_recalc:
-                                    if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                        lote_recalc[key] = (item, is_p)
-                                else: 
-                                    lote_recalc[key] = (item, is_p)
+        st.markdown("### 🛠️ Inutilizadas sem XML")
+        with st.expander(
+            "Inclua notas que a Sefaz mostra inutilizadas mas que não estão no lote de ficheiros.",
+            expanded=False,
+        ):
+            st.caption(
+                "Três formas: escolher entre os **buracos** (com filtro), marcar uma **faixa** de números ou **colar** várias linhas."
+            )
+            tab_b, tab_f, tab_c = st.tabs(["Dos buracos", "Faixa de números", "Colar lista"])
 
-                            audit_map = {}
-                            canc_list = []
-                            inut_list = []
-                            aut_list = []
-                            geral_list = []
-                            
-                            for k, (res, is_p) in lote_recalc.items():
-                                if is_p:
-                                    origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                                else:
-                                    origem_label = f"TERCEIROS ({res['Operacao']})"
-                                    
-                                registro_detalhado = {
-                                    "Origem": origem_label, 
-                                    "Operação": res["Operacao"], 
-                                    "Modelo": res["Tipo"], 
-                                    "Série": res["Série"], 
-                                    "Nota": res["Número"], 
-                                    "Data Emissão": res["Data_Emissao"], 
-                                    "CNPJ Emitente": res["CNPJ_Emit"], 
-                                    "Nome Emitente": res["Nome_Emit"],
-                                    "Doc Destinatário": res["Doc_Dest"], 
-                                    "Nome Destinatário": res["Nome_Dest"], 
-                                    "Chave": res["Chave"], 
-                                    "Status Final": res["Status"], 
-                                    "Valor": res["Valor"], 
-                                    "Ano": res["Ano"], 
-                                    "Mes": res["Mes"]
-                                }
-                                
-                                if res["Status"] == "INUTILIZADOS":
-                                    r = res.get("Range", (res["Número"], res["Número"]))
-                                    for n in range(r[0], r[1] + 1):
-                                        item_inut = registro_detalhado.copy()
-                                        item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                        geral_list.append(item_inut)
-                                else: 
-                                    geral_list.append(registro_detalhado)
-
-                                if is_p:
-                                    sk = (res["Tipo"], res["Série"])
-                                    if sk not in audit_map: 
-                                        audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                        
-                                    if res["Status"] == "INUTILIZADOS":
-                                        r = res.get("Range", (res["Número"], res["Número"]))
-                                        for n in range(r[0], r[1] + 1):
-                                            audit_map[sk]["nums"].add(n)
-                                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                                    else:
-                                        if res["Número"] > 0:
-                                            audit_map[sk]["nums"].add(res["Número"])
-                                            if res["Status"] == "CANCELADOS": 
-                                                canc_list.append(registro_detalhado)
-                                            elif res["Status"] == "NORMAIS": 
-                                                aut_list.append(registro_detalhado)
-                                            audit_map[sk]["valor"] += res["Valor"]
-
-                            res_final = []
-                            fal_final = []
-                            
-                            for (t, s), dados in audit_map.items():
-                                ns = sorted(list(dados["nums"]))
-                                if ns:
-                                    n_min = ns[0]
-                                    n_max = ns[-1]
-                                    res_final.append({
-                                        "Documento": t, 
-                                        "Série": s, 
-                                        "Início": n_min, 
-                                        "Fim": n_max, 
-                                        "Quantidade": len(ns), 
-                                        "Valor Contábil (R$)": round(dados["valor"], 2)
-                                    })
-                                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
-
-                            st.session_state.update({
-                                'df_resumo': pd.DataFrame(res_final), 
-                                'df_faltantes': pd.DataFrame(fal_final), 
-                                'df_canceladas': pd.DataFrame(canc_list), 
-                                'df_inutilizadas': pd.DataFrame(inut_list), 
-                                'df_autorizadas': pd.DataFrame(aut_list), 
-                                'df_geral': pd.DataFrame(geral_list), 
-                                'st_counts': {
-                                    "CANCELADOS": len(canc_list), 
-                                    "INUTILIZADOS": len(inut_list), 
-                                    "AUTORIZADAS": len(aut_list)
-                                }
-                            })
+            with tab_b:
+                df_b = st.session_state["df_faltantes"]
+                if df_b.empty:
+                    st.info("Sem buracos na auditoria — use **Faixa** ou **Colar**, ou faça o garimpo primeiro.")
+                else:
+                    _mods_b = sorted(df_b["Tipo"].astype(str).unique())
+                    _mb = st.selectbox("Modelo", _mods_b, key="inut_b_mod")
+                    _sub_b = df_b[df_b["Tipo"].astype(str) == _mb]
+                    _sers_b = sorted(_sub_b["Serie"].astype(str).unique())
+                    _sb = st.selectbox("Série", _sers_b, key="inut_b_ser")
+                    _sub2_b = _sub_b[_sub_b["Serie"].astype(str) == _sb]
+                    _nums_b = sorted(_sub2_b["Num_Faltante"].astype(int).unique())
+                    st.caption(f"{len(_nums_b)} número(s) em falta neste modelo/série.")
+                    _pick_b = st.multiselect(
+                        "Marque os que quer tratar como inutilizados:",
+                        options=_nums_b,
+                        format_func=lambda x: f"Nota n.º {x}",
+                        key="inut_b_pick",
+                    )
+                    if st.button("Aplicar seleção", type="primary", key="inut_b_go"):
+                        if not _pick_b:
+                            st.warning("Selecione pelo menos um número.")
+                        else:
+                            with st.spinner("A atualizar…"):
+                                for _nb in _pick_b:
+                                    st.session_state["relatorio"].append(
+                                        item_registro_manual_inutilizado(cnpj_limpo, _mb, _sb, _nb)
+                                    )
+                                reconstruir_dataframes_relatorio_simples()
                             st.rerun()
+
+            with tab_f:
+                _mf = st.selectbox("Modelo", ["NF-e", "NFC-e", "CT-e", "MDF-e"], key="inut_f_mod")
+                _sf = st.text_input("Série", value="1", key="inut_f_ser").strip()
+                _c1f, _c2f = st.columns(2)
+                _n0 = _c1f.number_input("Nota inicial", min_value=1, value=1, step=1, key="inut_f_i")
+                _n1 = _c2f.number_input("Nota final", min_value=1, value=1, step=1, key="inut_f_f")
+                _MAX_FAIXA_INUT = 5000
+                st.caption(f"No máximo {_MAX_FAIXA_INUT} notas por vez (proteção do sistema).")
+                if st.button("Marcar faixa inteira", type="primary", key="inut_f_go"):
+                    if not _sf:
+                        st.warning("Indique a série.")
+                    elif _n0 > _n1:
+                        st.warning("A nota inicial não pode ser maior que a final.")
+                    elif (_n1 - _n0 + 1) > _MAX_FAIXA_INUT:
+                        st.warning(f"Reduza a faixa (máximo {_MAX_FAIXA_INUT} notas).")
+                    else:
+                        with st.spinner("A atualizar…"):
+                            for _nn in range(int(_n0), int(_n1) + 1):
+                                st.session_state["relatorio"].append(
+                                    item_registro_manual_inutilizado(cnpj_limpo, _mf, _sf, _nn)
+                                )
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
+
+            with tab_c:
+                st.caption("Uma nota por linha: `NF-e|1|100` (modelo | série | número).")
+                _txt_c = st.text_area(
+                    "Linhas",
+                    height=120,
+                    key="inut_c_txt",
+                    placeholder="NF-e|1|100\nNF-e|1|101",
+                )
+                if st.button("Importar e aplicar", type="primary", key="inut_c_go"):
+                    _tri = parse_linhas_inutil_manual(_txt_c)
+                    if not _tri:
+                        st.warning("Nenhuma linha válida.")
+                    else:
+                        with st.spinner("A atualizar…"):
+                            for _mod, _ser, _nota in _tri:
+                                st.session_state["relatorio"].append(
+                                    item_registro_manual_inutilizado(cnpj_limpo, _mod, _ser, _nota)
+                                )
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
 
         # =====================================================================
         # MÓDULO: DESFAZER INUTILIZAÇÃO MANUAL
         # =====================================================================
         inut_manuais = [item for item in st.session_state['relatorio'] if item.get('Arquivo') == "REGISTRO_MANUAL"]
         if inut_manuais:
-            with st.expander("🔙 DESFAZER INUTILIZAÇÃO MANUAL"):
-                opcoes_desfazer = []
-                for item in inut_manuais:
-                    opcoes_desfazer.append(f"{item['Tipo']} | Série {item['Série']} | Nota {item['Número']}")
-                    
-                desfazer_selecionados = st.multiselect("Selecione as notas para REMOVER da lista de inutilizadas:", opcoes_desfazer)
-                
-                if st.button("DESFAZER E ATUALIZAR TABELAS"):
-                    if desfazer_selecionados:
-                        with st.spinner("Removendo..."):
-                            chaves_removidas = []
-                            for s in desfazer_selecionados:
-                                partes = s.split(' | ')
-                                t_tipo = partes[0].strip()
-                                t_serie = partes[1].replace('Série', '').strip()
-                                t_nota = int(partes[2].replace('Nota', '').strip())
-                                chaves_removidas.append(f"MANUAL_INUT_{t_tipo}_{t_serie}_{t_nota}")
-                                
-                            st.session_state['relatorio'] = [i for i in st.session_state['relatorio'] if i['Chave'] not in chaves_removidas]
-                            
-                            lote_recalc = {}
-                            for item in st.session_state['relatorio']:
-                                key = item["Chave"]
-                                is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                                if key in lote_recalc:
-                                    if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                        lote_recalc[key] = (item, is_p)
-                                else: 
-                                    lote_recalc[key] = (item, is_p)
-
-                            audit_map = {}
-                            canc_list = []
-                            inut_list = []
-                            aut_list = []
-                            geral_list = []
-                            
-                            for k, (res, is_p) in lote_recalc.items():
-                                if is_p:
-                                    origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                                else:
-                                    origem_label = f"TERCEIROS ({res['Operacao']})"
-                                    
-                                registro_detalhado = {
-                                    "Origem": origem_label, 
-                                    "Operação": res["Operacao"], 
-                                    "Modelo": res["Tipo"], 
-                                    "Série": res["Série"], 
-                                    "Nota": res["Número"], 
-                                    "Data Emissão": res["Data_Emissao"], 
-                                    "CNPJ Emitente": res["CNPJ_Emit"], 
-                                    "Nome Emitente": res["Nome_Emit"], 
-                                    "Doc Destinatário": res["Doc_Dest"], 
-                                    "Nome Destinatário": res["Nome_Dest"], 
-                                    "Chave": res["Chave"], 
-                                    "Status Final": res["Status"], 
-                                    "Valor": res["Valor"], 
-                                    "Ano": res["Ano"], 
-                                    "Mes": res["Mes"]
-                                }
-                                
-                                if res["Status"] == "INUTILIZADOS":
-                                    r = res.get("Range", (res["Número"], res["Número"]))
-                                    for n in range(r[0], r[1] + 1):
-                                        item_inut = registro_detalhado.copy()
-                                        item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                        geral_list.append(item_inut)
-                                else: 
-                                    geral_list.append(registro_detalhado)
-
-                                if is_p:
-                                    sk = (res["Tipo"], res["Série"])
-                                    if sk not in audit_map: 
-                                        audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                        
-                                    if res["Status"] == "INUTILIZADOS":
-                                        r = res.get("Range", (res["Número"], res["Número"]))
-                                        for n in range(r[0], r[1] + 1): 
-                                            audit_map[sk]["nums"].add(n)
-                                            inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                                    else:
-                                        if res["Número"] > 0:
-                                            audit_map[sk]["nums"].add(res["Número"])
-                                            if res["Status"] == "CANCELADOS": 
-                                                canc_list.append(registro_detalhado)
-                                            elif res["Status"] == "NORMAIS": 
-                                                aut_list.append(registro_detalhado)
-                                            audit_map[sk]["valor"] += res["Valor"]
-                                            
-                            res_final = []
-                            fal_final = []
-                            
-                            for (t, s), dados in audit_map.items():
-                                ns = sorted(list(dados["nums"]))
-                                if ns:
-                                    n_min = ns[0]
-                                    n_max = ns[-1]
-                                    res_final.append({
-                                        "Documento": t, 
-                                        "Série": s, 
-                                        "Início": n_min, 
-                                        "Fim": n_max, 
-                                        "Quantidade": len(ns), 
-                                        "Valor Contábil (R$)": round(dados["valor"], 2)
-                                    })
-                                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
-                                        
-                            st.session_state.update({
-                                'df_resumo': pd.DataFrame(res_final), 
-                                'df_faltantes': pd.DataFrame(fal_final), 
-                                'df_canceladas': pd.DataFrame(canc_list), 
-                                'df_inutilizadas': pd.DataFrame(inut_list), 
-                                'df_autorizadas': pd.DataFrame(aut_list), 
-                                'df_geral': pd.DataFrame(geral_list), 
-                                'st_counts': {
-                                    "CANCELADOS": len(canc_list), 
-                                    "INUTILIZADOS": len(inut_list), 
-                                    "AUTORIZADAS": len(aut_list)
-                                }
-                            })
-                            st.rerun()
+            with st.expander("🔙 Desfazer inutilização manual", expanded=False):
+                _df_m = pd.DataFrame(
+                    [
+                        {"Chave": i["Chave"], "Tipo": i["Tipo"], "Série": str(i["Série"]), "Nota": i["Número"]}
+                        for i in inut_manuais
+                    ]
+                )
+                _dm = sorted(_df_m["Tipo"].astype(str).unique())
+                _mdes = st.selectbox("Modelo", _dm, key="desf_mod")
+                _sub_d = _df_m[_df_m["Tipo"].astype(str) == _mdes]
+                _dsers = sorted(_sub_d["Série"].astype(str).unique())
+                _sdes = st.selectbox("Série", _dsers, key="desf_ser")
+                _sub2_d = _sub_d[_sub_d["Série"].astype(str) == _sdes].sort_values("Nota")
+                _rotulos = {
+                    row["Chave"]: f"Nota n.º {int(row['Nota'])}"
+                    for _, row in _sub2_d.iterrows()
+                }
+                _chaves_sel = st.multiselect(
+                    "Remover da lista de inutilizadas:",
+                    options=list(_rotulos.keys()),
+                    format_func=lambda k: _rotulos.get(k, k),
+                    key="desf_pick",
+                )
+                if st.button("Remover seleção e atualizar tabelas", key="desf_btn"):
+                    if _chaves_sel:
+                        with st.spinner("A remover…"):
+                            _set_rem = set(_chaves_sel)
+                            st.session_state["relatorio"] = [
+                                i for i in st.session_state["relatorio"] if i["Chave"] not in _set_rem
+                            ]
+                            reconstruir_dataframes_relatorio_simples()
+                        st.rerun()
+                    else:
+                        st.warning("Selecione pelo menos um registo.")
 
         st.divider()
         
@@ -1396,106 +1436,7 @@ if st.session_state['confirmado']:
                             pass
                     
                     st.session_state['export_ready'] = False
-                    
-                    lote_recalc = {}
-                    for item in st.session_state['relatorio']:
-                        key = item["Chave"]
-                        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                        if key in lote_recalc:
-                            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                                lote_recalc[key] = (item, is_p)
-                        else: 
-                            lote_recalc[key] = (item, is_p)
-
-                    audit_map = {}
-                    canc_list = []
-                    inut_list = []
-                    aut_list = []
-                    geral_list = []
-                    
-                    for k, (res, is_p) in lote_recalc.items():
-                        if is_p:
-                            origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
-                        else:
-                            origem_label = f"TERCEIROS ({res['Operacao']})"
-                            
-                        registro_detalhado = {
-                            "Origem": origem_label, 
-                            "Operação": res["Operacao"], 
-                            "Modelo": res["Tipo"], 
-                            "Série": res["Série"], 
-                            "Nota": res["Número"], 
-                            "Data Emissão": res["Data_Emissao"], 
-                            "CNPJ Emitente": res["CNPJ_Emit"], 
-                            "Nome Emitente": res["Nome_Emit"],
-                            "Doc Destinatário": res["Doc_Dest"], 
-                            "Nome Destinatário": res["Nome_Dest"], 
-                            "Chave": res["Chave"], 
-                            "Status Final": res["Status"], 
-                            "Valor": res["Valor"], 
-                            "Ano": res["Ano"], 
-                            "Mes": res["Mes"]
-                        }
-                        
-                        if res["Status"] == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            for n in range(r[0], r[1] + 1):
-                                item_inut = registro_detalhado.copy()
-                                item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
-                                geral_list.append(item_inut)
-                        else: 
-                            geral_list.append(registro_detalhado)
-
-                        if is_p:
-                            sk = (res["Tipo"], res["Série"])
-                            if sk not in audit_map: 
-                                audit_map[sk] = {"nums": set(), "valor": 0.0}
-                                
-                            if res["Status"] == "INUTILIZADOS":
-                                r = res.get("Range", (res["Número"], res["Número"]))
-                                for n in range(r[0], r[1] + 1): 
-                                    audit_map[sk]["nums"].add(n)
-                                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                            else:
-                                if res["Número"] > 0:
-                                    audit_map[sk]["nums"].add(res["Número"])
-                                    if res["Status"] == "CANCELADOS": 
-                                        canc_list.append(registro_detalhado)
-                                    elif res["Status"] == "NORMAIS": 
-                                        aut_list.append(registro_detalhado)
-                                    audit_map[sk]["valor"] += res["Valor"]
-                                    
-                    res_final = []
-                    fal_final = []
-                    
-                    for (t, s), dados in audit_map.items():
-                        ns = sorted(list(dados["nums"]))
-                        if ns:
-                            n_min = ns[0]
-                            n_max = ns[-1]
-                            res_final.append({
-                                "Documento": t, 
-                                "Série": s, 
-                                "Início": n_min, 
-                                "Fim": n_max, 
-                                "Quantidade": len(ns), 
-                                "Valor Contábil (R$)": round(dados["valor"], 2)
-                            })
-                            fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
-                                
-                    st.session_state.update({
-                        'df_resumo': pd.DataFrame(res_final), 
-                        'df_faltantes': pd.DataFrame(fal_final), 
-                        'df_canceladas': pd.DataFrame(canc_list), 
-                        'df_inutilizadas': pd.DataFrame(inut_list), 
-                        'df_autorizadas': pd.DataFrame(aut_list), 
-                        'df_geral': pd.DataFrame(geral_list), 
-                        'st_counts': {
-                            "CANCELADOS": len(canc_list), 
-                            "INUTILIZADOS": len(inut_list), 
-                            "AUTORIZADAS": len(aut_list)
-                        }
-                    })
+                    reconstruir_dataframes_relatorio_simples()
                     st.rerun()
 
         st.divider()
@@ -1619,11 +1560,11 @@ if st.session_state['confirmado']:
             limpar_arquivos_temp(); st.session_state.clear(); st.rerun()
 
         # =====================================================================
-        # BLOCO 4: CRUZAMENTO FALTANTES DOMÍNIO SISTEMAS (CORREÇÃO DE DISCO)
+        # BLOCO 4: EXPORTAR LISTA ESPECÍFICA (PDF / EXCEL)
         # =====================================================================
         st.divider()
-        st.markdown("### 🔎 CRUZAMENTO FALTANTES DOMÍNIO SISTEMAS")
-        with st.expander("Suba o relatório da Domínio (PDF) ou uma planilha com chaves na coluna A para baixar os XMLs organizados"):
+        st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
+        with st.expander("Suba planilha com chaves na coluna A para baixar os XMLs"):
             tab_pdf, tab_xlsx = st.tabs(["📄 PDF (Domínio)", "📊 Excel (chaves)"])
 
             with tab_pdf:
