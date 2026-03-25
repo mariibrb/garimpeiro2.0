@@ -630,7 +630,7 @@ def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_
         seg_set = set(seg)
         for b in range(lo, hi + 1):
             if b not in seg_set:
-                out.append({"Tipo": tipo_doc, "Serie": serie_str, "Num_Faltante": b})
+                out.append({"Tipo": tipo_doc, "Série": serie_str, "Num_Faltante": b})
     return out
 
 
@@ -1227,16 +1227,23 @@ if st.session_state['confirmado']:
             tab_b, tab_f, tab_c = st.tabs(["Dos buracos", "Faixa de números", "Colar lista"])
 
             with tab_b:
-                df_b = st.session_state["df_faltantes"]
+                df_b = st.session_state["df_faltantes"].copy()
+                if not df_b.empty and "Serie" in df_b.columns and "Série" not in df_b.columns:
+                    df_b = df_b.rename(columns={"Serie": "Série"})
                 if df_b.empty:
                     st.info("Sem buracos na auditoria — use **Faixa** ou **Colar**, ou faça o garimpo primeiro.")
+                elif not {"Tipo", "Série", "Num_Faltante"}.issubset(df_b.columns):
+                    st.warning(
+                        "A tabela de buracos não tem o formato esperado (Tipo, Série, Num_Faltante). "
+                        "Faça **Novo garimpo** para recalcular."
+                    )
                 else:
                     _mods_b = sorted(df_b["Tipo"].astype(str).unique())
                     _mb = st.selectbox("Modelo", _mods_b, key="inut_b_mod")
                     _sub_b = df_b[df_b["Tipo"].astype(str) == _mb]
-                    _sers_b = sorted(_sub_b["Serie"].astype(str).unique())
+                    _sers_b = sorted(_sub_b["Série"].astype(str).unique())
                     _sb = st.selectbox("Série", _sers_b, key="inut_b_ser")
-                    _sub2_b = _sub_b[_sub_b["Serie"].astype(str) == _sb]
+                    _sub2_b = _sub_b[_sub_b["Série"].astype(str) == _sb]
                     _nums_b = sorted(_sub2_b["Num_Faltante"].astype(int).unique())
                     st.caption(f"{len(_nums_b)} número(s) em falta neste modelo/série.")
                     _pick_b = st.multiselect(
