@@ -9,10 +9,10 @@ import gc
 import shutil
 import pdfplumber
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
-st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
+st.set_page_config(page_title="GARIMPEIRO V2", layout="wide", page_icon="⛏️")
 
 def aplicar_estilo_premium():
     st.markdown("""
@@ -525,6 +525,49 @@ def reconstruir_dataframes_relatorio_simples():
     )
 
 
+def filtrar_df_geral_para_exportacao(
+    df_base,
+    filtro_origem,
+    filtro_meses,
+    aplicar_mes_so_na_propria,
+    filtro_modelos,
+    filtro_series,
+    filtro_status,
+    filtro_operacao,
+):
+    """Mesma lógica da Etapa 3, reutilizada para pré-visualização e exportação."""
+    if df_base is None or df_base.empty:
+        return df_base
+    out = df_base.copy()
+    if len(filtro_origem) > 0:
+        pat = "|".join([re.escape(o.split()[0]) for o in filtro_origem])
+        out = out[out["Origem"].str.contains(pat, regex=True, na=False)]
+    if len(filtro_meses) > 0:
+        out = out.copy()
+        out["Mes_Comp"] = out["Ano"].astype(str) + "/" + out["Mes"].astype(str)
+        if aplicar_mes_so_na_propria:
+            out = out[
+                (out["Mes_Comp"].isin(filtro_meses))
+                | (out["Origem"].str.contains("TERCEIROS", na=False))
+            ]
+        else:
+            out = out[out["Mes_Comp"].isin(filtro_meses)]
+    if len(filtro_modelos) > 0:
+        out = out[out["Modelo"].isin(filtro_modelos)]
+    if len(filtro_series) > 0:
+        out = out[out["Série"].astype(str).isin(filtro_series)]
+    if len(filtro_status) > 0:
+        out = out[out["Status Final"].isin(filtro_status)]
+    if len(filtro_operacao) > 0 and "Operação" in out.columns:
+        out = out[out["Operação"].isin(filtro_operacao)]
+    return out
+
+
+def rotulo_download_zip_parte(caminho_ficheiro):
+    m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
+    return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
+
+
 def coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref):
     """Só emissão própria; números no mês de referência e nos meses posteriores."""
     agg = defaultdict(lambda: {"no_mes_ref": set(), "apos_ref": set()})
@@ -742,7 +785,7 @@ PASSO A PASSO
 4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: filtros (mês, modelo, série, status) e exportação em ZIP/Excel; cada ZIP tem até 10 mil XMLs.
+7. Etapa 3 (V2): pré-visualização de linhas/chaves, atalhos de filtro, operação entrada/saída, confirmação se exportar sem filtros, Excel com segunda folha de resumo, CSV opcional, ZIP organizado e/ou plano opcionais; cada ZIP até 10 mil XMLs.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
@@ -758,6 +801,10 @@ DICAS
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
+st.caption(
+    "Versão V2: Etapa 3 com pré-visualização, atalhos e mais opções de exportação. "
+    "Versão estável no ficheiro app.py."
+)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
@@ -773,7 +820,7 @@ with st.container():
                 <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 (filtros + ZIP/Excel) ou “Exportar lista específica” (chaves na col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 V2 (pré-visualização, atalhos, CSV opcional, ZIP opcional) ou lista específica (chaves na col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -833,6 +880,13 @@ for k in keys_to_init:
             st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
         else: 
             st.session_state[k] = False
+
+if "export_csv_buffer" not in st.session_state:
+    st.session_state["export_csv_buffer"] = None
+if "export_excel_name" not in st.session_state:
+    st.session_state["export_excel_name"] = "relatorio.xlsx"
+if "export_csv_name" not in st.session_state:
+    st.session_state["export_csv_name"] = "relatorio.csv"
 
 if "seq_ref_ultimos" not in st.session_state:
     st.session_state["seq_ref_ultimos"] = None
@@ -1486,119 +1540,327 @@ if st.session_state['confirmado']:
         st.divider()
 
         # =====================================================================
-        # ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO (NOVO PAINEL DE CONTROLE)
+        # ETAPA 3: FILTROS E EXPORTAÇÃO (V2)
         # =====================================================================
-        st.markdown("### ⚙️ ETAPA 3: FILTROS AVANÇADOS E EXPORTAÇÃO")
-        
+        st.markdown("### ⚙️ Etapa 3: filtros e exportação (V2)")
+        st.caption(
+            "A pré-visualização atualiza-se com os filtros. "
+            "Sem nenhum filtro, usa-se todo o relatório geral (com confirmação)."
+        )
+
+        _wp = st.session_state.pop("v2_preset_warn", None)
+        if _wp:
+            st.warning(_wp)
+
+        df_g_base = st.session_state["df_geral"]
         todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
-        anos_meses = sorted(list(set([f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}" for r in st.session_state['relatorio'] if r.get('Ano', '0000') != '0000'])))
-        modelos = sorted(list(set([r.get('Tipo', '') for r in st.session_state['relatorio']])))
-        series = sorted(list(set([str(r.get('Série', '0')) for r in st.session_state['relatorio']])))
-        status_opcoes = sorted(list(set([r.get('Status', '') for r in st.session_state['relatorio']]))) 
-        
+        anos_meses = sorted(
+            list(
+                set(
+                    [
+                        f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}"
+                        for r in st.session_state["relatorio"]
+                        if r.get("Ano", "0000") != "0000"
+                    ]
+                )
+            )
+        )
+        modelos = sorted(list(set([r.get("Tipo", "") for r in st.session_state["relatorio"]])))
+        series = sorted(list(set([str(r.get("Série", "0")) for r in st.session_state["relatorio"]])))
+        status_opcoes = sorted(list(set([r.get("Status", "") for r in st.session_state["relatorio"]])))
+        operacoes_opts = []
+        if not df_g_base.empty and "Operação" in df_g_base.columns:
+            operacoes_opts = sorted(
+                {str(x) for x in df_g_base["Operação"].tolist() if str(x) not in ("", "nan", "None")}
+            )
+
+        pr1, pr2, pr3, pr4, pr5 = st.columns(5)
+        with pr1:
+            if st.button("Só emissão própria", key="v2_pre_propria", use_container_width=True):
+                st.session_state["v2_f_orig"] = ["EMISSÃO PRÓPRIA"]
+                st.rerun()
+        with pr2:
+            if st.button("Só NF-e", key="v2_pre_nfe", use_container_width=True):
+                st.session_state["v2_f_mod"] = ["NF-e"]
+                st.rerun()
+        with pr3:
+            if st.button("Só autorizadas", key="v2_pre_aut", use_container_width=True):
+                st.session_state["v2_f_stat"] = ["NORMAIS"]
+                st.rerun()
+        with pr4:
+            if st.button("Mês atual", key="v2_pre_mes", use_container_width=True):
+                hm = f"{date.today().year}/{date.today().month:02d}"
+                if hm in anos_meses:
+                    st.session_state["v2_f_mes"] = [hm]
+                else:
+                    st.session_state["v2_preset_warn"] = f"O mês {hm} não aparece no lote atual."
+                st.rerun()
+        with pr5:
+            if st.button("Limpar filtros", key="v2_pre_clr", use_container_width=True):
+                for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
+                    if _kx in st.session_state:
+                        st.session_state[_kx] = []
+                st.session_state["v2_apenas_mes_propria"] = True
+                st.rerun()
+
         with st.container():
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
-                filtro_origem = st.multiselect("📌 Origem:", todas_origens)
+                filtro_origem = st.multiselect("Origem", todas_origens, key="v2_f_orig")
             with f_col2:
-                filtro_meses = st.multiselect("📅 Ano/Mês:", anos_meses)
-                aplicar_mes_so_na_propria = st.checkbox("Aplicar Mês APENAS na Emissão Própria?", value=True)
+                filtro_meses = st.multiselect("Ano / mês", anos_meses, key="v2_f_mes")
             with f_col3:
-                filtro_modelos = st.multiselect("📄 Modelo:", modelos)
+                filtro_modelos = st.multiselect("Modelo", modelos, key="v2_f_mod")
             with f_col4:
-                filtro_series = st.multiselect("🔢 Série:", series)
+                filtro_series = st.multiselect("Série", series, key="v2_f_ser")
             with f_col5:
-                filtro_status = st.multiselect("✅ Status:", status_opcoes) 
+                filtro_status = st.multiselect("Status", status_opcoes, key="v2_f_stat")
 
-        if st.button("🚀 PROCESSAR E GERAR ARQUIVOS FINAIS"):
-            
-            with st.spinner("Buscando no HD e montando pacotes..."):
-                
-                # Limpa zips antigos
-                for f in os.listdir('.'):
-                    if f.startswith('z_org_final') or f.startswith('z_todos_final'):
-                        try: os.remove(f)
-                        except: pass
+        aplicar_mes_so_na_propria = st.checkbox(
+            "Aplicar filtro de mês só à emissão própria (terceiros não ficam limitados pelo mês)",
+            value=True,
+            key="v2_apenas_mes_propria",
+        )
 
-                # --- 1. APLICA FILTROS NO EXCEL ---
-                df_geral_filtrado = st.session_state['df_geral'].copy()
-                
-                if not df_geral_filtrado.empty:
-                    if len(filtro_origem) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Origem'].str.contains('|'.join([o.split()[0] for o in filtro_origem]))]
-                            
-                    if len(filtro_meses) > 0:
-                        df_geral_filtrado['Mes_Comp'] = df_geral_filtrado['Ano'] + "/" + df_geral_filtrado['Mes']
-                        if aplicar_mes_so_na_propria:
-                            df_geral_filtrado = df_geral_filtrado[(df_geral_filtrado['Mes_Comp'].isin(filtro_meses)) | (df_geral_filtrado['Origem'].str.contains('TERCEIROS'))]
-                        else:
-                            df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Mes_Comp'].isin(filtro_meses)]
-                            
-                    if len(filtro_modelos) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Modelo'].isin(filtro_modelos)]
-                        
-                    if len(filtro_series) > 0:
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Série'].astype(str).isin(filtro_series)]
+        if operacoes_opts:
+            filtro_operacao = st.multiselect(
+                "Operação (entrada / saída)",
+                operacoes_opts,
+                key="v2_f_op",
+            )
+        else:
+            filtro_operacao = []
 
-                    if len(filtro_status) > 0: 
-                        df_geral_filtrado = df_geral_filtrado[df_geral_filtrado['Status Final'].isin(filtro_status)]
+        df_preview = filtrar_df_geral_para_exportacao(
+            df_g_base,
+            filtro_origem,
+            filtro_meses,
+            aplicar_mes_so_na_propria,
+            filtro_modelos,
+            filtro_series,
+            filtro_status,
+            filtro_operacao,
+        )
+        pv1, pv2, pv3 = st.columns(3)
+        _n_lin = len(df_preview) if df_preview is not None and not df_preview.empty else 0
+        _n_ch = (
+            int(df_preview["Chave"].nunique())
+            if df_preview is not None and not df_preview.empty
+            else 0
+        )
+        pv1.metric("Prévia: linhas no Excel", _n_lin)
+        pv2.metric("Prévia: chaves distintas", _n_ch)
+        pv3.metric("Registos no relatório geral", len(df_g_base) if not df_g_base.empty else 0)
 
-                # Excel Master
-                buffer_excel = io.BytesIO()
-                with pd.ExcelWriter(buffer_excel, engine='xlsxwriter') as writer:
-                    df_geral_filtrado.to_excel(writer, sheet_name='Filtrado', index=False)
-                st.session_state['excel_buffer'] = buffer_excel.getvalue()
+        nenhum_filtro = (
+            len(filtro_origem) == 0
+            and len(filtro_meses) == 0
+            and len(filtro_modelos) == 0
+            and len(filtro_series) == 0
+            and len(filtro_status) == 0
+            and len(filtro_operacao) == 0
+        )
+        if nenhum_filtro:
+            st.info("Nenhum filtro ativo: a exportação usará todo o relatório geral.")
+            confirm_export_total = st.checkbox(
+                "Confirmo exportar todo o lote sem filtros",
+                value=True,
+                key="v2_confirm_full",
+            )
+        else:
+            confirm_export_total = True
 
-                # --- 2. FILTRAGEM FÍSICA PARA ZIP (Zero RAM) ---
-                org_parts, todos_parts, org_count, todos_count, curr_org_part, curr_todos_part = [], [], 0, 0, 1, 1
-                org_name, todos_name = f'z_org_final_pt{curr_org_part}.zip', f'z_todos_final_pt{curr_todos_part}.zip'
-                
-                z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
-                z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
-                org_parts.append(org_name); todos_parts.append(todos_name)
-                
-                filtro_chaves = set(df_geral_filtrado['Chave'].tolist())
+        ox1, ox2, ox3 = st.columns(3)
+        with ox1:
+            v2_zip_org = st.checkbox("Gerar ZIP organizado (com pastas)", value=True, key="v2_zip_org")
+        with ox2:
+            v2_zip_plano = st.checkbox("Gerar ZIP plano (só XML)", value=True, key="v2_zip_plano")
+        with ox3:
+            v2_incl_csv = st.checkbox("Também gerar CSV (além do Excel)", value=False, key="v2_incl_csv")
 
-                if os.path.exists(TEMP_UPLOADS_DIR):
-                    for f_name in os.listdir(TEMP_UPLOADS_DIR):
-                        f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
-                        with open(f_path, "rb") as f_temp:
-                            for name, xml_data in extrair_recursivo(f_temp, f_name):
-                                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
-                                if res and res["Chave"] in filtro_chaves:
-                                    if org_count >= MAX_XML_PER_ZIP:
-                                        z_org.close(); curr_org_part += 1; org_name = f'z_org_final_pt{curr_org_part}.zip'
-                                        z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED); org_parts.append(org_name); org_count = 0
-                                    if todos_count >= MAX_XML_PER_ZIP:
-                                        z_todos.close(); curr_todos_part += 1; todos_name = f'z_todos_final_pt{curr_todos_part}.zip'
-                                        z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED); todos_parts.append(todos_name); todos_count = 0
+        if not v2_zip_org and not v2_zip_plano:
+            st.caption("Nenhum ZIP selecionado: só Excel (e CSV opcional) serão gerados.")
 
-                                    z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
-                                    z_todos.writestr(name, xml_data)
-                                    org_count += 1; todos_count += 1
-                                del xml_data
-                
-                z_org.close(); z_todos.close()
-                st.session_state.update({'org_zip_parts': org_parts, 'todos_zip_parts': todos_parts, 'export_ready': True})
+        _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
+
+        if st.button("Processar e gerar ficheiros", type="primary", key="v2_btn_export", disabled=_btn_dis):
+            df_geral_filtrado = filtrar_df_geral_para_exportacao(
+                df_g_base,
+                filtro_origem,
+                filtro_meses,
+                aplicar_mes_so_na_propria,
+                filtro_modelos,
+                filtro_series,
+                filtro_status,
+                filtro_operacao,
+            )
+            if df_geral_filtrado is None or df_geral_filtrado.empty:
+                st.warning("Com estes filtros não há linhas. Ajuste os filtros e tente novamente.")
+            else:
+                with st.spinner("A gerar Excel, CSV e ZIPs…"):
+                    ts = datetime.now().strftime("%Y%m%d_%H%M")
+                    st.session_state["export_excel_name"] = f"relatorio_{ts}.xlsx"
+                    st.session_state["export_csv_name"] = f"relatorio_{ts}.csv"
+
+                    buffer_excel = io.BytesIO()
+                    with pd.ExcelWriter(buffer_excel, engine="xlsxwriter") as writer:
+                        df_geral_filtrado.to_excel(writer, sheet_name="Filtrado", index=False)
+                        rs = (
+                            df_geral_filtrado.groupby("Status Final", dropna=False)
+                            .size()
+                            .reset_index(name="Quantidade")
+                        )
+                        rs.to_excel(writer, sheet_name="Resumo_status", index=False)
+                    st.session_state["excel_buffer"] = buffer_excel.getvalue()
+
+                    if v2_incl_csv:
+                        buf_csv = io.StringIO()
+                        df_geral_filtrado.to_csv(buf_csv, index=False, encoding="utf-8-sig")
+                        st.session_state["export_csv_buffer"] = buf_csv.getvalue().encode("utf-8-sig")
+                    else:
+                        st.session_state["export_csv_buffer"] = None
+
+                    for f in os.listdir("."):
+                        if f.startswith("z_org_final") or f.startswith("z_todos_final"):
+                            try:
+                                os.remove(f)
+                            except OSError:
+                                pass
+
+                    filtro_chaves = set(df_geral_filtrado["Chave"].tolist())
+                    org_parts, todos_parts = [], []
+                    curr_org_part, curr_todos_part = 1, 1
+                    org_count, todos_count = 0, 0
+                    z_org, z_todos = None, None
+
+                    if v2_zip_org:
+                        org_name = f"z_org_final_pt{curr_org_part}.zip"
+                        z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+                        org_parts.append(org_name)
+                    if v2_zip_plano:
+                        todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
+                        z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+                        todos_parts.append(todos_name)
+
+                    if os.path.exists(TEMP_UPLOADS_DIR) and (v2_zip_org or v2_zip_plano):
+                        for f_name in os.listdir(TEMP_UPLOADS_DIR):
+                            f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
+                            with open(f_path, "rb") as f_temp:
+                                for name, xml_data in extrair_recursivo(f_temp, f_name):
+                                    res, _ = identify_xml_info(xml_data, cnpj_limpo, name)
+                                    if res and res["Chave"] in filtro_chaves:
+                                        if v2_zip_org and z_org is not None:
+                                            if org_count >= MAX_XML_PER_ZIP:
+                                                z_org.close()
+                                                curr_org_part += 1
+                                                org_name = f"z_org_final_pt{curr_org_part}.zip"
+                                                z_org = zipfile.ZipFile(
+                                                    org_name, "w", zipfile.ZIP_DEFLATED
+                                                )
+                                                org_parts.append(org_name)
+                                                org_count = 0
+                                            z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
+                                            org_count += 1
+                                        if v2_zip_plano and z_todos is not None:
+                                            if todos_count >= MAX_XML_PER_ZIP:
+                                                z_todos.close()
+                                                curr_todos_part += 1
+                                                todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
+                                                z_todos = zipfile.ZipFile(
+                                                    todos_name, "w", zipfile.ZIP_DEFLATED
+                                                )
+                                                todos_parts.append(todos_name)
+                                                todos_count = 0
+                                            z_todos.writestr(name, xml_data)
+                                            todos_count += 1
+                                    del xml_data
+
+                    if z_org is not None:
+                        try:
+                            z_org.close()
+                        except OSError:
+                            pass
+                    if z_todos is not None:
+                        try:
+                            z_todos.close()
+                        except OSError:
+                            pass
+
+                    if v2_zip_org and org_count == 0 and org_parts:
+                        try:
+                            os.remove(org_parts[-1])
+                        except OSError:
+                            pass
+                        org_parts = []
+                    if v2_zip_plano and todos_count == 0 and todos_parts:
+                        try:
+                            os.remove(todos_parts[-1])
+                        except OSError:
+                            pass
+                        todos_parts = []
+
+                    st.session_state.update(
+                        {
+                            "org_zip_parts": org_parts,
+                            "todos_zip_parts": todos_parts,
+                            "export_ready": True,
+                        }
+                    )
                 st.rerun()
 
-        if st.session_state.get('export_ready'):
-            st.success("✅ Pacotes prontos!")
-            st.markdown("### 📂 DOWNLOAD: ORGANIZADO")
-            for row in chunk_list(st.session_state['org_zip_parts'], 3):
-                cols = st.columns(len(row))
-                for idx, part in enumerate(row):
-                    with open(part, 'rb') as f:
-                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
+        if st.session_state.get("export_ready"):
+            st.success("Ficheiros prontos para download.")
+            _parts_o = st.session_state.get("org_zip_parts") or []
+            _parts_t = st.session_state.get("todos_zip_parts") or []
+            _dl_i = 0
+            if _parts_o:
+                st.markdown("### ZIP organizado (pastas)")
+                for row in chunk_list(_parts_o, 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        _dl_i += 1
+                        if os.path.exists(part):
+                            with open(part, "rb") as fp:
+                                cols[idx].download_button(
+                                    rotulo_download_zip_parte(part),
+                                    fp.read(),
+                                    file_name=os.path.basename(part),
+                                    key=f"v2_dlo_{_dl_i}",
+                                    use_container_width=True,
+                                )
+            if _parts_t:
+                st.markdown("### ZIP plano (só XML)")
+                for row in chunk_list(_parts_t, 3):
+                    cols = st.columns(len(row))
+                    for idx, part in enumerate(row):
+                        _dl_i += 1
+                        if os.path.exists(part):
+                            with open(part, "rb") as fp:
+                                cols[idx].download_button(
+                                    rotulo_download_zip_parte(part),
+                                    fp.read(),
+                                    file_name=os.path.basename(part),
+                                    key=f"v2_dlt_{_dl_i}",
+                                    use_container_width=True,
+                                )
 
-            st.markdown("### 📦 DOWNLOAD: SÓ XML")
-            for row in chunk_list(st.session_state['todos_zip_parts'], 3):
-                cols = st.columns(len(row))
-                for idx, part in enumerate(row):
-                    with open(part, 'rb') as f:
-                        cols[idx].download_button(f"📥 LOTE {part[-5]}", f.read(), part, use_container_width=True)
-
-            st.download_button("📊 RELATÓRIO EXCEL", st.session_state['excel_buffer'], "relatorio.xlsx", use_container_width=True)
+            st.download_button(
+                "Descarregar Excel",
+                st.session_state["excel_buffer"],
+                file_name=st.session_state.get("export_excel_name", "relatorio.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="v2_dl_xlsx",
+                use_container_width=True,
+            )
+            if st.session_state.get("export_csv_buffer"):
+                st.download_button(
+                    "Descarregar CSV",
+                    st.session_state["export_csv_buffer"],
+                    file_name=st.session_state.get("export_csv_name", "relatorio.csv"),
+                    mime="text/csv",
+                    key="v2_dl_csv",
+                    use_container_width=True,
+                )
 
         if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
             limpar_arquivos_temp(); st.session_state.clear(); st.rerun()
