@@ -1,3 +1,4 @@
+import hashlib
 import streamlit as st
 import zipfile
 import io
@@ -12,7 +13,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
-st.set_page_config(page_title="GARIMPEIRO V2", layout="wide", page_icon="⛏️")
+st.set_page_config(page_title="GARIMPEIRO", layout="wide", page_icon="⛏️")
 
 def aplicar_estilo_premium():
     st.markdown("""
@@ -563,6 +564,20 @@ def filtrar_df_geral_para_exportacao(
     return out
 
 
+def v2_acrescentar_filtro_sessao(state_key, novos, permitidos=None):
+    """Acrescenta um ou mais valores à lista em session_state sem duplicar."""
+    if isinstance(novos, str):
+        novos = [novos]
+    perm = set(permitidos) if permitidos is not None else None
+    cur = list(st.session_state.get(state_key) or [])
+    for v in novos:
+        if perm is not None and v not in perm:
+            continue
+        if v not in cur:
+            cur.append(v)
+    st.session_state[state_key] = cur
+
+
 def rotulo_download_zip_parte(caminho_ficheiro):
     m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
     return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
@@ -785,7 +800,7 @@ PASSO A PASSO
 4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3 (appV2): filtra o relatório geral (colunas Origem, Ano/Mês, Modelo, Série, Status Final, Operação); contadores antes de exportar; confirmação obrigatória se todos os multiselects estiverem vazios; Excel (folhas Filtrado + Resumo_status); CSV opcional; ZIP com pastas e/ou ZIP só com ficheiros na raiz; até 10 mil XMLs por ficheiro ZIP.
+7. Etapa 3: filtra o relatório geral (colunas Origem, Ano/Mês, Modelo, Série, Status Final, Operação); contadores antes de exportar; confirmação obrigatória se todos os multiselects estiverem vazios; Excel (folhas Filtrado + Resumo_status); CSV opcional; ZIP com pastas e/ou ZIP só com ficheiros na raiz; até 10 mil XMLs por ficheiro ZIP.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
@@ -802,8 +817,8 @@ DICAS
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
 st.caption(
-    "Ficheiro appV2.py: Etapa 3 com contadores por filtro, botões que preenchem multiselects, "
-    "exportação opcional em CSV e dois formatos de ZIP. Comportamento base igual a app.py nas restantes áreas."
+    "Variante com exportação alargada (filtros, contadores, CSV e dois tipos de ZIP). "
+    "Para a interface clássica, use streamlit run app.py."
 )
 
 with st.container():
@@ -1540,14 +1555,20 @@ if st.session_state['confirmado']:
         st.divider()
 
         # =====================================================================
-        # ETAPA 3: FILTROS E EXPORTAÇÃO (V2)
+        # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
-        st.markdown("### ⚙️ Etapa 3: filtros e exportação (V2)")
+        st.markdown("### ⚙️ Etapa 3: filtros e exportação")
+        st.info(
+            "**Listas (dropdowns):** em cada lista pode marcar **várias opções ao mesmo tempo** (Ctrl+clique ou caixas múltiplas). "
+            "Combinar NF-e com EMISSÃO PRÓPRIA e TERCEIROS = escolher nas três listas ou usar os atalhos abaixo. "
+            "**Atalhos:** **acrescentam** à lista (não apagam o que já estava). "
+            "**Botão principal no fim (Gerar Excel / CSV / ZIP…):** gera ficheiros."
+        )
         st.caption(
             "Dados: apenas o relatório geral desta sessão (após o garimpo). "
-            "Multiselect vazio numa coluna = essa coluna não restringe o resultado. "
-            "Contadores = linhas e chaves distintas após aplicar todos os critérios ativos. "
-            "Todos os multiselects vazios = exportar todas as linhas do relatório geral (checkbox de confirmação obrigatório)."
+            "Lista vazia num critério = esse critério não restringe. "
+            "Contadores = linhas e chaves distintas após todos os critérios ativos. "
+            "Todas as listas vazias = todas as linhas do relatório geral (com confirmação)."
         )
 
         _wp = st.session_state.pop("v2_preset_warn", None)
@@ -1583,33 +1604,137 @@ if st.session_state['confirmado']:
                 {str(x) for x in df_g_base["Operação"].tolist() if str(x) not in ("", "nan", "None")}
             )
 
-        pr1, pr2, pr3, pr4, pr5 = st.columns(5)
-        with pr1:
-            if st.button("Origem: EMISSÃO PRÓPRIA", key="v2_pre_propria", use_container_width=True):
-                st.session_state["v2_f_orig"] = ["EMISSÃO PRÓPRIA"]
-                st.rerun()
-        with pr2:
-            if st.button("Modelo: NF-e", key="v2_pre_nfe", use_container_width=True):
-                st.session_state["v2_f_mod"] = ["NF-e"]
-                st.rerun()
-        with pr3:
-            if st.button("Status Final: NORMAIS", key="v2_pre_aut", use_container_width=True):
-                st.session_state["v2_f_stat"] = ["NORMAIS"]
-                st.rerun()
-        with pr4:
-            if st.button("Ano/Mês: hoje (PC)", key="v2_pre_mes", use_container_width=True):
-                hm = f"{date.today().year}/{date.today().month:02d}"
-                if hm in anos_meses:
-                    st.session_state["v2_f_mes"] = [hm]
-                else:
-                    st.session_state["v2_preset_warn"] = (
-                        f"Nenhuma linha do relatório com Ano/Mês = {hm} "
-                        f"(valores possíveis vêm da data de emissão dos XML desta sessão). "
-                        f"Valor calculado: date.today() do computador que executa a app → {hm}."
-                    )
-                st.rerun()
-        with pr5:
-            if st.button("Repor filtros (vazios)", key="v2_pre_clr", use_container_width=True):
+        with st.expander("Atalhos — acrescentam às listas (várias combinações)", expanded=True):
+            st.caption(
+                "Cada «+ …» junta esse valor ao multiselect correspondente. "
+                "«Marcar todas / todos» preenche a lista inteira daquele critério. "
+                "«Limpar …» só esvazia aquele critério."
+            )
+            st.markdown("**Origem**")
+            o1, o2, o3, o4 = st.columns(4)
+            with o1:
+                if st.button("+ EMISSÃO PRÓPRIA", key="v2_add_o_prop", use_container_width=True):
+                    v2_acrescentar_filtro_sessao("v2_f_orig", "EMISSÃO PRÓPRIA", todas_origens)
+                    st.rerun()
+            with o2:
+                if st.button("+ TERCEIROS", key="v2_add_o_terc", use_container_width=True):
+                    v2_acrescentar_filtro_sessao("v2_f_orig", "TERCEIROS", todas_origens)
+                    st.rerun()
+            with o3:
+                if st.button("Origem: marcar todas", key="v2_all_o", use_container_width=True):
+                    st.session_state["v2_f_orig"] = list(todas_origens)
+                    st.rerun()
+            with o4:
+                if st.button("Limpar origem", key="v2_clr_o", use_container_width=True):
+                    st.session_state["v2_f_orig"] = []
+                    st.rerun()
+
+            st.markdown("**Modelo**")
+            _mods_ordem = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
+            _mods_existentes = [m for m in _mods_ordem if m in modelos]
+            _resto_mod = [m for m in modelos if m not in _mods_ordem]
+            _linha_mod = _mods_existentes + _resto_mod
+            if _linha_mod:
+                for mi in range(0, len(_linha_mod), 4):
+                    chunk = _linha_mod[mi : mi + 4]
+                    mc = st.columns(len(chunk))
+                    for mj, m in enumerate(chunk):
+                        with mc[mj]:
+                            sid = hashlib.md5(m.encode()).hexdigest()[:12]
+                            if st.button(f"+ {m}", key=f"v2_bm_{mi}_{mj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_mod", m, modelos)
+                                st.rerun()
+                m1, m2 = st.columns(2)
+                with m1:
+                    if st.button("Modelos: todos", key="v2_all_m", use_container_width=True):
+                        st.session_state["v2_f_mod"] = list(modelos)
+                        st.rerun()
+                with m2:
+                    if st.button("Limpar modelos", key="v2_clr_m", use_container_width=True):
+                        st.session_state["v2_f_mod"] = []
+                        st.rerun()
+            else:
+                st.caption("Sem modelos no relatório.")
+
+            st.markdown("**Status Final**")
+            if status_opcoes:
+                for si in range(0, len(status_opcoes), 4):
+                    chunk = status_opcoes[si : si + 4]
+                    sc = st.columns(len(chunk))
+                    for sj, stt in enumerate(chunk):
+                        with sc[sj]:
+                            sid = hashlib.md5(stt.encode()).hexdigest()[:16]
+                            if st.button(f"+ {stt}", key=f"v2_bs_{si}_{sj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_stat", stt, status_opcoes)
+                                st.rerun()
+                s1, s2 = st.columns(2)
+                with s1:
+                    if st.button("Status: todos", key="v2_all_s", use_container_width=True):
+                        st.session_state["v2_f_stat"] = list(status_opcoes)
+                        st.rerun()
+                with s2:
+                    if st.button("Limpar status", key="v2_clr_s", use_container_width=True):
+                        st.session_state["v2_f_stat"] = []
+                        st.rerun()
+            else:
+                st.caption("Sem valores de status no relatório.")
+
+            st.markdown("**Ano / mês**")
+            y1, y2, y3 = st.columns(3)
+            with y1:
+                if st.button("+ Mês atual (PC)", key="v2_add_mes_hoje", use_container_width=True):
+                    hm = f"{date.today().year}/{date.today().month:02d}"
+                    if hm in anos_meses:
+                        v2_acrescentar_filtro_sessao("v2_f_mes", hm, anos_meses)
+                    else:
+                        st.session_state["v2_preset_warn"] = (
+                            f"Nenhuma linha com Ano/Mês = {hm} neste lote. "
+                            f"Valor: date.today() do PC → {hm}."
+                        )
+                    st.rerun()
+            with y2:
+                if st.button("Ano/mês: todos no lote", key="v2_all_y", use_container_width=True):
+                    st.session_state["v2_f_mes"] = list(anos_meses)
+                    st.rerun()
+            with y3:
+                if st.button("Limpar ano/mês", key="v2_clr_y", use_container_width=True):
+                    st.session_state["v2_f_mes"] = []
+                    st.rerun()
+
+            st.markdown("**Série**")
+            s1, s2 = st.columns(2)
+            with s1:
+                if st.button("Série: todas no lote", key="v2_all_sr", use_container_width=True):
+                    st.session_state["v2_f_ser"] = list(series)
+                    st.rerun()
+            with s2:
+                if st.button("Limpar séries", key="v2_clr_sr", use_container_width=True):
+                    st.session_state["v2_f_ser"] = []
+                    st.rerun()
+
+            if operacoes_opts:
+                st.markdown("**Operação**")
+                for oi in range(0, len(operacoes_opts), 4):
+                    chunk = operacoes_opts[oi : oi + 4]
+                    oc = st.columns(len(chunk))
+                    for oj, opv in enumerate(chunk):
+                        with oc[oj]:
+                            sid = hashlib.md5(opv.encode()).hexdigest()[:16]
+                            if st.button(f"+ {opv}", key=f"v2_bo_{oi}_{oj}_{sid}", use_container_width=True):
+                                v2_acrescentar_filtro_sessao("v2_f_op", opv, operacoes_opts)
+                                st.rerun()
+                op1, op2 = st.columns(2)
+                with op1:
+                    if st.button("Operação: todas", key="v2_all_op", use_container_width=True):
+                        st.session_state["v2_f_op"] = list(operacoes_opts)
+                        st.rerun()
+                with op2:
+                    if st.button("Limpar operação", key="v2_clr_op", use_container_width=True):
+                        st.session_state["v2_f_op"] = []
+                        st.rerun()
+
+            st.divider()
+            if st.button("Repor todos os filtros (listas vazias)", key="v2_pre_clr", use_container_width=True):
                 for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
                     if _kx in st.session_state:
                         st.session_state[_kx] = []
@@ -1620,36 +1745,39 @@ if st.session_state['confirmado']:
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
                 filtro_origem = st.multiselect(
-                    "Origem (coluna Origem)",
+                    "Origem (uma ou mais)",
                     todas_origens,
                     key="v2_f_orig",
-                    help="EMISSÃO PRÓPRIA: emitente do XML = CNPJ da sidebar. TERCEIROS: restantes classificações desta sessão.",
+                    help="Várias origens = união (inclui linha se coincidir com qualquer uma). "
+                    "EMISSÃO PRÓPRIA: emitente = CNPJ da sidebar. TERCEIROS: resto nesta sessão.",
                 )
             with f_col2:
                 filtro_meses = st.multiselect(
-                    "Ano / mês (Ano + Mes do relatório)",
+                    "Ano / mês (uma ou mais competências)",
                     anos_meses,
                     key="v2_f_mes",
-                    help="Valores únicos Ano/Mês extraídos dos XML já processados nesta sessão.",
+                    help="Vários meses = união. Valores vêm da data de emissão dos XML desta sessão.",
                 )
             with f_col3:
                 filtro_modelos = st.multiselect(
-                    "Modelo (coluna Modelo)",
+                    "Modelo (uma ou mais)",
                     modelos,
                     key="v2_f_mod",
+                    help="Ex.: NF-e e NFC-e ao mesmo tempo — exporta linhas de ambos.",
                 )
             with f_col4:
                 filtro_series = st.multiselect(
-                    "Série (coluna Série)",
+                    "Série (uma ou mais)",
                     series,
                     key="v2_f_ser",
+                    help="Várias séries = união (OR).",
                 )
             with f_col5:
                 filtro_status = st.multiselect(
-                    "Status Final",
+                    "Status Final (uma ou mais)",
                     status_opcoes,
                     key="v2_f_stat",
-                    help="Corresponde à coluna Status Final na exportação (ex.: NORMAIS, CANCELADOS).",
+                    help="Vários status = união. Coluna Status Final na planilha exportada.",
                 )
 
         aplicar_mes_so_na_propria = st.checkbox(
@@ -1661,10 +1789,10 @@ if st.session_state['confirmado']:
 
         if operacoes_opts:
             filtro_operacao = st.multiselect(
-                "Operação (coluna Operação, se existir)",
+                "Operação (uma ou mais, se existir no relatório)",
                 operacoes_opts,
                 key="v2_f_op",
-                help="Valores lidos do XML (entrada/saída); só aparece se a coluna existir no relatório geral.",
+                help="Valores do XML. Várias opções = união.",
             )
         else:
             filtro_operacao = []
