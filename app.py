@@ -28,8 +28,13 @@ def aplicar_estilo_premium():
         [data-testid="stSidebar"] {
             background-color: #FFFFFF !important;
             border-right: 1px solid #FFDEEF !important;
-            min-width: 400px !important;
-            max-width: 400px !important;
+            min-width: 280px !important;
+            max-width: min(340px, 100vw) !important;
+        }
+        /* Tabela do editor na lateral: evita cortar conteúdo */
+        [data-testid="stSidebar"] [data-testid="stDataFrame"],
+        [data-testid="stSidebar"] [data-testid="stDataEditor"] {
+            overflow-x: auto !important;
         }
 
         div.stButton > button {
@@ -937,10 +942,6 @@ DICAS
 
 # --- INTERFACE ---
 st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
-st.caption(
-    "Este ficheiro: **app2.py** — Etapa 3 alargada (atalhos, CSV, ZIP opcional). "
-    "Interface padrão: `streamlit run app.py`."
-)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
@@ -1042,11 +1043,6 @@ if "seq_ref_rows" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🔍 Configuração")
-    st.caption(
-        "Memória: lotes muito grandes mantêm muitas linhas na sessão. "
-        "No Streamlit Cloud, descarregue ZIP/Excel e use **Novo garimpo**. "
-        "Atualize dependências com `requirements.txt`."
-    )
     cnpj_input = st.text_input("CNPJ DO CLIENTE", placeholder="00.000.000/0001-00")
     cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
     
@@ -1066,8 +1062,9 @@ with st.sidebar:
             sr_ano = st.number_input("Ano de referência", min_value=2000, max_value=2100, value=int(a0), key="seq_in_ano")
             sr_mes = st.number_input("Mês (1–12)", min_value=1, max_value=12, value=int(m0), key="seq_in_mes")
             st.caption(
-                "Preencha a tabela: escolha o modelo, a série e o **último número** daquele mês. "
-                "Linhas vazias ou sem número são ignoradas ao guardar."
+                "**Col. 1 — Tipo:** NF-e, NFC-e, CT-e ou MDF-e (o mesmo nome que aparece no resumo por série). "
+                "**Col. 2 — Série:** só o número da série (ex.: 1). "
+                "**Col. 3 — Último nº:** última nota **já emitida** até ao **fim** do mês/ano escolhidos acima."
             )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
@@ -1093,10 +1090,27 @@ with st.sidebar:
                 num_rows="dynamic",
                 use_container_width=True,
                 column_config={
-                    "Modelo": st.column_config.SelectboxColumn("Modelo", options=_opts, required=True),
-                    "Série": st.column_config.TextColumn("Série", required=True, max_chars=10),
+                    "Modelo": st.column_config.SelectboxColumn(
+                        "Tipo doc.",
+                        options=_opts,
+                        required=True,
+                        width="small",
+                        help="Modelo do documento (igual ao garimpo).",
+                    ),
+                    "Série": st.column_config.TextColumn(
+                        "Série",
+                        required=True,
+                        max_chars=10,
+                        width="small",
+                        help="Número da série.",
+                    ),
                     "Último número": st.column_config.NumberColumn(
-                        "Último nº", min_value=0, step=1, format="%d", help="Último emitido no mês de referência"
+                        "Últ. nº",
+                        min_value=0,
+                        step=1,
+                        format="%d",
+                        width="small",
+                        help="Último número emitido até ao fim do mês de referência.",
                     ),
                 },
             )
@@ -1697,22 +1711,10 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
         st.markdown("### ⚙️ Etapa 3: filtros e exportação")
-        st.info(
-            "**Listas (dropdowns):** em cada lista pode marcar **várias opções ao mesmo tempo** (Ctrl+clique ou caixas múltiplas). "
-            "Combinar NF-e com EMISSÃO PRÓPRIA e TERCEIROS = escolher nas três listas ou usar os atalhos abaixo. "
-            "**Atalhos:** **acrescentam** à lista (não apagam o que já estava). "
-            "**Botão principal no fim (Gerar Excel / CSV / ZIP…):** gera ficheiros."
-        )
-        st.caption(
-            "Dados: apenas o relatório geral desta sessão (após o garimpo). "
-            "Lista vazia num critério = esse critério não restringe. "
-            "Contadores = linhas e chaves distintas após todos os critérios ativos. "
-            "Todas as listas vazias = todas as linhas do relatório geral (com confirmação)."
-        )
 
-        _wp = st.session_state.pop("v2_preset_warn", None)
-        if _wp:
-            st.warning(_wp)
+        for _k_v2 in ("v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"):
+            if _k_v2 not in st.session_state:
+                st.session_state[_k_v2] = []
 
         df_g_base = st.session_state["df_geral"]
         todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
@@ -1744,29 +1746,20 @@ if st.session_state['confirmado']:
             )
 
         with st.expander("Atalhos — acrescentam às listas (várias combinações)", expanded=True):
-            st.caption(
-                "Cada «+ …» junta esse valor ao multiselect correspondente. "
-                "«Marcar todas / todos» preenche a lista inteira daquele critério. "
-                "«Limpar …» só esvazia aquele critério."
-            )
             st.markdown("**Origem**")
             o1, o2, o3, o4 = st.columns(4)
             with o1:
                 if st.button("+ EMISSÃO PRÓPRIA", key="v2_add_o_prop", use_container_width=True):
                     v2_acrescentar_filtro_sessao("v2_f_orig", "EMISSÃO PRÓPRIA", todas_origens)
-                    st.rerun()
             with o2:
                 if st.button("+ TERCEIROS", key="v2_add_o_terc", use_container_width=True):
                     v2_acrescentar_filtro_sessao("v2_f_orig", "TERCEIROS", todas_origens)
-                    st.rerun()
             with o3:
                 if st.button("Origem: marcar todas", key="v2_all_o", use_container_width=True):
                     st.session_state["v2_f_orig"] = list(todas_origens)
-                    st.rerun()
             with o4:
                 if st.button("Limpar origem", key="v2_clr_o", use_container_width=True):
                     st.session_state["v2_f_orig"] = []
-                    st.rerun()
 
             st.markdown("**Modelo**")
             _mods_ordem = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
@@ -1782,16 +1775,13 @@ if st.session_state['confirmado']:
                             sid = hashlib.md5(m.encode()).hexdigest()[:12]
                             if st.button(f"+ {m}", key=f"v2_bm_{mi}_{mj}_{sid}", use_container_width=True):
                                 v2_acrescentar_filtro_sessao("v2_f_mod", m, modelos)
-                                st.rerun()
                 m1, m2 = st.columns(2)
                 with m1:
                     if st.button("Modelos: todos", key="v2_all_m", use_container_width=True):
                         st.session_state["v2_f_mod"] = list(modelos)
-                        st.rerun()
                 with m2:
                     if st.button("Limpar modelos", key="v2_clr_m", use_container_width=True):
                         st.session_state["v2_f_mod"] = []
-                        st.rerun()
             else:
                 st.caption("Sem modelos no relatório.")
 
@@ -1805,16 +1795,13 @@ if st.session_state['confirmado']:
                             sid = hashlib.md5(stt.encode()).hexdigest()[:16]
                             if st.button(f"+ {stt}", key=f"v2_bs_{si}_{sj}_{sid}", use_container_width=True):
                                 v2_acrescentar_filtro_sessao("v2_f_stat", stt, status_opcoes)
-                                st.rerun()
                 s1, s2 = st.columns(2)
                 with s1:
                     if st.button("Status: todos", key="v2_all_s", use_container_width=True):
                         st.session_state["v2_f_stat"] = list(status_opcoes)
-                        st.rerun()
                 with s2:
                     if st.button("Limpar status", key="v2_clr_s", use_container_width=True):
                         st.session_state["v2_f_stat"] = []
-                        st.rerun()
             else:
                 st.caption("Sem valores de status no relatório.")
 
@@ -1830,26 +1817,21 @@ if st.session_state['confirmado']:
                             f"Nenhuma linha com Ano/Mês = {hm} neste lote. "
                             f"Valor: date.today() do PC → {hm}."
                         )
-                    st.rerun()
             with y2:
                 if st.button("Ano/mês: todos no lote", key="v2_all_y", use_container_width=True):
                     st.session_state["v2_f_mes"] = list(anos_meses)
-                    st.rerun()
             with y3:
                 if st.button("Limpar ano/mês", key="v2_clr_y", use_container_width=True):
                     st.session_state["v2_f_mes"] = []
-                    st.rerun()
 
             st.markdown("**Série**")
             s1, s2 = st.columns(2)
             with s1:
                 if st.button("Série: todas no lote", key="v2_all_sr", use_container_width=True):
                     st.session_state["v2_f_ser"] = list(series)
-                    st.rerun()
             with s2:
                 if st.button("Limpar séries", key="v2_clr_sr", use_container_width=True):
                     st.session_state["v2_f_ser"] = []
-                    st.rerun()
 
             if operacoes_opts:
                 st.markdown("**Operação**")
@@ -1861,16 +1843,13 @@ if st.session_state['confirmado']:
                             sid = hashlib.md5(opv.encode()).hexdigest()[:16]
                             if st.button(f"+ {opv}", key=f"v2_bo_{oi}_{oj}_{sid}", use_container_width=True):
                                 v2_acrescentar_filtro_sessao("v2_f_op", opv, operacoes_opts)
-                                st.rerun()
                 op1, op2 = st.columns(2)
                 with op1:
                     if st.button("Operação: todas", key="v2_all_op", use_container_width=True):
                         st.session_state["v2_f_op"] = list(operacoes_opts)
-                        st.rerun()
                 with op2:
                     if st.button("Limpar operação", key="v2_clr_op", use_container_width=True):
                         st.session_state["v2_f_op"] = []
-                        st.rerun()
 
             st.divider()
             if st.button("Repor todos os filtros (listas vazias)", key="v2_pre_clr", use_container_width=True):
@@ -1878,7 +1857,10 @@ if st.session_state['confirmado']:
                     if _kx in st.session_state:
                         st.session_state[_kx] = []
                 st.session_state["v2_apenas_mes_propria"] = True
-                st.rerun()
+
+        _wp = st.session_state.pop("v2_preset_warn", None)
+        if _wp:
+            st.warning(_wp)
 
         with st.container():
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
