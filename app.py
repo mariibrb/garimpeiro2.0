@@ -636,18 +636,89 @@ def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_
 
 # --- FUNÇÃO AUXILIAR PARA O BLOCO DOMÍNIO ---
 def extrair_notas_faltantes_dominio(pdf_file):
+    """
+    Lê o PDF e tenta vários padrões (layout Domínio / relatórios de não lançadas varia).
+    Devolve (lista de {Série, Número}, dict com diagnóstico para a UI).
+    """
     notas_faltantes = []
+    meta = {
+        "erro": None,
+        "n_paginas": 0,
+        "n_chars": 0,
+        "n_tuplas_regex": 0,
+        "texto_amostra": "",
+    }
     try:
-        with pdfplumber.open(pdf_file) as pdf:
+        dados = pdf_file.read()
+        if hasattr(pdf_file, "seek"):
+            pdf_file.seek(0)
+        bio = io.BytesIO(dados)
+        with pdfplumber.open(bio) as pdf:
+            partes = []
             for page in pdf.pages:
-                text = page.extract_text()
-                matches = re.findall(r'(\d+)\s+(\d+)\s+(\d+)\s+(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e)', text, re.IGNORECASE)
-                for m in matches:
-                    inicio, fim, serie = int(m[0]), int(m[1]), str(m[2])
-                    for num in range(inicio, fim + 1):
-                        notas_faltantes.append({"Série": serie, "Número": num})
-    except: pass
-    return notas_faltantes
+                t = page.extract_text() or ""
+                partes.append(t)
+            meta["n_paginas"] = len(pdf.pages)
+            texto = "\n".join(partes)
+            meta["n_chars"] = len(texto)
+            # Junta linhas que o PDF partiu (números e "NF-e" em linhas diferentes)
+            flat = re.sub(r"[\s\xa0]+", " ", texto).strip()
+            meta["texto_amostra"] = flat[:500] if flat else ""
+
+            def _add_tupla(a, b, c, ordem_if):
+                """ordem_if: 'iff' = inicio, fim, serie | 'sff' = serie, inicio, fim"""
+                try:
+                    x, y, z = int(a), int(b), str(c).strip()
+                except (ValueError, TypeError):
+                    return
+                if ordem_if == "iff":
+                    inicio, fim, serie = x, y, z
+                else:
+                    serie, inicio, fim = x, y, z
+                if fim < inicio:
+                    inicio, fim = fim, inicio
+                if fim - inicio > 500000:
+                    return
+                for num in range(inicio, fim + 1):
+                    notas_faltantes.append({"Série": serie, "Número": num})
+
+            vistos = set()
+            padroes = [
+                # inicio fim serie + modelo (mais comum nos relatórios antigos)
+                (
+                    r"(\d{1,9})\s+(\d{1,9})\s+(\d{1,4})\s*(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e|NFE|NFCE|CTE)\b",
+                    "iff",
+                ),
+                # modelo colado aos números: 1 100 1NF-e
+                (
+                    r"(\d{1,9})\s+(\d{1,9})\s+(\d{1,4})\s*(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e|NFE|NFCE|CTE)",
+                    "iff",
+                ),
+                # série primeiro: 1 1 100 NF-e
+                (
+                    r"(\d{1,4})\s+(\d{1,9})\s+(\d{1,9})\s*(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e|NFE|NFCE|CTE)\b",
+                    "sff",
+                ),
+            ]
+            for pat, ordem in padroes:
+                for m in re.finditer(pat, flat, re.IGNORECASE):
+                    meta["n_tuplas_regex"] += 1
+                    chave = (m.group(1), m.group(2), m.group(3), ordem)
+                    if chave in vistos:
+                        continue
+                    vistos.add(chave)
+                    _add_tupla(m.group(1), m.group(2), m.group(3), ordem)
+
+            # Deduplicar notas (vários padrões podem repetir)
+            uniq = {}
+            for it in notas_faltantes:
+                k = (it["Série"], it["Número"])
+                uniq[k] = it
+            notas_faltantes = list(uniq.values())
+
+    except Exception as e:
+        meta["erro"] = str(e)
+    return notas_faltantes, meta
 
 
 def extrair_chaves_de_excel(arquivo_excel):
@@ -1619,35 +1690,74 @@ if st.session_state['confirmado']:
 
             with tab_pdf:
                 pdf_dominio = st.file_uploader("Relatório de notas não lançadas (PDF):", type=["pdf"], key="pdf_dom_final")
-                if pdf_dominio and st.button("🔎 BUSCAR XMLS NO LOTE", key="btn_run_dom"):
-                    with st.spinner("Analisando e organizando arquivos..."):
-                        notas_pdf = extrair_notas_faltantes_dominio(pdf_dominio)
-                        if notas_pdf:
-                            ch_encontradas = []
-                            df_base = st.session_state["df_geral"]
-                            for n in notas_pdf:
-                                f = df_base[
-                                    (df_base["Série"].astype(str) == n["Série"])
-                                    & (df_base["Nota"] == n["Número"])
-                                    & (df_base["Status Final"] == "NORMAIS")
-                                ]
-                                if not f.empty:
-                                    ch_encontradas.append(f.iloc[0]["Chave"])
-
-                            if ch_encontradas:
-                                partes, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, ch_encontradas)
-                                if partes:
-                                    st.session_state["ch_falt_dom"] = ch_encontradas
-                                    st.session_state["zip_dom_parts"] = partes
-                                    nl = len(partes)
-                                    st.success(
-                                        f"✅ Sucesso! {len(ch_encontradas)} nota(s) na lista; {n_xml} XML(s) em "
-                                        f"{nl} ficheiro(s) ZIP (até {MAX_XML_PER_ZIP} XMLs por lote)."
+                st.caption(
+                    "O PDF é lido por texto: se o relatório for só imagem ou tiver outro layout, use o separador **Excel** com chaves de 44 dígitos."
+                )
+                if st.button("🔎 BUSCAR XMLS NO LOTE", key="btn_run_dom"):
+                    if pdf_dominio is None:
+                        st.warning("Selecione um ficheiro PDF antes de clicar em buscar.")
+                    else:
+                        with st.spinner("Analisando e organizando arquivos..."):
+                            notas_pdf, info_dom = extrair_notas_faltantes_dominio(pdf_dominio)
+                            if info_dom.get("erro"):
+                                st.error(f"Erro ao abrir o PDF: {info_dom['erro']}")
+                            elif not notas_pdf:
+                                st.warning(
+                                    "Não encontrámos no PDF o padrão **número + número + série + NF-e/NFC-e/CT-e**. "
+                                    "O Domínio pode exportar noutro formato, ou o PDF não tem texto selecionável."
+                                )
+                                with st.expander("Diagnóstico (amostra do texto extraído)", expanded=False):
+                                    st.text(info_dom.get("texto_amostra") or "(vazio — possível PDF só com imagem)")
+                                    st.caption(
+                                        f"Páginas: {info_dom.get('n_paginas', 0)} | "
+                                        f"Caracteres: {info_dom.get('n_chars', 0)} | "
+                                        f"Correspondências regex: {info_dom.get('n_tuplas_regex', 0)}"
                                     )
-                                else:
-                                    st.warning("⚠️ Não foi possível gerar o ZIP.")
                             else:
-                                st.warning("⚠️ Nenhum XML correspondente encontrado no lote.")
+                                st.info(
+                                    f"PDF: **{len(notas_pdf)}** nota(s) identificada(s) para cruzar com o relatório geral."
+                                )
+                                ch_encontradas = []
+                                df_base = st.session_state["df_geral"]
+                                if df_base is None or df_base.empty:
+                                    st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                                else:
+                                    for n in notas_pdf:
+                                        f = df_base[
+                                            (df_base["Série"].astype(str) == str(n["Série"]))
+                                            & (df_base["Nota"] == n["Número"])
+                                            & (df_base["Status Final"] == "NORMAIS")
+                                        ]
+                                        if not f.empty:
+                                            ch_encontradas.append(f.iloc[0]["Chave"])
+
+                                    if not ch_encontradas:
+                                        st.warning(
+                                            "⚠️ Nenhuma dessas notas aparece no lote como **NORMAIS** "
+                                            "(série/número iguais ao PDF). Confira série, canceladas ou refaça o garimpo."
+                                        )
+                                    elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                        st.error(
+                                            "A pasta dos XML carregados não existe (ex.: sessão no Cloud reiniciou). "
+                                            "Volte a correr **Iniciar grande garimpo** ou **Incluir mais XML**."
+                                        )
+                                    else:
+                                        partes, n_xml = escrever_zip_dominio_por_chaves(
+                                            cnpj_limpo, ch_encontradas
+                                        )
+                                        if partes and n_xml > 0:
+                                            st.session_state["ch_falt_dom"] = ch_encontradas
+                                            st.session_state["zip_dom_parts"] = partes
+                                            nl = len(partes)
+                                            st.success(
+                                                f"✅ {len(ch_encontradas)} chave(s) no lote; {n_xml} XML(s) em "
+                                                f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                            )
+                                        else:
+                                            st.warning(
+                                                "⚠️ Há chaves no relatório, mas **nenhum XML** foi encontrado em disco "
+                                                f"(`{TEMP_UPLOADS_DIR}`). Refaça o garimpo com os mesmos ficheiros."
+                                            )
 
             with tab_xlsx:
                 xlsx_dom = st.file_uploader(
