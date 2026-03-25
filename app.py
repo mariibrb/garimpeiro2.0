@@ -642,6 +642,144 @@ def filtrar_df_geral_para_exportacao(
     return out
 
 
+def v2_opcoes_cascata_etapa3(
+    df_base: pd.DataFrame,
+    filtro_origem: list,
+    filtro_meses: list,
+    aplicar_mes_so_na_propria: bool,
+    filtro_modelos: list,
+    filtro_series: list,
+    filtro_status: list,
+    filtro_operacao: list,
+) -> dict:
+    """
+    Opções de cada multiselect = valores distintos ainda possíveis no relatório
+    depois de aplicar todos os filtros exceto o da própria dimensão.
+    Assim, com só «EMISSÃO PRÓPRIA», Série lista apenas séries que existem nessa origem.
+    """
+    empty = {
+        "anos_meses": [],
+        "modelos": [],
+        "series": [],
+        "status": [],
+        "operacoes": [],
+    }
+    if df_base is None or df_base.empty:
+        return empty
+
+    def uniq_sorted_series(s: pd.Series) -> list:
+        return sorted(
+            {str(x) for x in s.tolist() if str(x) not in ("", "nan", "None")},
+            key=lambda x: (len(x), x),
+        )
+
+    # Ano/mês: ignora filtro de mês; mantém os restantes
+    d_m = filtrar_df_geral_para_exportacao(
+        df_base,
+        filtro_origem,
+        [],
+        aplicar_mes_so_na_propria,
+        filtro_modelos,
+        filtro_series,
+        filtro_status,
+        filtro_operacao,
+    )
+    anos_meses: list = []
+    if d_m is not None and not d_m.empty:
+        mc = d_m["Ano"].astype(str) + "/" + d_m["Mes"].astype(str)
+        anos_meses = sorted({x for x in mc.tolist() if x and not str(x).startswith("0000/")})
+
+    d_mod = filtrar_df_geral_para_exportacao(
+        df_base,
+        filtro_origem,
+        filtro_meses,
+        aplicar_mes_so_na_propria,
+        [],
+        filtro_series,
+        filtro_status,
+        filtro_operacao,
+    )
+    modelos = uniq_sorted_series(d_mod["Modelo"]) if d_mod is not None and not d_mod.empty else []
+
+    d_ser = filtrar_df_geral_para_exportacao(
+        df_base,
+        filtro_origem,
+        filtro_meses,
+        aplicar_mes_so_na_propria,
+        filtro_modelos,
+        [],
+        filtro_status,
+        filtro_operacao,
+    )
+    series = (
+        uniq_sorted_series(d_ser["Série"].astype(str))
+        if d_ser is not None and not d_ser.empty
+        else []
+    )
+
+    d_st = filtrar_df_geral_para_exportacao(
+        df_base,
+        filtro_origem,
+        filtro_meses,
+        aplicar_mes_so_na_propria,
+        filtro_modelos,
+        filtro_series,
+        [],
+        filtro_operacao,
+    )
+    status = (
+        uniq_sorted_series(d_st["Status Final"])
+        if d_st is not None and not d_st.empty and "Status Final" in d_st.columns
+        else []
+    )
+
+    d_op = filtrar_df_geral_para_exportacao(
+        df_base,
+        filtro_origem,
+        filtro_meses,
+        aplicar_mes_so_na_propria,
+        filtro_modelos,
+        filtro_series,
+        filtro_status,
+        [],
+    )
+    operacoes = (
+        uniq_sorted_series(d_op["Operação"])
+        if d_op is not None and not d_op.empty and "Operação" in d_op.columns
+        else []
+    )
+
+    return {
+        "anos_meses": anos_meses,
+        "modelos": modelos,
+        "series": series,
+        "status": status,
+        "operacoes": operacoes,
+    }
+
+
+def v2_sanear_selecoes_contra_opcoes(
+    anos_meses: list,
+    modelos: list,
+    series: list,
+    status_opcoes: list,
+    operacoes_opts: list,
+) -> None:
+    """Remove da sessão valores que deixaram de existir nas listas em cascata."""
+    pares = [
+        ("v2_f_mes", set(anos_meses)),
+        ("v2_f_mod", set(modelos)),
+        ("v2_f_ser", set(series)),
+        ("v2_f_stat", set(status_opcoes)),
+        ("v2_f_op", set(operacoes_opts)),
+    ]
+    for key, permitidos in pares:
+        cur = list(st.session_state.get(key) or [])
+        novo = [x for x in cur if x in permitidos]
+        if novo != cur:
+            st.session_state[key] = novo
+
+
 def v2_acrescentar_filtro_sessao(state_key, novos, permitidos=None):
     """Acrescenta um ou mais valores à lista em session_state sem duplicar."""
     if isinstance(novos, str):
@@ -991,7 +1129,7 @@ PASSO A PASSO
 4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: use os multiselects (Origem, Ano/mês, Modelo, Série, Status e Operação se existir). A caixa «Estado dos filtros» mostra o que está ativo — lista vazia num critério = esse critério não restringe. (Opcional) Expanda «Atalhos rápidos»: botão em rosa forte = esse valor já está no filtro. Há uma linha de pré-visualização (linhas, chaves, total). Com mês escolhido pode manter terceiros de fora do filtro de competência (checkbox). Se todas as listas estiverem vazias, confirme para exportar tudo. Gera Excel (Filtrado + Resumo_status), CSV opcional, ZIP com pastas e/ou ZIP plano na raiz; até 10 mil XMLs por ficheiro ZIP.
+7. Etapa 3: multiselects em cascata — ao escolher Origem (ex.: só emissão própria), as listas de Série, Modelo, mês, etc. mostram só valores que ainda existem nesse subconjunto do relatório. Caixa «Estado dos filtros»; atalhos com rosa = já selecionado; pré-visualização numa linha; checkbox mês/terceiros; confirmação se exportar com tudo vazio. Excel, CSV opcional, ZIP; até 10 mil XMLs por ZIP.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
@@ -1002,6 +1140,7 @@ O QUE O SISTEMA FAZ
 DICAS
 • Resetar sistema limpa sessão e temporários; use se trocar de cliente ou quiser recomeçar do zero.
 • Modelos na app: NF-e, NFC-e, CT-e, MDF-e (use estes nomes nas tabelas e colagens).
+• Etapa 3: seleções inválidas após mudar um filtro (ex.: série que só existia em terceiros) são limpas automaticamente.
 """.strip()
 
 
@@ -1022,7 +1161,7 @@ with st.container():
                 <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 — multiselects, resumo «Estado dos filtros», atalhos (rosa = já selecionado), depois Excel/ZIP/CSV; ou lista específica (chaves 44 dígitos na col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 — multiselects em <b>cascata</b> (ex.: só emissão própria → só séries/modelos/meses desse subconjunto), «Estado dos filtros», atalhos (rosa = já no filtro), Excel/ZIP/CSV; ou lista específica (chaves na col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1033,7 +1172,7 @@ with st.container():
             <ul>
                 <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
                 <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
-                <li><b>Exportação filtrada:</b> Linhas do relatório geral da sessão; cada ZIP com no máximo 10 000 XMLs.</li>
+                <li><b>Exportação filtrada:</b> Relatório geral da sessão, com filtros em cascata na Etapa 3; cada ZIP com no máximo 10 000 XMLs.</li>
                 <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
                 <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
@@ -1776,6 +1915,10 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
         st.markdown("### ⚙️ Etapa 3: filtros e exportação")
+        st.caption(
+            "Listas em cascata: Ano/mês, Modelo, Série, Status e Operação mostram só o que ainda existe "
+            "no relatório com os filtros que já escolheu (ex.: só «Emissão própria» → só as séries da sua empresa no lote)."
+        )
 
         for _k_v2 in ("v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"):
             if _k_v2 not in st.session_state:
@@ -1783,35 +1926,41 @@ if st.session_state['confirmado']:
 
         df_g_base = st.session_state["df_geral"]
         todas_origens = ["EMISSÃO PRÓPRIA", "TERCEIROS"]
-        anos_meses = sorted(
-            list(
-                set(
-                    [
-                        f"{r.get('Ano', '0000')}/{r.get('Mes', '00')}"
-                        for r in st.session_state["relatorio"]
-                        if r.get("Ano", "0000") != "0000"
-                    ]
-                )
-            )
+        _fo = list(st.session_state.get("v2_f_orig") or [])
+        _fm = list(st.session_state.get("v2_f_mes") or [])
+        _fmod = list(st.session_state.get("v2_f_mod") or [])
+        _fser = list(st.session_state.get("v2_f_ser") or [])
+        _fst = list(st.session_state.get("v2_f_stat") or [])
+        _fop = list(st.session_state.get("v2_f_op") or [])
+        _ap_mes = bool(st.session_state.get("v2_apenas_mes_propria", True))
+
+        _opts = v2_opcoes_cascata_etapa3(
+            df_g_base,
+            _fo,
+            _fm,
+            _ap_mes,
+            _fmod,
+            _fser,
+            _fst,
+            _fop,
         )
-        modelos = sorted(list(set([r.get("Tipo", "") for r in st.session_state["relatorio"]])))
-        series = sorted(list(set([str(r.get("Série", "0")) for r in st.session_state["relatorio"]])))
-        if not df_g_base.empty and "Status Final" in df_g_base.columns:
-            status_opcoes = sorted(
-                {str(x) for x in df_g_base["Status Final"].tolist() if str(x) not in ("", "nan", "None")}
-            )
-        else:
-            status_opcoes = sorted(
-                {str(r.get("Status", "")) for r in st.session_state["relatorio"] if r.get("Status")}
-            )
-        operacoes_opts = []
-        if not df_g_base.empty and "Operação" in df_g_base.columns:
-            operacoes_opts = sorted(
-                {str(x) for x in df_g_base["Operação"].tolist() if str(x) not in ("", "nan", "None")}
-            )
+        anos_meses = _opts["anos_meses"]
+        modelos = _opts["modelos"]
+        series = _opts["series"]
+        status_opcoes = _opts["status"]
+        operacoes_opts = _opts["operacoes"]
+        v2_sanear_selecoes_contra_opcoes(anos_meses, modelos, series, status_opcoes, operacoes_opts)
+        _ord_mod = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
+        modelos = [m for m in _ord_mod if m in modelos] + sorted(
+            [m for m in modelos if m not in _ord_mod],
+            key=lambda x: (len(str(x)), str(x)),
+        )
 
         with st.expander("Atalhos rápidos (opcional)", expanded=False):
-            st.caption("Rosa forte = esse critério já está na lista de filtros.")
+            st.caption(
+                "Rosa forte = já está no filtro. As opções aqui seguem a mesma cascata dos multiselects "
+                "(só aparece o que ainda existe no relatório com os critérios atuais)."
+            )
             _v2_o = list(st.session_state.get("v2_f_orig") or [])
             _v2_m = list(st.session_state.get("v2_f_mod") or [])
             _v2_st = list(st.session_state.get("v2_f_stat") or [])
@@ -2085,7 +2234,7 @@ if st.session_state['confirmado']:
                     "Série",
                     series,
                     key="v2_f_ser",
-                    help="Várias séries = união.",
+                    help="Só séries que existem nas linhas já filtradas pelas outras colunas (ex.: própria vs terceiros).",
                 )
             with f_col5:
                 filtro_status = st.multiselect(
