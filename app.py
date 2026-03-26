@@ -453,6 +453,81 @@ def _ym_eq(ano_a, mes_a, ano_b, mes_b):
     return ta == tb
 
 
+def _ym_lt(ano_a, mes_a, ano_b, mes_b):
+    ta, tb = _ym_tuple(ano_a, mes_a), _ym_tuple(ano_b, mes_b)
+    if not ta or not tb:
+        return False
+    return ta < tb
+
+
+def buraco_ctx_sessao():
+    """Mês/ano de referência e mapa último nº por Modelo|Série na sessão Streamlit."""
+    try:
+        ar = st.session_state.get("seq_ref_ano")
+        mr = st.session_state.get("seq_ref_mes")
+        rmap = st.session_state.get("seq_ref_ultimos")
+        if ar is None or mr is None:
+            return None, None, {}
+        rm = dict(rmap) if isinstance(rmap, dict) and rmap else {}
+        return int(ar), int(mr), rm
+    except Exception:
+        return None, None, {}
+
+
+def ultimo_ref_lookup(ref_map, tipo, serie):
+    if not ref_map:
+        return None
+    return ref_map.get(f"{tipo}|{str(serie).strip()}")
+
+
+def numero_entra_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u):
+    """
+    Se há mês de referência: ignora competências anteriores; no próprio mês só conta n > último informado.
+    Sem referência na sessão: conta tudo (comportamento antigo).
+    """
+    if ref_ar is None or ref_mr is None:
+        return True
+    if str(ano) == "0000":
+        return False
+    if _ym_lt(ano, mes, ref_ar, ref_mr):
+        return False
+    if ultimo_u is None:
+        return True
+    if _ym_eq(ano, mes, ref_ar, ref_mr):
+        try:
+            return int(n) > int(ultimo_u)
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def falhas_buraco_por_serie(nums_buraco, tipo_doc, serie_str, ultimo_u, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
+    """
+    Buracos a partir do último nº informado (se houver): preenche o intervalo até ao primeiro nº relevante nos XMLs
+    e mantém a lógica de trechos (saltos grandes) no restante.
+    """
+    ns = sorted(nums_buraco)
+    if not ns:
+        return []
+    U = None
+    if ultimo_u is not None:
+        try:
+            U = int(ultimo_u)
+        except (TypeError, ValueError):
+            U = None
+    out = []
+    if U is not None:
+        ns_eff = [x for x in ns if x > U]
+        if not ns_eff:
+            return []
+        for b in range(U + 1, ns_eff[0]):
+            out.append({"Tipo": tipo_doc, "Série": serie_str, "Num_Faltante": b})
+        out.extend(enumerar_buracos_por_segmento(ns_eff, tipo_doc, serie_str, gap_max))
+    else:
+        out.extend(enumerar_buracos_por_segmento(ns, tipo_doc, serie_str, gap_max))
+    return out
+
+
 def ultimos_dict_para_dataframe(ultimos_dict):
     if not ultimos_dict:
         return pd.DataFrame(columns=["Modelo", "Série", "Último número"])
@@ -619,6 +694,7 @@ def reconstruir_dataframes_relatorio_simples():
         else:
             lote_recalc[key] = (item, is_p)
 
+    ref_ar, ref_mr, ref_map = buraco_ctx_sessao()
     audit_map = {}
     canc_list = []
     inut_list = []
@@ -661,16 +737,23 @@ def reconstruir_dataframes_relatorio_simples():
         if is_p:
             sk = (res["Tipo"], res["Série"])
             if sk not in audit_map:
-                audit_map[sk] = {"nums": set(), "valor": 0.0}
+                audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+            ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
 
             if res["Status"] == "INUTILIZADOS":
                 r = res.get("Range", (res["Número"], res["Número"]))
                 for n in range(r[0], r[1] + 1):
                     audit_map[sk]["nums"].add(n)
+                    if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                        audit_map[sk]["nums_buraco"].add(n)
                     inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
             else:
                 if res["Número"] > 0:
                     audit_map[sk]["nums"].add(res["Número"])
+                    if numero_entra_conjunto_buraco(
+                        res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                    ):
+                        audit_map[sk]["nums_buraco"].add(res["Número"])
                     if res["Status"] == "CANCELADOS":
                         canc_list.append(registro_detalhado)
                     elif res["Status"] == "NORMAIS":
@@ -695,7 +778,10 @@ def reconstruir_dataframes_relatorio_simples():
                     "Valor Contábil (R$)": round(dados["valor"], 2),
                 }
             )
-            fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
+        ult_lookup = ultimo_ref_lookup(ref_map, t, s) if ref_ar is not None else None
+        fal_final.extend(
+            falhas_buraco_por_serie(dados["nums_buraco"], t, s, ult_lookup)
+        )
 
     st.session_state.update(
         {
@@ -751,6 +837,25 @@ def filtrar_df_geral_para_exportacao(
     if len(filtro_operacao) > 0 and "Operação" in out.columns:
         out = out[out["Operação"].isin(filtro_operacao)]
     return out
+
+
+def excel_bytes_relatorio_bloco(df_filtrado: pd.DataFrame, chaves_bloco: set):
+    """Bytes de um .xlsx só com as linhas cujas Chave aparecem no bloco de XML (máx. 10k ficheiros)."""
+    if df_filtrado is None or df_filtrado.empty or not chaves_bloco:
+        return None
+    dfp = df_filtrado[df_filtrado["Chave"].isin(chaves_bloco)]
+    if dfp.empty:
+        return None
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        dfp.to_excel(writer, sheet_name="Filtrado", index=False)
+        rs = (
+            dfp.groupby("Status Final", dropna=False)
+            .size()
+            .reset_index(name="Quantidade")
+        )
+        rs.to_excel(writer, sheet_name="Resumo_status", index=False)
+    return buf.getvalue()
 
 
 def v2_opcoes_cascata_etapa3(
@@ -894,95 +999,6 @@ def v2_sanear_selecoes_contra_opcoes(
 def rotulo_download_zip_parte(caminho_ficheiro):
     m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
     return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
-
-
-def coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref):
-    """Só emissão própria; números no mês de referência e nos meses posteriores."""
-    agg = defaultdict(lambda: {"no_mes_ref": set(), "apos_ref": set()})
-    for r in relatorio:
-        if "EMITIDOS_CLIENTE" not in r.get("Pasta", ""):
-            continue
-        ano = r.get("Ano", "2000")
-        mes = r.get("Mes", "01")
-        if str(ano) == "0000":
-            continue
-        tipo = r.get("Tipo") or ""
-        ser = str(r.get("Série", "0"))
-        key = (tipo, ser)
-        stt = r.get("Status", "")
-        if stt == "INUTILIZADOS":
-            ra, rb = r.get("Range", (r.get("Número", 0), r.get("Número", 0)))
-            try:
-                ra, rb = int(ra), int(rb)
-            except (TypeError, ValueError):
-                continue
-            for n in range(ra, rb + 1):
-                if _ym_eq(ano, mes, ano_ref, mes_ref):
-                    agg[key]["no_mes_ref"].add(n)
-                elif _ym_gt(ano, mes, ano_ref, mes_ref):
-                    agg[key]["apos_ref"].add(n)
-        else:
-            try:
-                n = int(r.get("Número", 0) or 0)
-            except (TypeError, ValueError):
-                n = 0
-            if n <= 0:
-                continue
-            if _ym_eq(ano, mes, ano_ref, mes_ref):
-                agg[key]["no_mes_ref"].add(n)
-            elif _ym_gt(ano, mes, ano_ref, mes_ref):
-                agg[key]["apos_ref"].add(n)
-    return agg
-
-
-def montar_df_conferencia_sequencia(relatorio, ano_ref, mes_ref, ref_map):
-    """ref_map: chave 'Modelo|Série' -> último nº informado ao fim do mês de referência."""
-    linhas = []
-    agg = coletar_numeros_por_competencia_emitente(relatorio, ano_ref, mes_ref)
-    for kstr, ultimo_u in ref_map.items():
-        partes = kstr.split("|", 2)
-        if len(partes) < 2:
-            continue
-        tipo, ser = partes[0].strip(), partes[1].strip()
-        key = (tipo, ser)
-        bucket = agg.get(key, {"no_mes_ref": set(), "apos_ref": set()})
-        nr = bucket["no_mes_ref"]
-        ap = bucket["apos_ref"]
-        max_no_mes = max(nr) if nr else None
-        min_apos = min(ap) if ap else None
-        obs = []
-        if max_no_mes is None:
-            obs.append("Sem notas desta série no mês de referência nos XMLs.")
-        elif max_no_mes > ultimo_u:
-            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é maior que o último informado ({ultimo_u}).")
-        elif max_no_mes < ultimo_u:
-            obs.append(f"Máx. nos XMLs no mês ref. ({max_no_mes}) é menor que o último informado ({ultimo_u}).")
-        else:
-            obs.append("Máximo no mês de referência coincide com o último informado.")
-        esperado_proximo = ultimo_u + 1
-        if min_apos is None:
-            obs.append("Nenhuma nota após o mês de referência neste lote.")
-        elif min_apos > esperado_proximo:
-            obs.append(
-                f"Possível falta de sequência: primeiro nº após ref. nos XMLs é {min_apos}; esperado {esperado_proximo}."
-            )
-        elif min_apos < esperado_proximo:
-            obs.append(
-                f"Primeiro após ref. nos XMLs: {min_apos} (menor que {esperado_proximo} — verifique competência ou duplicados)."
-            )
-        else:
-            obs.append(f"Sequência coerente: primeiro após ref. = {esperado_proximo}.")
-        linhas.append(
-            {
-                "Modelo": tipo,
-                "Série": ser,
-                "Último informado (fim mês ref.)": ultimo_u,
-                "Máx. XML no mês ref.": max_no_mes if max_no_mes is not None else "—",
-                "Primeiro XML após ref.": min_apos if min_apos is not None else "—",
-                "Observações": " ".join(obs),
-            }
-        )
-    return pd.DataFrame(linhas)
 
 
 def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
@@ -1190,14 +1206,14 @@ PASSO A PASSO
 1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
 2. Envie ZIP ou XML soltos (volumes grandes são suportados). Depois do primeiro resultado, pode incluir mais ficheiros no topo da página, sem reiniciar o garimpo.
 3. Clique em Iniciar grande garimpo e aguarde a leitura.
-4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
+4. (Opcional) Na lateral: “Último nº por série” + mês/ano de referência — os **buracos** ignoram XMLs de meses anteriores e partem do último nº que indicou.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: em cada filtro, lista vazia = não filtra por esse critério (entra tudo o que os outros filtros permitem). Listas em cascata (ex.: só emissão própria → só séries da empresa). «Repor filtros»; pré-visualização; checkbox mês/terceiros; confirmação se exportar sem nenhum filtro. Excel sempre (tabela filtrada + resumo). ZIP: pode marcar pastas, raiz ou ambos; CSV opcional; até 10 mil XMLs por ZIP.
+7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel/CSV com o filtro completo são opcionais à parte.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
-• Emissão própria (CNPJ da sidebar = emitente): resumo por série, buracos na numeração, canceladas e inutilizadas; buracos são calculados por “trechos” para evitar listas falsamente enormes.
+• Emissão própria: resumo por série, buracos (com mês/último nº na lateral, só contam XMLs a partir da referência), canceladas e inutilizadas; trechos evitam listas falsamente enormes.
 • Terceiros: totalizador por tipo (NF-e, NFC-e, CT-e, MDF-e).
 • Um mesmo documento pode gerar mais do que um XML no disco (ex.: nota e evento) — o mesmo número de chaves pode corresponder a vários ficheiros.
 
@@ -1222,10 +1238,10 @@ with st.container():
                 <li><b>Lote:</b> Envie ZIP ou XML. Grandes volumes são suportados.</li>
                 <li><b>Garimpo:</b> Iniciar grande garimpo e aguardar.</li>
                 <li><b>Mais ficheiros:</b> No <b>topo dos resultados</b>, inclua XML/ZIP extra <b>sem reiniciar</b>.</li>
-                <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
+                <li><b>(Opcional)</b> Último nº por série + mês ref. (lateral) → buracos alinhados ao que indicou.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 — <b>vazio = sem filtro</b> nesse critério; cascata; «Repor filtros»; Excel sempre; ZIP com pastas e/ou tudo na raiz; CSV opcional; ou lista por chaves (col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 — ZIP em blocos de 10 000 XML (com Excel do bloco dentro); Excel/CSV do filtro completo opcionais à parte; ou lista por chaves (col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1236,7 +1252,7 @@ with st.container():
             <ul>
                 <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
                 <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
-                <li><b>Exportação:</b> Filtros em cascata na Etapa 3; Excel + ZIP(s) opcionais (pastas, raiz ou ambos); cada ZIP com no máximo 10 000 XMLs.</li>
+                <li><b>Exportação:</b> Etapa 3 — ZIP(s) com até 10 000 XML + Excel por bloco; relatório completo Excel/CSV opcional.</li>
                 <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
                 <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
@@ -1331,7 +1347,7 @@ with st.sidebar:
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
             st.caption(
                 "Última nota **emitida** por série até ao **fim** do mês abaixo. "
-                "**Guardar referência** grava tudo e ativa a conferência no ecrã principal."
+                "**Guardar referência** grava mês/ano e últimos nºs e passa a orientar o cálculo dos **buracos** (ignora XMLs mais antigos que esse mês)."
             )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
@@ -1353,7 +1369,7 @@ with st.sidebar:
                     else:
                         st.warning("Resumo por série ainda vazio.")
 
-            _opts = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
+            _opts = ["NF-e", "NFC-e", "CT-e"]
             _df_base = normalize_seq_ref_editor_df(st.session_state["seq_ref_rows"])
             _recs = (
                 _df_base.to_dict("records")
@@ -1386,16 +1402,26 @@ with st.sidebar:
                 '<div style="display:flex;gap:6px;font-size:0.65rem;font-weight:700;color:#ad1457;'
                 'text-transform:uppercase;letter-spacing:0.07em;margin:0 0 6px 0;opacity:0.92;'
                 'font-family:Plus Jakarta Sans,sans-serif;">'
-                '<span style="flex:1.4;min-width:0;">Documento</span>'
-                '<span style="flex:0.55;min-width:0;">Sér.</span>'
-                '<span style="flex:0.65;min-width:0;">Últ.</span></div>',
+                '<span style="flex:0.95;min-width:0;">Documento</span>'
+                '<span style="flex:0.5;min-width:0;">Sér.</span>'
+                '<span style="flex:1.2;min-width:0;">Últ.</span></div>',
                 unsafe_allow_html=True,
             )
 
             for i, row in enumerate(_recs):
-                modelo_cur = row.get("Modelo")
-                modelo_cur = modelo_cur if modelo_cur in _opts else "NF-e"
-                idx = _opts.index(modelo_cur)
+                modelo_raw = row.get("Modelo")
+                if modelo_raw is None or pd.isna(modelo_raw):
+                    modelo_cur = "NF-e"
+                else:
+                    modelo_cur = str(modelo_raw).strip()
+                if not modelo_cur or modelo_cur.lower() == "nan":
+                    modelo_cur = "NF-e"
+                if modelo_cur not in _opts:
+                    opts_row = _opts + [modelo_cur]
+                    idx = len(_opts)
+                else:
+                    opts_row = _opts
+                    idx = _opts.index(modelo_cur)
                 ser_raw = row.get("Série")
                 if ser_raw is None or (isinstance(ser_raw, float) and pd.isna(ser_raw)):
                     ser_cur = ""
@@ -1408,11 +1434,11 @@ with st.sidebar:
                     ult_cur = str(ult_raw).strip()
 
                 with st.container(border=True):
-                    c1, c2, c3 = st.columns([1.45, 0.55, 0.62], gap="small")
+                    c1, c2, c3 = st.columns([0.95, 0.5, 1.3], gap="small")
                     with c1:
                         st.selectbox(
                             "Documento",
-                            _opts,
+                            opts_row,
                             index=idx,
                             key=f"sr_{v}_{i}_m",
                             label_visibility="collapsed",
@@ -1432,8 +1458,8 @@ with st.sidebar:
                             value=ult_cur,
                             key=f"sr_{v}_{i}_u",
                             label_visibility="collapsed",
-                            max_chars=15,
-                            placeholder="•••",
+                            max_chars=18,
+                            placeholder="nº",
                         )
 
             b1, b2 = st.columns(2)
@@ -1472,6 +1498,8 @@ with st.sidebar:
                     st.warning(
                         "Preencha **documento**, **série** e **últ. nº** (> 0) em pelo menos um cartão e volte a guardar."
                     )
+                if st.session_state.get("garimpo_ok") and st.session_state.get("relatorio"):
+                    reconstruir_dataframes_relatorio_simples()
 
             with st.expander("Colar lista (várias séries de uma vez)", expanded=False):
                 st.caption("Uma linha por série: `NF-e|1|1520` (modelo | série | último nº).")
@@ -1560,6 +1588,7 @@ if st.session_state['confirmado']:
                 status_text.empty()
 
             rel_list = []
+            ref_ar, ref_mr, ref_map = buraco_ctx_sessao()
             audit_map = {}
             canc_list = []
             inut_list = []
@@ -1605,16 +1634,23 @@ if st.session_state['confirmado']:
                     sk = (res["Tipo"], res["Série"])
                     
                     if sk not in audit_map: 
-                        audit_map[sk] = {"nums": set(), "valor": 0.0}
+                        audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                    ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
                         
                     if res["Status"] == "INUTILIZADOS":
                         r = res.get("Range", (res["Número"], res["Número"]))
                         for n in range(r[0], r[1] + 1):
                             audit_map[sk]["nums"].add(n)
+                            if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                                audit_map[sk]["nums_buraco"].add(n)
                             inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
                     else:
                         if res["Número"] > 0:
                             audit_map[sk]["nums"].add(res["Número"])
+                            if numero_entra_conjunto_buraco(
+                                res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                            ):
+                                audit_map[sk]["nums_buraco"].add(res["Número"])
                             
                             if res["Status"] == "CANCELADOS":
                                 canc_list.append(registro_base)
@@ -1639,8 +1675,10 @@ if st.session_state['confirmado']:
                         "Quantidade": len(ns), 
                         "Valor Contábil (R$)": round(dados["valor"], 2)
                     })
-                    
-                    fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
+                ult_lookup = ultimo_ref_lookup(ref_map, t, s) if ref_ar is not None else None
+                fal_final.extend(
+                    falhas_buraco_por_serie(dados["nums_buraco"], t, s, ult_lookup)
+                )
 
             st.session_state.update({
                 'relatorio': rel_list,
@@ -1728,33 +1766,6 @@ if st.session_state['confirmado']:
             st.caption(f"Somatório geral (documentos lidos): {_df_terc['Quantidade'].sum()}")
             st.dataframe(_df_terc, use_container_width=True, hide_index=True)
 
-        if (
-            st.session_state.get("seq_ref_ultimos")
-            and st.session_state.get("seq_ref_ano") is not None
-            and st.session_state.get("seq_ref_mes") is not None
-        ):
-            st.markdown("### 🔗 Conferência de sequência (vs. mês de referência)")
-            ar = int(st.session_state["seq_ref_ano"])
-            mr = int(st.session_state["seq_ref_mes"])
-            st.caption(
-                f"Competência de referência: {ar}/{mr:02d}. "
-                "Só emissão própria; canceladas, autorizadas e inutilizadas entram na sequência."
-            )
-            df_seq = montar_df_conferencia_sequencia(
-                st.session_state["relatorio"], ar, mr, st.session_state["seq_ref_ultimos"]
-            )
-            if df_seq.empty:
-                st.info("Nenhuma série na referência para exibir.")
-            else:
-                st.dataframe(df_seq, use_container_width=True, hide_index=True)
-        else:
-            with st.expander("🔗 Conferência de sequência (opcional)", expanded=False):
-                st.markdown(
-                    "No menu lateral, em **Último nº por série**, escolha o mês/ano base e preencha a **tabela** "
-                    "(modelo, série, último número). Depois do garimpo pode usar **Puxar séries do resumo** para "
-                    "trazer modelo e série automaticamente — só falta digitar o último nº."
-                )
-        
         st.markdown("---")
         col_audit, col_canc, col_inut = st.columns(3)
         
@@ -1762,8 +1773,10 @@ if st.session_state['confirmado']:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
             st.caption(
-                "Somente emissão própria: o CNPJ do emitente do XML é o mesmo da sidebar (vale para NF-e de entrada e de saída emitidas pelo cliente). "
-                "Notas em que o cliente só é destinatário (terceiros) não entram nos buracos."
+                "Só **emissão própria** (emitente = CNPJ da sidebar). **Buracos** = números em falta na sequência. "
+                "Se na lateral guardou **mês/ano de referência** e **último nº por série**, os buracos ignoram XMLs de **meses anteriores** "
+                "a esse mês e começam a contar a partir do **último nº + 1** que indicou (assim ficheiros velhos no lote não estragam a análise). "
+                "Sem referência guardada, mantém-se a lógica antiga (todo o intervalo visto nos XMLs)."
             )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
@@ -1967,6 +1980,7 @@ if st.session_state['confirmado']:
                     else: 
                         lote_recalc[key] = (item, is_p)
 
+                ref_ar, ref_mr, ref_map = buraco_ctx_sessao()
                 audit_map = {}
                 canc_list = []
                 inut_list = []
@@ -2022,16 +2036,23 @@ if st.session_state['confirmado']:
                     if is_p:
                         sk = (res["Tipo"], res["Série"])
                         if sk not in audit_map: 
-                            audit_map[sk] = {"nums": set(), "valor": 0.0}
+                            audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                        ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
                             
                         if status_final == "INUTILIZADOS":
                             r = res.get("Range", (res["Número"], res["Número"]))
                             for n in range(r[0], r[1] + 1): 
                                 audit_map[sk]["nums"].add(n)
+                                if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                                    audit_map[sk]["nums_buraco"].add(n)
                                 inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
                         else:
                             if res["Número"] > 0:
                                 audit_map[sk]["nums"].add(res["Número"])
+                                if numero_entra_conjunto_buraco(
+                                    res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                                ):
+                                    audit_map[sk]["nums_buraco"].add(res["Número"])
                                 if status_final == "CANCELADOS": 
                                     canc_list.append(registro_detalhado)
                                 elif status_final == "NORMAIS": 
@@ -2054,7 +2075,10 @@ if st.session_state['confirmado']:
                             "Quantidade": len(ns), 
                             "Valor Contábil (R$)": round(dados["valor"], 2)
                         })
-                        fal_final.extend(enumerar_buracos_por_segmento(ns, t, s))
+                    ult_lookup = ultimo_ref_lookup(ref_map, t, s) if ref_ar is not None else None
+                    fal_final.extend(
+                        falhas_buraco_por_serie(dados["nums_buraco"], t, s, ult_lookup)
+                    )
                             
                 st.session_state.update({
                     'df_canceladas': pd.DataFrame(canc_list), 
@@ -2087,11 +2111,9 @@ if st.session_state['confirmado']:
 <b>1) Filtros (quem entra no Excel e nos XML)</b><br/>
 • Em <em>cada</em> lista, <b>deixar vazia</b> = <b>não há filtro</b> nesse critério — contam todas as linhas que os outros critérios ainda deixam passar.<br/>
 • <b>Listas dependentes:</b> ao escolher só «Emissão própria», por exemplo, Ano/mês, Modelo, Série, etc. mostram <b>só</b> valores que existem nessa origem no lote (não aparecem séries só de terceiros).<br/><br/>
-<b>2) Excel</b> — <b>sempre</b> é gerado: mesma tabela que resulta dos filtros (folha «Filtrado») + folha «Resumo_status».<br/><br/>
-<b>3) ZIP de XML</b> — marque o que precisa:<br/>
-• <b>Com pastas</b> = XML organizados em subpastas (como a estrutura do garimpo).<br/>
-• <b>Tudo na raiz</b> = todos os XML soltos no ZIP, <b>sem</b> pastas (nada separado por pasta).<br/>
-• Pode marcar <b>os dois</b> e recebe <b>dois</b> ZIPs. Se <b>nenhum</b> ZIP estiver marcado, só recebe Excel (+ CSV opcional).
+<b>2) ZIP de XML (até 10 000 ficheiros por parte)</b> — cada parte inclui <b>sempre</b> um Excel dentro da pasta <code>RELATORIO_GARIMPEIRO/</code> só com as linhas do filtro que correspondem àqueles XMLs (não é opcional).<br/>
+• <b>Com pastas</b> e/ou <b>tudo na raiz</b> — pode marcar um ou os dois tipos de ZIP.<br/><br/>
+<b>3) Excel / CSV do filtro completo</b> — <b>opcionais</b>: ficheiros à parte com <b>todas</b> as linhas do filtro (não entram nos ZIPs).
 </div>
             """,
             unsafe_allow_html=True,
@@ -2112,7 +2134,7 @@ if st.session_state['confirmado']:
         _fser = list(st.session_state.get("v2_f_ser") or [])
         _fst = list(st.session_state.get("v2_f_stat") or [])
         _fop = list(st.session_state.get("v2_f_op") or [])
-        _ap_mes = bool(st.session_state.get("v2_apenas_mes_propria", True))
+        _ap_mes = True
 
         _opts = v2_opcoes_cascata_etapa3(
             df_g_base,
@@ -2154,7 +2176,7 @@ if st.session_state['confirmado']:
                     "Ano / mês (vazio = todos)",
                     anos_meses,
                     key="v2_f_mes",
-                    help="Vazio = qualquer competência (respeitando o checkbox terceiros/mês). Lista só meses que ainda existem com os outros filtros.",
+                    help="Vazio = qualquer competência. Lista só meses que ainda existem com os outros filtros.",
                 )
             with f_col3:
                 filtro_modelos = st.multiselect(
@@ -2184,14 +2206,8 @@ if st.session_state['confirmado']:
                 for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
                     if _kx in st.session_state:
                         st.session_state[_kx] = []
-                st.session_state["v2_apenas_mes_propria"] = True
 
-        aplicar_mes_so_na_propria = st.checkbox(
-            "Com mês escolhido: não aplicar esse mês às linhas de terceiros",
-            value=True,
-            key="v2_apenas_mes_propria",
-            help="Desmarcado: o filtro Ano/mês aplica também a TERCEIROS.",
-        )
+        aplicar_mes_so_na_propria = True
 
         if operacoes_opts:
             filtro_operacao = st.multiselect(
@@ -2245,9 +2261,10 @@ if st.session_state['confirmado']:
         else:
             confirm_export_total = True
 
-        st.markdown("##### Formato dos ficheiros (Excel + ZIP + CSV)")
+        st.markdown("##### Formato da exportação")
         st.caption(
-            "O **Excel** usa sempre os filtros acima. Abaixo escolhe só **como** quer os ZIPs de XML e se quer também **CSV**."
+            "Cada **parte de ZIP** (até 10 000 XML) inclui **automaticamente** um Excel com só as linhas daquele bloco, "
+            "em `RELATORIO_GARIMPEIRO/`. À parte pode optar por descarregar Excel e/ou CSV com **todo** o resultado do filtro."
         )
         z1, z2 = st.columns(2)
         with z1:
@@ -2256,7 +2273,7 @@ if st.session_state['confirmado']:
                 "Gerar ZIP com XML **dentro de pastas** (organizado, igual à estrutura do garimpo)",
                 value=True,
                 key="v2_zip_org",
-                help="Cada XML fica no caminho Pasta/nome (emitido, ano, série…). Bom para volumes grandes e para não perder a organização.",
+                help="Cada parte tem até 10 000 XML + Excel do bloco na pasta RELATORIO_GARIMPEI/.",
             )
         with z2:
             st.markdown("**ZIP de XML — tudo junto, sem pastas**")
@@ -2264,22 +2281,28 @@ if st.session_state['confirmado']:
                 "Gerar ZIP com **todos os XML na raiz** (sem subpastas; nada separado por pasta)",
                 value=True,
                 key="v2_zip_plano",
-                help="Todos os ficheiros soltos no mesmo nível do ZIP. Simples de abrir; cuidado se dois XML tiverem o mesmo nome.",
+                help="Cada parte tem até 10 000 XML + o mesmo Excel do bloco em RELATORIO_GARIMPEI/.",
             )
+        st.markdown("**Relatório completo do filtro (opcional, fora dos ZIPs)**")
+        v2_excel_completo = st.checkbox(
+            "Gerar **Excel** com todas as linhas do filtro (descarregar à parte)",
+            value=False,
+            key="v2_excel_completo",
+        )
         v2_incl_csv = st.checkbox(
-            "Também gerar **CSV** (mesma tabela que a 1.ª folha do Excel, para abrir no Excel ou outro programa)",
+            "Gerar **CSV** com todas as linhas do filtro (descarregar à parte)",
             value=False,
             key="v2_incl_csv",
-            help="Ficheiro .csv com as mesmas colunas e linhas filtradas que a folha «Filtrado» do Excel.",
         )
 
-        if not v2_zip_org and not v2_zip_plano:
-            st.info("Nenhum tipo de ZIP marcado: só serão gerados **Excel** e, se marcou, **CSV**.")
+        _quer_alguma_saida = v2_zip_org or v2_zip_plano or v2_excel_completo or v2_incl_csv
+        if not _quer_alguma_saida:
+            st.info("Marque **pelo menos** um tipo de ZIP ou Excel/CSV completo.")
 
-        _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
+        _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty) or (not _quer_alguma_saida)
 
         if st.button(
-            "Gerar ficheiros (Excel, ZIP e CSV se marcou)",
+            "Gerar ficheiros (ZIPs com Excel por bloco; completo opcional)",
             type="primary",
             key="v2_btn_export",
             disabled=_btn_dis,
@@ -2295,27 +2318,30 @@ if st.session_state['confirmado']:
                 filtro_operacao,
             )
             if df_geral_filtrado is None or df_geral_filtrado.empty:
-                st.warning("Resultado filtrado: 0 linhas. Altere os multiselects ou o checkbox de mês/terceiros.")
+                st.warning("Resultado filtrado: 0 linhas. Altere os filtros (multiselects).")
             else:
-                with st.spinner("A gerar Excel, CSV e ZIPs…"):
+                with st.spinner("A gerar ZIPs (Excel por bloco) e ficheiros opcionais…"):
                     st.session_state["excel_buffer"] = None
                     st.session_state["export_csv_buffer"] = None
                     gc.collect()
 
                     ts = datetime.now().strftime("%Y%m%d_%H%M")
-                    st.session_state["export_excel_name"] = f"relatorio_{ts}.xlsx"
-                    st.session_state["export_csv_name"] = f"relatorio_{ts}.csv"
+                    st.session_state["export_excel_name"] = f"relatorio_completo_{ts}.xlsx"
+                    st.session_state["export_csv_name"] = f"relatorio_completo_{ts}.csv"
 
-                    buffer_excel = io.BytesIO()
-                    with pd.ExcelWriter(buffer_excel, engine="xlsxwriter") as writer:
-                        df_geral_filtrado.to_excel(writer, sheet_name="Filtrado", index=False)
-                        rs = (
-                            df_geral_filtrado.groupby("Status Final", dropna=False)
-                            .size()
-                            .reset_index(name="Quantidade")
-                        )
-                        rs.to_excel(writer, sheet_name="Resumo_status", index=False)
-                    st.session_state["excel_buffer"] = buffer_excel.getvalue()
+                    if v2_excel_completo:
+                        buffer_excel = io.BytesIO()
+                        with pd.ExcelWriter(buffer_excel, engine="xlsxwriter") as writer:
+                            df_geral_filtrado.to_excel(writer, sheet_name="Filtrado", index=False)
+                            rs = (
+                                df_geral_filtrado.groupby("Status Final", dropna=False)
+                                .size()
+                                .reset_index(name="Quantidade")
+                            )
+                            rs.to_excel(writer, sheet_name="Resumo_status", index=False)
+                        st.session_state["excel_buffer"] = buffer_excel.getvalue()
+                    else:
+                        st.session_state["excel_buffer"] = None
 
                     if v2_incl_csv:
                         buf_csv = io.StringIO()
@@ -2332,19 +2358,70 @@ if st.session_state['confirmado']:
                                 pass
 
                     filtro_chaves = set(df_geral_filtrado["Chave"].tolist())
-                    org_parts, todos_parts = [], []
-                    curr_org_part, curr_todos_part = 1, 1
-                    org_count, todos_count = 0, 0
-                    z_org, z_todos = None, None
+                    Z = {
+                        "z_org": None,
+                        "z_todos": None,
+                        "org_parts": [],
+                        "todos_parts": [],
+                        "org_count": 0,
+                        "todos_count": 0,
+                        "curr_org_part": 1,
+                        "curr_todos_part": 1,
+                        "chaves_bloco": set(),
+                        "seq_bloco": 1,
+                    }
+
+                    def _fechar_bloco_zip():
+                        excel_fn = (
+                            f"RELATORIO_GARIMPEIRO/relatorio_filtrado_pt{Z['seq_bloco']:03d}.xlsx"
+                        )
+                        xb = excel_bytes_relatorio_bloco(
+                            df_geral_filtrado, Z["chaves_bloco"]
+                        )
+                        if xb:
+                            if v2_zip_org and Z["z_org"] is not None:
+                                Z["z_org"].writestr(excel_fn, xb)
+                            if v2_zip_plano and Z["z_todos"] is not None:
+                                Z["z_todos"].writestr(excel_fn, xb)
+                        Z["chaves_bloco"].clear()
+                        Z["seq_bloco"] += 1
+                        if (
+                            v2_zip_org
+                            and Z["z_org"] is not None
+                            and Z["org_count"] >= MAX_XML_PER_ZIP
+                        ):
+                            try:
+                                Z["z_org"].close()
+                            except OSError:
+                                pass
+                            Z["curr_org_part"] += 1
+                            oname = f"z_org_final_pt{Z['curr_org_part']}.zip"
+                            Z["z_org"] = zipfile.ZipFile(oname, "w", zipfile.ZIP_DEFLATED)
+                            Z["org_parts"].append(oname)
+                            Z["org_count"] = 0
+                        if (
+                            v2_zip_plano
+                            and Z["z_todos"] is not None
+                            and Z["todos_count"] >= MAX_XML_PER_ZIP
+                        ):
+                            try:
+                                Z["z_todos"].close()
+                            except OSError:
+                                pass
+                            Z["curr_todos_part"] += 1
+                            tname = f"z_todos_final_pt{Z['curr_todos_part']}.zip"
+                            Z["z_todos"] = zipfile.ZipFile(tname, "w", zipfile.ZIP_DEFLATED)
+                            Z["todos_parts"].append(tname)
+                            Z["todos_count"] = 0
 
                     if v2_zip_org:
-                        org_name = f"z_org_final_pt{curr_org_part}.zip"
-                        z_org = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
-                        org_parts.append(org_name)
+                        org_name = f"z_org_final_pt{Z['curr_org_part']}.zip"
+                        Z["z_org"] = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+                        Z["org_parts"].append(org_name)
                     if v2_zip_plano:
-                        todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
-                        z_todos = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
-                        todos_parts.append(todos_name)
+                        todos_name = f"z_todos_final_pt{Z['curr_todos_part']}.zip"
+                        Z["z_todos"] = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+                        Z["todos_parts"].append(todos_name)
 
                     if os.path.exists(TEMP_UPLOADS_DIR) and (v2_zip_org or v2_zip_plano):
                         for f_name in os.listdir(TEMP_UPLOADS_DIR):
@@ -2353,50 +2430,66 @@ if st.session_state['confirmado']:
                                 for name, xml_data in extrair_recursivo(f_temp, f_name):
                                     res, _ = identify_xml_info(xml_data, cnpj_limpo, name)
                                     if res and res["Chave"] in filtro_chaves:
-                                        if v2_zip_org and z_org is not None:
-                                            if org_count >= MAX_XML_PER_ZIP:
-                                                z_org.close()
-                                                curr_org_part += 1
-                                                org_name = f"z_org_final_pt{curr_org_part}.zip"
-                                                z_org = zipfile.ZipFile(
-                                                    org_name, "w", zipfile.ZIP_DEFLATED
-                                                )
-                                                org_parts.append(org_name)
-                                                org_count = 0
-                                            z_org.writestr(f"{res['Pasta']}/{name}", xml_data)
-                                            org_count += 1
-                                        if v2_zip_plano and z_todos is not None:
-                                            if todos_count >= MAX_XML_PER_ZIP:
-                                                z_todos.close()
-                                                curr_todos_part += 1
-                                                todos_name = f"z_todos_final_pt{curr_todos_part}.zip"
-                                                z_todos = zipfile.ZipFile(
-                                                    todos_name, "w", zipfile.ZIP_DEFLATED
-                                                )
-                                                todos_parts.append(todos_name)
-                                                todos_count = 0
-                                            z_todos.writestr(name, xml_data)
-                                            todos_count += 1
+                                        Z["chaves_bloco"].add(res["Chave"])
+                                        if v2_zip_org and Z["z_org"] is not None:
+                                            Z["z_org"].writestr(
+                                                f"{res['Pasta']}/{name}", xml_data
+                                            )
+                                            Z["org_count"] += 1
+                                        if v2_zip_plano and Z["z_todos"] is not None:
+                                            Z["z_todos"].writestr(name, xml_data)
+                                            Z["todos_count"] += 1
+                                        limite = (
+                                            v2_zip_org
+                                            and Z["org_count"] >= MAX_XML_PER_ZIP
+                                        ) or (
+                                            v2_zip_plano
+                                            and Z["todos_count"] >= MAX_XML_PER_ZIP
+                                        )
+                                        if limite:
+                                            _fechar_bloco_zip()
                                     del xml_data
 
-                    if z_org is not None:
+                    if Z["chaves_bloco"] and (
+                        (v2_zip_org and Z["org_count"] > 0)
+                        or (v2_zip_plano and Z["todos_count"] > 0)
+                    ):
+                        excel_fn_last = (
+                            f"RELATORIO_GARIMPEIRO/relatorio_filtrado_pt{Z['seq_bloco']:03d}.xlsx"
+                        )
+                        xb_last = excel_bytes_relatorio_bloco(
+                            df_geral_filtrado, Z["chaves_bloco"]
+                        )
+                        if xb_last:
+                            if v2_zip_org and Z["z_org"] is not None and Z["org_count"] > 0:
+                                Z["z_org"].writestr(excel_fn_last, xb_last)
+                            if (
+                                v2_zip_plano
+                                and Z["z_todos"] is not None
+                                and Z["todos_count"] > 0
+                            ):
+                                Z["z_todos"].writestr(excel_fn_last, xb_last)
+
+                    if Z["z_org"] is not None:
                         try:
-                            z_org.close()
+                            Z["z_org"].close()
                         except OSError:
                             pass
-                    if z_todos is not None:
+                    if Z["z_todos"] is not None:
                         try:
-                            z_todos.close()
+                            Z["z_todos"].close()
                         except OSError:
                             pass
 
-                    if v2_zip_org and org_count == 0 and org_parts:
+                    org_parts = Z["org_parts"]
+                    todos_parts = Z["todos_parts"]
+                    if v2_zip_org and Z["org_count"] == 0 and org_parts:
                         try:
                             os.remove(org_parts[-1])
                         except OSError:
                             pass
                         org_parts = []
-                    if v2_zip_plano and todos_count == 0 and todos_parts:
+                    if v2_zip_plano and Z["todos_count"] == 0 and todos_parts:
                         try:
                             os.remove(todos_parts[-1])
                         except OSError:
@@ -2405,8 +2498,8 @@ if st.session_state['confirmado']:
 
                     st.session_state.update(
                         {
-                            "org_zip_parts": org_parts,
-                            "todos_zip_parts": todos_parts,
+                            "org_zip_parts": org_parts if v2_zip_org else [],
+                            "todos_zip_parts": todos_parts if v2_zip_plano else [],
                             "export_ready": True,
                         }
                     )
@@ -2420,7 +2513,9 @@ if st.session_state['confirmado']:
             _dl_i = 0
             if _parts_o:
                 st.markdown("### ZIP — XML **com pastas** (organizado)")
-                st.caption("Estrutura com subpastas; cada parte tem no máximo 10 000 XMLs.")
+                st.caption(
+                    "Até 10 000 XMLs por ficheiro; dentro de cada ZIP: pasta **RELATORIO_GARIMPEIRO/** com Excel só desse bloco."
+                )
                 for row in chunk_list(_parts_o, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
@@ -2436,7 +2531,9 @@ if st.session_state['confirmado']:
                                 )
             if _parts_t:
                 st.markdown("### ZIP — **só ficheiros** (tudo na raiz, sem pastas)")
-                st.caption("Todos os XML soltos; cada parte tem no máximo 10 000 XMLs.")
+                st.caption(
+                    "Até 10 000 XMLs na raiz por ficheiro; **RELATORIO_GARIMPEIRO/** com Excel do mesmo bloco."
+                )
                 for row in chunk_list(_parts_t, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
@@ -2454,18 +2551,22 @@ if st.session_state['confirmado']:
             _xbuf = st.session_state.get("excel_buffer")
             if _xbuf:
                 st.download_button(
-                    "Descarregar Excel",
+                    "Descarregar Excel completo (todo o filtro)",
                     _xbuf,
-                    file_name=st.session_state.get("export_excel_name", "relatorio.xlsx"),
+                    file_name=st.session_state.get(
+                        "export_excel_name", "relatorio_completo.xlsx"
+                    ),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="v2_dl_xlsx",
                     use_container_width=True,
                 )
             if st.session_state.get("export_csv_buffer"):
                 st.download_button(
-                    "Descarregar CSV (mesma tabela que no Excel)",
+                    "Descarregar CSV completo (todo o filtro)",
                     st.session_state["export_csv_buffer"],
-                    file_name=st.session_state.get("export_csv_name", "relatorio.csv"),
+                    file_name=st.session_state.get(
+                        "export_csv_name", "relatorio_completo.csv"
+                    ),
                     mime="text/csv",
                     key="v2_dl_csv",
                     use_container_width=True,
