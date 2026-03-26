@@ -1262,11 +1262,89 @@ def _nome_xml_raiz_zip_unico(usados, nome_arquivo):
         k += 1
 
 
-def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
-    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada), XMLs todos na raiz do ZIP. Retorna (lista_caminhos, total_xml)."""
+def _chave44_digitos(ch):
+    d = "".join(filter(str.isdigit, str(ch or "")))
+    if len(d) >= 44:
+        return d[:44]
+    return None
+
+
+def _excel_bytes_lista_especifica(df_geral, chaves_ordem_unicas):
+    """
+    Excel com número, série, chave, status, etc., alinhado ao relatório geral.
+    chaves_ordem_unicas: ordem estável das chaves 44 dígitos neste lote ZIP.
+    """
+    if not chaves_ordem_unicas:
+        return None
+    cols_pref = [
+        "Modelo",
+        "Série",
+        "Nota",
+        "Chave",
+        "Status Final",
+        "Origem",
+        "Operação",
+        "Data Emissão",
+        "CNPJ Emitente",
+        "Nome Emitente",
+        "Valor",
+        "Ano",
+        "Mes",
+    ]
+    por_chave = {}
+    if df_geral is not None and not df_geral.empty and "Chave" in df_geral.columns:
+        dfc = df_geral.copy()
+        dfc["_k44"] = dfc["Chave"].map(_chave44_digitos)
+        dfc = dfc[dfc["_k44"].notna()]
+        dfc = dfc.drop_duplicates(subset=["_k44"], keep="first")
+        for _, row in dfc.iterrows():
+            k44 = row["_k44"]
+            por_chave[k44] = row.drop(labels=["_k44"], errors="ignore")
+
+    rows = []
+    vistos = set()
+    for ch in chaves_ordem_unicas:
+        if not ch or ch in vistos:
+            continue
+        vistos.add(ch)
+        if ch in por_chave:
+            rows.append(por_chave[ch].to_dict())
+        else:
+            rows.append({"Chave": ch})
+
+    out = pd.DataFrame(rows)
+    cols = [c for c in cols_pref if c in out.columns] + [
+        c for c in out.columns if c not in cols_pref
+    ]
+    out = out[[c for c in cols if c in out.columns]]
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        out.to_excel(writer, sheet_name="Lista", index=False)
+    return buf.getvalue()
+
+
+def _zip_anexar_excel_lista_especifica(zf, df_geral, chaves_ordem, idx_parte):
+    if not chaves_ordem:
+        return
+    xb = _excel_bytes_lista_especifica(df_geral, chaves_ordem)
+    if xb:
+        zf.writestr(
+            f"RELATORIO_GARIMPEIRO/lista_especifica_pt{idx_parte:03d}.xlsx",
+            xb,
+        )
+
+
+def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista, df_geral=None):
+    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada); XMLs na raiz; Excel do lote em RELATORIO_GARIMPEIRO/. Retorna (lista_caminhos, total_xml)."""
     if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
         return [], 0
-    ch_set = set(chaves_lista)
+    ch_set = set()
+    for c in chaves_lista:
+        k = _chave44_digitos(c)
+        if k:
+            ch_set.add(k)
+    if not ch_set:
+        return [], 0
     try:
         for f in os.listdir("."):
             if f.endswith(".zip") and "faltantes_dominio_final" in f:
@@ -1285,6 +1363,8 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
     zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
     parts.append(nome)
     usados_nomes_parte = set()
+    chaves_excel_ordem = []
+    vistos_chave_excel = set()
 
     try:
         for fn in os.listdir(TEMP_UPLOADS_DIR):
@@ -1292,8 +1372,12 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
             with open(f_path, "rb") as ft:
                 for name, data in extrair_recursivo(ft, fn):
                     res, _ = identify_xml_info(data, cnpj_limpo, name)
-                    if res and res["Chave"] in ch_set:
+                    ch44 = _chave44_digitos(res.get("Chave")) if res else None
+                    if res and ch44 and ch44 in ch_set:
                         if no_lote >= MAX_XML_PER_ZIP:
+                            _zip_anexar_excel_lista_especifica(
+                                zf, df_geral, chaves_excel_ordem, part_idx
+                            )
                             zf.close()
                             part_idx += 1
                             nome = f"faltantes_dominio_final_pt{part_idx}.zip"
@@ -1301,10 +1385,19 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
                             parts.append(nome)
                             no_lote = 0
                             usados_nomes_parte = set()
+                            chaves_excel_ordem = []
+                            vistos_chave_excel = set()
                         arc = _nome_xml_raiz_zip_unico(usados_nomes_parte, name)
                         zf.writestr(arc, data)
+                        if ch44 not in vistos_chave_excel:
+                            vistos_chave_excel.add(ch44)
+                            chaves_excel_ordem.append(ch44)
                         count_xml += 1
                         no_lote += 1
+        if count_xml > 0:
+            _zip_anexar_excel_lista_especifica(
+                zf, df_geral, chaves_excel_ordem, part_idx
+            )
     finally:
         try:
             zf.close()
@@ -2412,10 +2505,10 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
         st.markdown("### ⚙️ Etapa 3: filtros e exportação")
-        st.markdown(
-            """
+        with st.expander("Como isto funciona", expanded=False):
+            st.markdown(
+                """
 <div style="background:#fff8fc;border:1px solid #f8bbd9;border-radius:10px;padding:14px 16px;margin-bottom:14px;font-size:0.93rem;line-height:1.55;color:#333;">
-<strong style="color:#c2185b;">Como isto funciona</strong><br/><br/>
 <b>1) Filtros (quem entra no Excel e nos XML)</b><br/>
 • Em <em>cada</em> lista, <b>deixar vazia</b> = <b>não há filtro</b> nesse critério — contam todas as linhas que os outros critérios ainda deixam passar.<br/>
 • <b>Listas dependentes:</b> ao escolher só «Emissão própria», por exemplo, Ano/mês, Modelo, Série, etc. mostram <b>só</b> valores que existem nessa origem no lote (não aparecem séries só de terceiros).<br/><br/>
@@ -2423,9 +2516,9 @@ if st.session_state['confirmado']:
 • <b>Com pastas</b> e/ou <b>tudo na raiz</b> — pode marcar um ou os dois tipos de ZIP.<br/><br/>
 <b>3) Excel do filtro completo</b> — <b>opcional</b>: ficheiro à parte com <b>todas</b> as linhas do filtro (não entra nos ZIPs).
 </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.markdown("##### Quem entra na exportação (filtros)")
         st.caption("Origem é a única com só 2 opções fixas; as outras listas mudam conforme o que já escolheu acima.")
@@ -2861,7 +2954,11 @@ if st.session_state['confirmado']:
                         if not chaves_lidas:
                             st.warning("⚠️ Nenhuma chave válida (44 dígitos) na primeira coluna.")
                         else:
-                            partes, n_xml = escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lidas)
+                            partes, n_xml = escrever_zip_dominio_por_chaves(
+                                cnpj_limpo,
+                                chaves_lidas,
+                                st.session_state.get("df_geral"),
+                            )
                             if partes and n_xml > 0:
                                 st.session_state["ch_falt_dom"] = chaves_lidas
                                 st.session_state["zip_dom_parts"] = partes
@@ -2921,7 +3018,7 @@ if st.session_state['confirmado']:
                                     )
                                 else:
                                     partes, n_xml = escrever_zip_dominio_por_chaves(
-                                        cnpj_limpo, ch_ns
+                                        cnpj_limpo, ch_ns, df_base
                                     )
                                     if partes and n_xml > 0:
                                         st.session_state["ch_falt_dom"] = ch_ns
@@ -2967,7 +3064,7 @@ if st.session_state['confirmado']:
                             )
                         else:
                             partes, n_xml = escrever_zip_dominio_por_chaves(
-                                cnpj_limpo, ch_per
+                                cnpj_limpo, ch_per, df_base
                             )
                             if partes and n_xml > 0:
                                 st.session_state["ch_falt_dom"] = ch_per
@@ -3029,7 +3126,7 @@ if st.session_state['confirmado']:
                                     )
                                 else:
                                     partes, n_xml = escrever_zip_dominio_por_chaves(
-                                        cnpj_limpo, ch_f
+                                        cnpj_limpo, ch_f, df_base
                                     )
                                     if partes and n_xml > 0:
                                         st.session_state["ch_falt_dom"] = ch_f
@@ -3088,7 +3185,7 @@ if st.session_state['confirmado']:
                                 )
                             else:
                                 partes, n_xml = escrever_zip_dominio_por_chaves(
-                                    cnpj_limpo, ch_u
+                                    cnpj_limpo, ch_u, df_base
                                 )
                                 if partes and n_xml > 0:
                                     st.session_state["ch_falt_dom"] = ch_u
@@ -3104,7 +3201,10 @@ if st.session_state['confirmado']:
                                     )
 
             if st.session_state.get("zip_dom_parts"):
-                st.caption(f"Cada ficheiro tem no máximo {MAX_XML_PER_ZIP} XMLs.")
+                st.caption(
+                    f"Cada ZIP tem no máximo {MAX_XML_PER_ZIP} XMLs na raiz e um Excel em "
+                    "**RELATORIO_GARIMPEIRO/** (`lista_especifica_ptXXX.xlsx`) com modelo, série, nota, chave, status, etc."
+                )
                 for row in chunk_list(st.session_state["zip_dom_parts"], 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
