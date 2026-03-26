@@ -1102,7 +1102,7 @@ PASSO A PASSO
 4. (Opcional) Na lateral: “Último nº por série” — define o mês de referência e a tabela; no ecrã aparece a conferência de sequência em relação aos XMLs.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: multiselects em cascata; «Repor filtros»; pré-visualização; checkbox mês/terceiros; confirmação se exportar com tudo vazio. Excel; CSV opcional (mesma tabela que a primeira folha do Excel); ZIP com pastas ou ZIP só com ficheiros na raiz; até 10 mil XMLs por ZIP.
+7. Etapa 3: em cada filtro, lista vazia = não filtra por esse critério (entra tudo o que os outros filtros permitem). Listas em cascata (ex.: só emissão própria → só séries da empresa). «Repor filtros»; pré-visualização; checkbox mês/terceiros; confirmação se exportar sem nenhum filtro. Excel sempre (tabela filtrada + resumo). ZIP: pode marcar pastas, raiz ou ambos; CSV opcional; até 10 mil XMLs por ZIP.
 8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
 
 O QUE O SISTEMA FAZ
@@ -1113,7 +1113,7 @@ O QUE O SISTEMA FAZ
 DICAS
 • Resetar sistema limpa sessão e temporários; use se trocar de cliente ou quiser recomeçar do zero.
 • Modelos na app: NF-e, NFC-e, CT-e, MDF-e (use estes nomes nas tabelas e colagens).
-• Etapa 3: seleções inválidas após mudar um filtro (ex.: série que só existia em terceiros) são limpas automaticamente.
+• Etapa 3: lista vazia num critério = esse critério não corta nada. Seleções que deixam de existir após mudar outro filtro são limpas automaticamente.
 """.strip()
 
 
@@ -1134,7 +1134,7 @@ with st.container():
                 <li><b>(Opcional)</b> Último nº por série (lateral) → conferência de sequência no ecrã.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 — multiselects em <b>cascata</b>, «Repor filtros», Excel, ZIP (pastas ou tudo solto) e CSV opcional; ou lista específica (chaves na col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 — <b>vazio = sem filtro</b> nesse critério; cascata; «Repor filtros»; Excel sempre; ZIP com pastas e/ou tudo na raiz; CSV opcional; ou lista por chaves (col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1145,7 +1145,7 @@ with st.container():
             <ul>
                 <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
                 <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
-                <li><b>Exportação filtrada:</b> Relatório geral da sessão, com filtros em cascata na Etapa 3; cada ZIP com no máximo 10 000 XMLs.</li>
+                <li><b>Exportação:</b> Filtros em cascata na Etapa 3; Excel + ZIP(s) opcionais (pastas, raiz ou ambos); cada ZIP com no máximo 10 000 XMLs.</li>
                 <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
                 <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
@@ -1888,10 +1888,25 @@ if st.session_state['confirmado']:
         # ETAPA 3: FILTROS E EXPORTAÇÃO
         # =====================================================================
         st.markdown("### ⚙️ Etapa 3: filtros e exportação")
-        st.caption(
-            "Listas em cascata: Ano/mês, Modelo, Série, Status e Operação mostram só o que ainda existe "
-            "no relatório com os filtros que já escolheu (ex.: só «Emissão própria» → só as séries da sua empresa no lote)."
+        st.markdown(
+            """
+<div style="background:#fff8fc;border:1px solid #f8bbd9;border-radius:10px;padding:14px 16px;margin-bottom:14px;font-size:0.93rem;line-height:1.55;color:#333;">
+<strong style="color:#c2185b;">Como isto funciona</strong><br/><br/>
+<b>1) Filtros (quem entra no Excel e nos XML)</b><br/>
+• Em <em>cada</em> lista, <b>deixar vazia</b> = <b>não há filtro</b> nesse critério — contam todas as linhas que os outros critérios ainda deixam passar.<br/>
+• <b>Listas dependentes:</b> ao escolher só «Emissão própria», por exemplo, Ano/mês, Modelo, Série, etc. mostram <b>só</b> valores que existem nessa origem no lote (não aparecem séries só de terceiros).<br/><br/>
+<b>2) Excel</b> — <b>sempre</b> é gerado: mesma tabela que resulta dos filtros (folha «Filtrado») + folha «Resumo_status».<br/><br/>
+<b>3) ZIP de XML</b> — marque o que precisa:<br/>
+• <b>Com pastas</b> = XML organizados em subpastas (como a estrutura do garimpo).<br/>
+• <b>Tudo na raiz</b> = todos os XML soltos no ZIP, <b>sem</b> pastas (nada separado por pasta).<br/>
+• Pode marcar <b>os dois</b> e recebe <b>dois</b> ZIPs. Se <b>nenhum</b> ZIP estiver marcado, só recebe Excel (+ CSV opcional).
+</div>
+            """,
+            unsafe_allow_html=True,
         )
+
+        st.markdown("##### Quem entra na exportação (filtros)")
+        st.caption("Origem é a única com só 2 opções fixas; as outras listas mudam conforme o que já escolheu acima.")
 
         for _k_v2 in ("v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"):
             if _k_v2 not in st.session_state:
@@ -1937,38 +1952,38 @@ if st.session_state['confirmado']:
             f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
             with f_col1:
                 filtro_origem = st.multiselect(
-                    "Origem",
+                    "Origem (vazio = própria e terceiros)",
                     todas_origens,
                     key="v2_f_orig",
-                    help="Várias origens = união. Própria = emitente = CNPJ da sidebar.",
+                    help="Vazio = não filtra origem. Com opções = só essas. Própria = emitente = CNPJ da sidebar.",
                 )
             with f_col2:
                 filtro_meses = st.multiselect(
-                    "Ano / mês",
+                    "Ano / mês (vazio = todos)",
                     anos_meses,
                     key="v2_f_mes",
-                    help="Competências a partir da data de emissão dos XML desta sessão.",
+                    help="Vazio = qualquer competência (respeitando o checkbox terceiros/mês). Lista só meses que ainda existem com os outros filtros.",
                 )
             with f_col3:
                 filtro_modelos = st.multiselect(
-                    "Modelo",
+                    "Modelo (vazio = todos)",
                     modelos,
                     key="v2_f_mod",
-                    help="Ex.: NF-e e NFC-e em simultâneo.",
+                    help="Vazio = todos os modelos permitidos pelos outros filtros.",
                 )
             with f_col4:
                 filtro_series = st.multiselect(
-                    "Série",
+                    "Série (vazio = todas)",
                     series,
                     key="v2_f_ser",
-                    help="Só séries que existem nas linhas já filtradas pelas outras colunas (ex.: própria vs terceiros).",
+                    help="Vazio = todas as séries permitidas pelos filtros acima (ex.: só emissão própria → só séries da empresa).",
                 )
             with f_col5:
                 filtro_status = st.multiselect(
-                    "Status",
+                    "Status (vazio = todos)",
                     status_opcoes,
                     key="v2_f_stat",
-                    help="Coluna Status Final na exportação.",
+                    help="Vazio = todos os status. Coluna «Status Final» na exportação.",
                 )
 
         _c_rep, _ = st.columns([1, 5])
@@ -1988,10 +2003,10 @@ if st.session_state['confirmado']:
 
         if operacoes_opts:
             filtro_operacao = st.multiselect(
-                "Operação",
+                "Operação (vazio = entrada e saída)",
                 operacoes_opts,
                 key="v2_f_op",
-                help="Valores do XML; várias = união.",
+                help="Vazio = não filtra por operação. Várias opções = união.",
             )
         else:
             filtro_operacao = []
@@ -2014,8 +2029,8 @@ if st.session_state['confirmado']:
         )
         _n_tot = len(df_g_base) if not df_g_base.empty else 0
         st.caption(
-            f"Pré-visualização: **{_n_lin}** linhas na exportação · **{_n_ch}** chaves distintas · "
-            f"**{_n_tot}** linhas no relatório geral (sem filtros)"
+            f"**Pré-visualização:** **{_n_lin}** linhas vão para o Excel/XML · **{_n_ch}** chaves distintas · "
+            f"**{_n_tot}** linhas no relatório geral se não usasse filtros"
         )
 
         nenhum_filtro = (
@@ -2038,31 +2053,36 @@ if st.session_state['confirmado']:
         else:
             confirm_export_total = True
 
-        ox1, ox2, ox3 = st.columns(3)
-        with ox1:
+        st.markdown("##### Formato dos ficheiros (Excel + ZIP + CSV)")
+        st.caption(
+            "O **Excel** usa sempre os filtros acima. Abaixo escolhe só **como** quer os ZIPs de XML e se quer também **CSV**."
+        )
+        z1, z2 = st.columns(2)
+        with z1:
+            st.markdown("**ZIP de XML — com pastas**")
             v2_zip_org = st.checkbox(
-                "ZIP organizado em pastas (igual à estrutura dos XML)",
+                "Gerar ZIP com XML **dentro de pastas** (organizado, igual à estrutura do garimpo)",
                 value=True,
                 key="v2_zip_org",
-                help="Cada ficheiro fica dentro das pastas (emitido/recebido, ano, série, etc.). Melhor para não misturar milhares de XML no mesmo sítio.",
+                help="Cada XML fica no caminho Pasta/nome (emitido, ano, série…). Bom para volumes grandes e para não perder a organização.",
             )
-        with ox2:
+        with z2:
+            st.markdown("**ZIP de XML — tudo junto, sem pastas**")
             v2_zip_plano = st.checkbox(
-                "ZIP só com ficheiros (tudo na raiz, sem pastas dentro)",
+                "Gerar ZIP com **todos os XML na raiz** (sem subpastas; nada separado por pasta)",
                 value=True,
                 key="v2_zip_plano",
-                help="Todos os XML aparecem soltos, lado a lado. Mais simples de ver, mas se dois XML tiverem o mesmo nome um pode substituir o outro.",
+                help="Todos os ficheiros soltos no mesmo nível do ZIP. Simples de abrir; cuidado se dois XML tiverem o mesmo nome.",
             )
-        with ox3:
-            v2_incl_csv = st.checkbox(
-                "Também gerar CSV (tabela para Excel ou outros programas)",
-                value=False,
-                key="v2_incl_csv",
-                help="É a mesma tabela que a primeira folha do Excel exportado (os dados já filtrados), só que em ficheiro .csv em vez de .xlsx.",
-            )
+        v2_incl_csv = st.checkbox(
+            "Também gerar **CSV** (mesma tabela que a 1.ª folha do Excel, para abrir no Excel ou outro programa)",
+            value=False,
+            key="v2_incl_csv",
+            help="Ficheiro .csv com as mesmas colunas e linhas filtradas que a folha «Filtrado» do Excel.",
+        )
 
         if not v2_zip_org and not v2_zip_plano:
-            st.caption("Nenhum ZIP marcado: gera só o Excel e, se quiser, o CSV.")
+            st.info("Nenhum tipo de ZIP marcado: só serão gerados **Excel** e, se marcou, **CSV**.")
 
         _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty)
 
@@ -2207,8 +2227,8 @@ if st.session_state['confirmado']:
             _parts_t = st.session_state.get("todos_zip_parts") or []
             _dl_i = 0
             if _parts_o:
-                st.markdown("### ZIP com subpastas (entrada: campo Pasta + nome do XML)")
-                st.caption("Cada parte ≤ 10 000 XMLs.")
+                st.markdown("### ZIP — XML **com pastas** (organizado)")
+                st.caption("Estrutura com subpastas; cada parte tem no máximo 10 000 XMLs.")
                 for row in chunk_list(_parts_o, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
@@ -2223,8 +2243,8 @@ if st.session_state['confirmado']:
                                     use_container_width=True,
                                 )
             if _parts_t:
-                st.markdown("### ZIP sem subpastas (entrada: só nome do ficheiro)")
-                st.caption("Cada parte ≤ 10 000 XMLs.")
+                st.markdown("### ZIP — **só ficheiros** (tudo na raiz, sem pastas)")
+                st.caption("Todos os XML soltos; cada parte tem no máximo 10 000 XMLs.")
                 for row in chunk_list(_parts_t, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
