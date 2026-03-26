@@ -675,6 +675,13 @@ def item_registro_manual_inutilizado(cnpj_limpo, tipo_man, serie_man, nota_man):
     }
 
 
+def _inutil_sem_xml_manual(res):
+    """Inutilização declarada em «sem XML» — deve fechar buraco (não depender de Ano/Mês 0000)."""
+    return res.get("Arquivo") == "REGISTRO_MANUAL" or str(
+        res.get("Chave") or ""
+    ).startswith("MANUAL_INUT_")
+
+
 def parse_linhas_inutil_manual(text):
     """Linhas: MODELO|SÉRIE|NÚMERO (pipes opcionais com espaços)."""
     triplas = []
@@ -759,9 +766,10 @@ def reconstruir_dataframes_relatorio_simples():
 
             if res["Status"] == "INUTILIZADOS":
                 r = res.get("Range", (res["Número"], res["Número"]))
+                _man_inut = _inutil_sem_xml_manual(res)
                 for n in range(r[0], r[1] + 1):
                     audit_map[sk]["nums"].add(n)
-                    if incluir_numero_no_conjunto_buraco(
+                    if _man_inut or incluir_numero_no_conjunto_buraco(
                         res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
                     ):
                         audit_map[sk]["nums_buraco"].add(n)
@@ -1234,8 +1242,28 @@ def chaves_agregadas_de_excel_faixas(df_geral, faixas_lista, modelo):
     return ordenadas, False
 
 
+def _nome_xml_raiz_zip_unico(usados, nome_arquivo):
+    """Nome dentro do ZIP só na raiz; evita colisão se houver ficheiros homónimos."""
+    base = os.path.basename(str(nome_arquivo).replace("\\", "/"))
+    if not base or base in (".", ".."):
+        base = "documento.xml"
+    if base not in usados:
+        usados.add(base)
+        return base
+    stem, ext = os.path.splitext(base)
+    if not ext:
+        ext = ".xml"
+    k = 2
+    while True:
+        cand = f"{stem}_{k}{ext}"
+        if cand not in usados:
+            usados.add(cand)
+            return cand
+        k += 1
+
+
 def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
-    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada). Retorna (lista_caminhos, total_xml)."""
+    """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada), XMLs todos na raiz do ZIP. Retorna (lista_caminhos, total_xml)."""
     if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
         return [], 0
     ch_set = set(chaves_lista)
@@ -1256,6 +1284,7 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
     nome = f"faltantes_dominio_final_pt{part_idx}.zip"
     zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
     parts.append(nome)
+    usados_nomes_parte = set()
 
     try:
         for fn in os.listdir(TEMP_UPLOADS_DIR):
@@ -1271,7 +1300,9 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
                             zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
                             parts.append(nome)
                             no_lote = 0
-                        zf.writestr(f"{res['Pasta']}/{name}", data)
+                            usados_nomes_parte = set()
+                        arc = _nome_xml_raiz_zip_unico(usados_nomes_parte, name)
+                        zf.writestr(arc, data)
                         count_xml += 1
                         no_lote += 1
     finally:
@@ -1896,9 +1927,10 @@ if st.session_state['confirmado']:
                         
                     if res["Status"] == "INUTILIZADOS":
                         r = res.get("Range", (res["Número"], res["Número"]))
+                        _man_inut = _inutil_sem_xml_manual(res)
                         for n in range(r[0], r[1] + 1):
                             audit_map[sk]["nums"].add(n)
-                            if incluir_numero_no_conjunto_buraco(
+                            if _man_inut or incluir_numero_no_conjunto_buraco(
                                 res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
                             ):
                                 audit_map[sk]["nums_buraco"].add(n)
@@ -2309,9 +2341,10 @@ if st.session_state['confirmado']:
                             
                         if status_final == "INUTILIZADOS":
                             r = res.get("Range", (res["Número"], res["Número"]))
+                            _man_inut = _inutil_sem_xml_manual(res)
                             for n in range(r[0], r[1] + 1): 
                                 audit_map[sk]["nums"].add(n)
-                                if incluir_numero_no_conjunto_buraco(
+                                if _man_inut or incluir_numero_no_conjunto_buraco(
                                     res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
                                 ):
                                     audit_map[sk]["nums_buraco"].add(n)
@@ -2753,9 +2786,6 @@ if st.session_state['confirmado']:
             _dl_i = 0
             if _parts_o:
                 st.markdown("### ZIP — XML **com pastas** (organizado)")
-                st.caption(
-                    "Até 10 000 XMLs por ficheiro; dentro de cada ZIP: pasta **RELATORIO_GARIMPEIRO/** com Excel só desse bloco."
-                )
                 for row in chunk_list(_parts_o, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
@@ -2771,9 +2801,6 @@ if st.session_state['confirmado']:
                                 )
             if _parts_t:
                 st.markdown("### ZIP — **só ficheiros** (tudo na raiz, sem pastas)")
-                st.caption(
-                    "Até 10 000 XMLs na raiz por ficheiro; **RELATORIO_GARIMPEIRO/** com Excel do mesmo bloco."
-                )
                 for row in chunk_list(_parts_t, 3):
                     cols = st.columns(len(row))
                     for idx, part in enumerate(row):
