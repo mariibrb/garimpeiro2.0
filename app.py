@@ -9,6 +9,7 @@ import gc
 import shutil
 import pdfplumber
 from collections import Counter, defaultdict
+from calendar import monthrange
 from datetime import date, datetime
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
@@ -461,17 +462,34 @@ def _ym_lt(ano_a, mes_a, ano_b, mes_b):
 
 
 def buraco_ctx_sessao():
-    """Mês/ano de referência e mapa último nº por Modelo|Série na sessão Streamlit."""
+    """
+    Só activa regras especiais de buracos quando existe **pelo menos um** último nº guardado
+    (Guardar referência com linhas válidas). Sem isso, buracos usam toda a numeração lida — como antes.
+    """
     try:
+        rmap = st.session_state.get("seq_ref_ultimos")
+        rm = dict(rmap) if isinstance(rmap, dict) and rmap else {}
+        if not rm:
+            return None, None, {}
         ar = st.session_state.get("seq_ref_ano")
         mr = st.session_state.get("seq_ref_mes")
-        rmap = st.session_state.get("seq_ref_ultimos")
         if ar is None or mr is None:
             return None, None, {}
-        rm = dict(rmap) if isinstance(rmap, dict) and rmap else {}
         return int(ar), int(mr), rm
     except Exception:
         return None, None, {}
+
+
+def incluir_numero_no_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u):
+    """
+    Com referência activa: séries **com** último informado usam mês/âncora; séries **sem** linha na
+    referência comportam-se como leitura total só nos buracos (não cortam meses anteriores).
+    """
+    if ref_ar is None or ref_mr is None:
+        return True
+    if ultimo_u is None:
+        return True
+    return numero_entra_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u)
 
 
 def ultimo_ref_lookup(ref_map, tipo, serie):
@@ -744,14 +762,21 @@ def reconstruir_dataframes_relatorio_simples():
                 r = res.get("Range", (res["Número"], res["Número"]))
                 for n in range(r[0], r[1] + 1):
                     audit_map[sk]["nums"].add(n)
-                    if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                    if incluir_numero_no_conjunto_buraco(
+                        res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                    ):
                         audit_map[sk]["nums_buraco"].add(n)
                     inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
             else:
                 if res["Número"] > 0:
                     audit_map[sk]["nums"].add(res["Número"])
-                    if numero_entra_conjunto_buraco(
-                        res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                    if incluir_numero_no_conjunto_buraco(
+                        res["Ano"],
+                        res["Mes"],
+                        res["Número"],
+                        ref_ar,
+                        ref_mr,
+                        ult_u,
                     ):
                         audit_map[sk]["nums_buraco"].add(res["Número"])
                     if res["Status"] == "CANCELADOS":
@@ -1198,6 +1223,127 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
     return parts, count_xml
 
 
+_MAX_FAIXA_EXPORT_DOM = 5000  # Máx. largura de faixa (modelo/série) — alinhado à faixa de inutilizadas
+
+
+def _intervalo_mes_relatorio(ano, mes):
+    try:
+        a, m = int(ano), int(mes)
+        if a < 1900 or not (1 <= m <= 12):
+            return None, None
+        d1 = date(a, m, 1)
+        d2 = date(a, m, monthrange(a, m)[1])
+        return d1, d2
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _data_emissao_linha(row):
+    de = row.get("Data Emissão")
+    if de is not None and not (isinstance(de, float) and pd.isna(de)):
+        s = str(de).strip()[:10]
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return date.fromisoformat(s[:10])
+            except ValueError:
+                pass
+    return None
+
+
+def _linha_no_periodo(row, d_ini, d_fim):
+    d0 = _data_emissao_linha(row)
+    if d0 is not None:
+        return d_ini <= d0 <= d_fim
+    lo, hi = _intervalo_mes_relatorio(row.get("Ano"), row.get("Mes"))
+    if lo is None:
+        return False
+    return not (hi < d_ini or lo > d_fim)
+
+
+def _chave44_de_linha(row):
+    ch = row.get("Chave")
+    if ch is None or (isinstance(ch, float) and pd.isna(ch)):
+        return None
+    s = "".join(filter(str.isdigit, str(ch)))
+    if len(s) >= 44:
+        return s[:44]
+    return None
+
+
+def _nota_int_linha(row):
+    n = row.get("Nota")
+    if n is None or (isinstance(n, float) and pd.isna(n)):
+        return None
+    try:
+        return int(n)
+    except (ValueError, TypeError):
+        try:
+            return int(float(n))
+        except (ValueError, TypeError):
+            return None
+
+
+def _modelo_serie_coincidem(row, modelo, serie):
+    m = row.get("Modelo")
+    s = row.get("Série")
+    if m is None or s is None:
+        return False
+    return str(m).strip() == str(modelo).strip() and str(s).strip() == str(serie).strip()
+
+
+def chaves_por_periodo_data(df_geral, d_ini, d_fim, apenas_normais):
+    if df_geral is None or df_geral.empty:
+        return []
+    df = df_geral
+    if apenas_normais and "Status Final" in df.columns:
+        df = df[df["Status Final"].astype(str) == "NORMAIS"]
+    out = []
+    for _, row in df.iterrows():
+        if _linha_no_periodo(row, d_ini, d_fim):
+            ch = _chave44_de_linha(row)
+            if ch:
+                out.append(ch)
+    return list(dict.fromkeys(out))
+
+
+def chaves_por_faixa_numeracao(df_geral, modelo, serie, n_ini, n_fim, apenas_normais):
+    if df_geral is None or df_geral.empty:
+        return []
+    df = df_geral
+    if apenas_normais and "Status Final" in df.columns:
+        df = df[df["Status Final"].astype(str) == "NORMAIS"]
+    out = []
+    for _, row in df.iterrows():
+        if not _modelo_serie_coincidem(row, modelo, serie):
+            continue
+        ni = _nota_int_linha(row)
+        if ni is None or not (n_ini <= ni <= n_fim):
+            continue
+        ch = _chave44_de_linha(row)
+        if ch:
+            out.append(ch)
+    return list(dict.fromkeys(out))
+
+
+def chaves_por_nota_serie(df_geral, modelo, serie, nota, apenas_normais):
+    if df_geral is None or df_geral.empty:
+        return []
+    df = df_geral
+    if apenas_normais and "Status Final" in df.columns:
+        df = df[df["Status Final"].astype(str) == "NORMAIS"]
+    out = []
+    for _, row in df.iterrows():
+        if not _modelo_serie_coincidem(row, modelo, serie):
+            continue
+        ni = _nota_int_linha(row)
+        if ni is None or ni != nota:
+            continue
+        ch = _chave44_de_linha(row)
+        if ch:
+            out.append(ch)
+    return list(dict.fromkeys(out))
+
+
 # Texto espelhado nos cartões + área “copiar guia” (manter alinhado ao fluxo real da app)
 TEXTO_GUIA_GARIMPEIRO = """
 Garimpeiro — Guia rápido (para copiar)
@@ -1206,14 +1352,14 @@ PASSO A PASSO
 1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
 2. Envie ZIP ou XML soltos (volumes grandes são suportados). Depois do primeiro resultado, pode incluir mais ficheiros no topo da página, sem reiniciar o garimpo.
 3. Clique em Iniciar grande garimpo e aguarde a leitura.
-4. (Opcional) Na lateral: “Último nº por série” + mês/ano de referência — os **buracos** ignoram XMLs de meses anteriores e partem do último nº que indicou.
+4. (Opcional) Lateral “Último nº por série”: **só muda os buracos** (âncora a partir do último nº + mês; evita buraco gigante se vier nota velha no meio). O **garimpo e o resumo** continuam **totais**. Sem **Guardar referência** com linhas válidas, buracos usam toda a numeração lida.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
 7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel/CSV com o filtro completo são opcionais à parte.
-8. Exportar lista específica: planilha com chaves na coluna A para gerar ZIP só com esses XMLs do lote.
+8. Exportar lista específica: PDF Domínio, Excel com chaves, ou filtro por **período**, **faixa** (modelo/série/números) ou **uma nota**.
 
 O QUE O SISTEMA FAZ
-• Emissão própria: resumo por série, buracos (com mês/último nº na lateral, só contam XMLs a partir da referência), canceladas e inutilizadas; trechos evitam listas falsamente enormes.
+• Emissão própria: leitura e **resumo por série totais**; **buracos** com referência guardada ficam ancorados (séries indicadas); sem referência, buracos em todo o intervalo; canceladas/inutilizadas; trechos limitam saltos falsos.
 • Terceiros: totalizador por tipo (NF-e, NFC-e, CT-e, MDF-e).
 • Um mesmo documento pode gerar mais do que um XML no disco (ex.: nota e evento) — o mesmo número de chaves pode corresponder a vários ficheiros.
 
@@ -1238,7 +1384,7 @@ with st.container():
                 <li><b>Lote:</b> Envie ZIP ou XML. Grandes volumes são suportados.</li>
                 <li><b>Garimpo:</b> Iniciar grande garimpo e aguardar.</li>
                 <li><b>Mais ficheiros:</b> No <b>topo dos resultados</b>, inclua XML/ZIP extra <b>sem reiniciar</b>.</li>
-                <li><b>(Opcional)</b> Último nº por série + mês ref. (lateral) → buracos alinhados ao que indicou.</li>
+                <li><b>(Opcional)</b> Último nº + mês (lateral) → só **buracos** ancorados; leitura/resumo **sempre totais**.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
                 <li><b>Exportar:</b> Etapa 3 — ZIP em blocos de 10 000 XML (com Excel do bloco dentro); Excel/CSV do filtro completo opcionais à parte; ou lista por chaves (col. A).</li>
@@ -1250,7 +1396,7 @@ with st.container():
         <div class="instrucoes-card">
             <h3>📊 O que o sistema faz</h3>
             <ul>
-                <li><b>Emissão própria:</b> Resumo por série, buracos (por trechos), canceladas e inutilizadas separadas.</li>
+                <li><b>Emissão própria:</b> Resumo **total** por série; buracos (referência opcional; trechos); canceladas e inutilizadas.</li>
                 <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
                 <li><b>Exportação:</b> Etapa 3 — ZIP(s) com até 10 000 XML + Excel por bloco; relatório completo Excel/CSV opcional.</li>
                 <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
@@ -1347,7 +1493,9 @@ with st.sidebar:
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
             st.caption(
                 "Última nota **emitida** por série até ao **fim** do mês abaixo. "
-                "**Guardar referência** grava mês/ano e últimos nºs e passa a orientar o cálculo dos **buracos** (ignora XMLs mais antigos que esse mês)."
+                "Isto **não corta** o garimpo nem o resumo (continuam **totais**). Só a zona **Buracos** usa esta âncora: "
+                "a partir do último nº + 1 e sem contar competências anteriores ao mês escolhido **nas séries que preencher**. "
+                "Séries que não estiverem na tabela mantêm buracos em **toda** a numeração. Sem **Guardar referência** com sucesso, buracos voltam ao modo antigo (intervalos podem ficar enormes, ex.: nota de janeiro no meio de março)."
             )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
@@ -1641,14 +1789,21 @@ if st.session_state['confirmado']:
                         r = res.get("Range", (res["Número"], res["Número"]))
                         for n in range(r[0], r[1] + 1):
                             audit_map[sk]["nums"].add(n)
-                            if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                            if incluir_numero_no_conjunto_buraco(
+                                res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                            ):
                                 audit_map[sk]["nums_buraco"].add(n)
                             inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
                     else:
                         if res["Número"] > 0:
                             audit_map[sk]["nums"].add(res["Número"])
-                            if numero_entra_conjunto_buraco(
-                                res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                            if incluir_numero_no_conjunto_buraco(
+                                res["Ano"],
+                                res["Mes"],
+                                res["Número"],
+                                ref_ar,
+                                ref_mr,
+                                ult_u,
                             ):
                                 audit_map[sk]["nums_buraco"].add(res["Número"])
                             
@@ -1773,10 +1928,11 @@ if st.session_state['confirmado']:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
             st.caption(
-                "Só **emissão própria** (emitente = CNPJ da sidebar). **Buracos** = números em falta na sequência. "
-                "Se na lateral guardou **mês/ano de referência** e **último nº por série**, os buracos ignoram XMLs de **meses anteriores** "
-                "a esse mês e começam a contar a partir do **último nº + 1** que indicou (assim ficheiros velhos no lote não estragam a análise). "
-                "Sem referência guardada, mantém-se a lógica antiga (todo o intervalo visto nos XMLs)."
+                "Só **emissão própria**. **Resumo** e totais acima = **tudo** o que foi lido. Aqui: **números em falta** na sequência. "
+                "Com **Guardar referência** na lateral (mês + último nº por série), cada série indicada ignora XMLs de **meses antes** desse mês e "
+                "lista buracos **a partir do último nº + 1** — evita buraco gigante se aparecer uma nota fora da ordem (ex. janeiro no meio de março). "
+                "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
+                "Na **Etapa 3** escolhe o que exportar."
             )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
@@ -2043,14 +2199,21 @@ if st.session_state['confirmado']:
                             r = res.get("Range", (res["Número"], res["Número"]))
                             for n in range(r[0], r[1] + 1): 
                                 audit_map[sk]["nums"].add(n)
-                                if numero_entra_conjunto_buraco(res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u):
+                                if incluir_numero_no_conjunto_buraco(
+                                    res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                                ):
                                     audit_map[sk]["nums_buraco"].add(n)
                                 inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
                         else:
                             if res["Número"] > 0:
                                 audit_map[sk]["nums"].add(res["Número"])
-                                if numero_entra_conjunto_buraco(
-                                    res["Ano"], res["Mes"], res["Número"], ref_ar, ref_mr, ult_u
+                                if incluir_numero_no_conjunto_buraco(
+                                    res["Ano"],
+                                    res["Mes"],
+                                    res["Número"],
+                                    ref_ar,
+                                    ref_mr,
+                                    ult_u,
                                 ):
                                     audit_map[sk]["nums_buraco"].add(res["Número"])
                                 if status_final == "CANCELADOS": 
@@ -2580,8 +2743,23 @@ if st.session_state['confirmado']:
         # =====================================================================
         st.divider()
         st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
-        with st.expander("Suba planilha com chaves na coluna A para baixar os XMLs"):
-            tab_pdf, tab_xlsx = st.tabs(["📄 PDF (Domínio)", "📊 Excel (chaves)"])
+        with st.expander(
+            "PDF, Excel, período de datas, faixa modelo/série/números ou uma nota — gera ZIP(s) com XML do lote"
+        ):
+            somente_normais_dom = st.checkbox(
+                "Só linhas com status NORMAIS no relatório geral",
+                value=True,
+                key="dom_espec_normais",
+            )
+            tab_pdf, tab_xlsx, tab_periodo, tab_faixa, tab_unica = st.tabs(
+                [
+                    "📄 PDF (Domínio)",
+                    "📊 Excel (chaves)",
+                    "📅 Período",
+                    "🔢 Faixa de notas",
+                    "1️⃣ Nota única",
+                ]
+            )
 
             with tab_pdf:
                 pdf_dominio = st.file_uploader("Relatório de notas não lançadas (PDF):", type=["pdf"], key="pdf_dom_final")
@@ -2677,6 +2855,165 @@ if st.session_state['confirmado']:
                                 )
                             else:
                                 st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
+
+            with tab_periodo:
+                c_p1, c_p2 = st.columns(2)
+                d_ini_dom = c_p1.date_input(
+                    "Data inicial (emissão)",
+                    value=date.today().replace(day=1),
+                    key="dom_per_dini",
+                )
+                d_fim_dom = c_p2.date_input(
+                    "Data final (emissão)",
+                    value=date.today(),
+                    key="dom_per_dfim",
+                )
+                if st.button("🔎 BUSCAR XMLS NO LOTE (PERÍODO)", key="btn_run_dom_periodo"):
+                    di, dfim = d_ini_dom, d_fim_dom
+                    if di > dfim:
+                        di, dfim = dfim, di
+                    df_base = st.session_state.get("df_geral")
+                    if df_base is None or df_base.empty:
+                        st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                    else:
+                        ch_per = chaves_por_periodo_data(
+                            df_base, di, dfim, somente_normais_dom
+                        )
+                        if not ch_per:
+                            st.warning(
+                                "Nenhuma chave de 44 dígitos no intervalo (ou nenhuma linha NORMAIS, se o filtro estiver ativo)."
+                            )
+                        elif not os.path.exists(TEMP_UPLOADS_DIR):
+                            st.error(
+                                "A pasta dos XML carregados não existe. Volte a correr o garimpo ou **Incluir mais XML**."
+                            )
+                        else:
+                            partes, n_xml = escrever_zip_dominio_por_chaves(
+                                cnpj_limpo, ch_per
+                            )
+                            if partes and n_xml > 0:
+                                st.session_state["ch_falt_dom"] = ch_per
+                                st.session_state["zip_dom_parts"] = partes
+                                nl = len(partes)
+                                st.success(
+                                    f"✅ {len(ch_per)} chave(s) no período; {n_xml} XML(s) em "
+                                    f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                )
+                            else:
+                                st.warning(
+                                    "⚠️ Há chaves no relatório, mas **nenhum XML** foi encontrado em disco "
+                                    f"para esse período. Confira se o lote contém esses ficheiros."
+                                )
+
+            with tab_faixa:
+                mod_f = st.text_input("Modelo", value="55", key="dom_faixa_modelo")
+                ser_f = st.text_input("Série", key="dom_faixa_serie")
+                cf1, cf2 = st.columns(2)
+                n0_f = int(cf1.number_input("Nota inicial", min_value=1, value=1, step=1, key="dom_faixa_n0"))
+                n1_f = int(cf2.number_input("Nota final", min_value=1, value=1, step=1, key="dom_faixa_n1"))
+                st.caption(f"No máximo {_MAX_FAIXA_EXPORT_DOM} notas por pedido (proteção do sistema).")
+                if st.button("🔎 BUSCAR XMLS NO LOTE (FAIXA)", key="btn_run_dom_faixa"):
+                    if not str(ser_f).strip():
+                        st.warning("Informe a **série**.")
+                    else:
+                        a, b = n0_f, n1_f
+                        if a > b:
+                            a, b = b, a
+                        if (b - a + 1) > _MAX_FAIXA_EXPORT_DOM:
+                            st.warning(
+                                f"Reduza a faixa (máximo {_MAX_FAIXA_EXPORT_DOM} notas de uma vez)."
+                            )
+                        else:
+                            df_base = st.session_state.get("df_geral")
+                            if df_base is None or df_base.empty:
+                                st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                            else:
+                                ch_f = chaves_por_faixa_numeracao(
+                                    df_base,
+                                    mod_f,
+                                    str(ser_f).strip(),
+                                    a,
+                                    b,
+                                    somente_normais_dom,
+                                )
+                                if not ch_f:
+                                    st.warning(
+                                        "Nenhuma nota nessa faixa/modelo/série no relatório "
+                                        "(ou fora de NORMAIS com o filtro ativo)."
+                                    )
+                                elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                    st.error(
+                                        "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                    )
+                                else:
+                                    partes, n_xml = escrever_zip_dominio_por_chaves(
+                                        cnpj_limpo, ch_f
+                                    )
+                                    if partes and n_xml > 0:
+                                        st.session_state["ch_falt_dom"] = ch_f
+                                        st.session_state["zip_dom_parts"] = partes
+                                        nl = len(partes)
+                                        st.success(
+                                            f"✅ {len(ch_f)} chave(s); {n_xml} XML(s) em "
+                                            f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                        )
+                                    else:
+                                        st.warning(
+                                            "⚠️ Chaves encontradas no relatório, mas **nenhum XML** no lote em disco."
+                                        )
+
+            with tab_unica:
+                mod_u = st.text_input("Modelo", value="55", key="dom_unica_modelo")
+                ser_u = st.text_input("Série", key="dom_unica_serie")
+                nu = int(
+                    st.number_input(
+                        "Número da nota",
+                        min_value=1,
+                        value=1,
+                        step=1,
+                        key="dom_unica_nota",
+                    )
+                )
+                if st.button("🔎 BUSCAR XML NO LOTE (NOTA ÚNICA)", key="btn_run_dom_unica"):
+                    if not str(ser_u).strip():
+                        st.warning("Informe a **série**.")
+                    else:
+                        df_base = st.session_state.get("df_geral")
+                        if df_base is None or df_base.empty:
+                            st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                        else:
+                            ch_u = chaves_por_nota_serie(
+                                df_base,
+                                mod_u,
+                                str(ser_u).strip(),
+                                nu,
+                                somente_normais_dom,
+                            )
+                            if not ch_u:
+                                st.warning(
+                                    "Nenhuma linha com esse modelo/série/número "
+                                    "(ou não é NORMAIS com o filtro ativo)."
+                                )
+                            elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                st.error(
+                                    "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                )
+                            else:
+                                partes, n_xml = escrever_zip_dominio_por_chaves(
+                                    cnpj_limpo, ch_u
+                                )
+                                if partes and n_xml > 0:
+                                    st.session_state["ch_falt_dom"] = ch_u
+                                    st.session_state["zip_dom_parts"] = partes
+                                    nl = len(partes)
+                                    st.success(
+                                        f"✅ {len(ch_u)} chave(s); {n_xml} XML(s) em "
+                                        f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                    )
+                                else:
+                                    st.warning(
+                                        "⚠️ Chave no relatório, mas **nenhum XML** correspondente no lote em disco."
+                                    )
 
             if st.session_state.get("zip_dom_parts"):
                 st.caption(f"Cada ficheiro tem no máximo {MAX_XML_PER_ZIP} XMLs.")
