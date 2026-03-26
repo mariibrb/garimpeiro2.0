@@ -7,7 +7,6 @@ import pandas as pd
 import random
 import gc
 import shutil
-import pdfplumber
 from collections import Counter, defaultdict
 from calendar import monthrange
 from datetime import date, datetime
@@ -187,7 +186,7 @@ aplicar_estilo_premium()
 # --- VARIÁVEIS DE SISTEMA DE ARQUIVOS (PREVENÇÃO DE QUEDA DE MEMÓRIA) ---
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 TEMP_UPLOADS_DIR = "temp_garimpo_uploads"
-MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (Domínio e Etapa 3); reparte em vários lotes
+MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (lista específica e Etapa 3); reparte em vários lotes
 # Se dois números emitidos consecutivos (ordenados) diferem mais que isto, tratamos como outra faixa.
 # Assim evitamos milhões de "buracos" falsos (ex.: uma chave/XML errado com nº gigante ou duas séries distantes misturadas).
 MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS = 25000
@@ -1046,102 +1045,6 @@ def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_
     return out
 
 
-# --- FUNÇÃO AUXILIAR PARA O BLOCO DOMÍNIO ---
-def extrair_notas_faltantes_dominio(pdf_file):
-    """
-    Regex original página a página + mesmo padrão no texto achatado (cruza linhas).
-    """
-    notas_faltantes = []
-    meta = {
-        "erro": None,
-        "n_paginas": 0,
-        "n_chars": 0,
-        "n_tuplas_regex": 0,
-        "texto_amostra": "",
-    }
-    REGEX_ORIGINAL = re.compile(
-        r"(\d+)\s+(\d+)\s+(\d+)\s+(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e)",
-        re.IGNORECASE,
-    )
-
-    def _expand_iff(grps):
-        inicio, fim, serie = int(grps[0]), int(grps[1]), str(grps[2]).strip()
-        if fim < inicio:
-            inicio, fim = fim, inicio
-        if fim - inicio > 500000:
-            return
-        for num in range(inicio, fim + 1):
-            notas_faltantes.append({"Série": serie, "Número": num})
-
-    try:
-        pdf_fonte = None
-        if hasattr(pdf_file, "seek"):
-            try:
-                pdf_file.seek(0)
-            except Exception:
-                pass
-        try:
-            pdf_fonte = pdfplumber.open(pdf_file)
-        except Exception:
-            dados = pdf_file.read()
-            if hasattr(pdf_file, "seek"):
-                pdf_file.seek(0)
-            pdf_fonte = pdfplumber.open(io.BytesIO(dados))
-
-        with pdf_fonte as pdf:
-            partes = []
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                partes.append(t)
-                for m in REGEX_ORIGINAL.finditer(t):
-                    meta["n_tuplas_regex"] += 1
-                    _expand_iff(m.groups())
-
-            meta["n_paginas"] = len(pdf.pages)
-            texto = "\n".join(partes)
-            meta["n_chars"] = len(texto)
-            flat = re.sub(r"[\s\xa0]+", " ", texto).strip()
-            meta["texto_amostra"] = flat[:500] if flat else ""
-
-            for m in REGEX_ORIGINAL.finditer(flat):
-                meta["n_tuplas_regex"] += 1
-                _expand_iff(m.groups())
-
-            def _add_sff(a, b, c):
-                try:
-                    serie, inicio, fim = str(a).strip(), int(b), int(c)
-                except (ValueError, TypeError):
-                    return
-                if fim < inicio:
-                    inicio, fim = fim, inicio
-                if fim - inicio > 500000:
-                    return
-                for num in range(inicio, fim + 1):
-                    notas_faltantes.append({"Série": serie, "Número": num})
-
-            vistos_x = set()
-            for m in re.finditer(
-                r"(\d{1,4})\s+(\d{1,9})\s+(\d{1,9})\s*(?:NFe|NFCe|CTe|NF-e|NFC-e|CT-e|NFE|NFCE|CTE)",
-                flat,
-                re.IGNORECASE,
-            ):
-                key = m.group(0)
-                if key in vistos_x:
-                    continue
-                vistos_x.add(key)
-                meta["n_tuplas_regex"] += 1
-                _add_sff(m.group(1), m.group(2), m.group(3))
-
-        uniq = {}
-        for it in notas_faltantes:
-            uniq[(str(it["Série"]), it["Número"])] = it
-        notas_faltantes = list(uniq.values())
-
-    except Exception as e:
-        meta["erro"] = str(e)
-    return notas_faltantes, meta
-
-
 def extrair_chaves_de_excel(arquivo_excel):
     chaves = []
     try:
@@ -1291,12 +1194,10 @@ def _modelo_serie_coincidem(row, modelo, serie):
     return str(m).strip() == str(modelo).strip() and str(s).strip() == str(serie).strip()
 
 
-def chaves_por_periodo_data(df_geral, d_ini, d_fim, apenas_normais):
+def chaves_por_periodo_data(df_geral, d_ini, d_fim):
     if df_geral is None or df_geral.empty:
         return []
     df = df_geral
-    if apenas_normais and "Status Final" in df.columns:
-        df = df[df["Status Final"].astype(str) == "NORMAIS"]
     out = []
     for _, row in df.iterrows():
         if _linha_no_periodo(row, d_ini, d_fim):
@@ -1306,12 +1207,10 @@ def chaves_por_periodo_data(df_geral, d_ini, d_fim, apenas_normais):
     return list(dict.fromkeys(out))
 
 
-def chaves_por_faixa_numeracao(df_geral, modelo, serie, n_ini, n_fim, apenas_normais):
+def chaves_por_faixa_numeracao(df_geral, modelo, serie, n_ini, n_fim):
     if df_geral is None or df_geral.empty:
         return []
     df = df_geral
-    if apenas_normais and "Status Final" in df.columns:
-        df = df[df["Status Final"].astype(str) == "NORMAIS"]
     out = []
     for _, row in df.iterrows():
         if not _modelo_serie_coincidem(row, modelo, serie):
@@ -1325,12 +1224,10 @@ def chaves_por_faixa_numeracao(df_geral, modelo, serie, n_ini, n_fim, apenas_nor
     return list(dict.fromkeys(out))
 
 
-def chaves_por_nota_serie(df_geral, modelo, serie, nota, apenas_normais):
+def chaves_por_nota_serie(df_geral, modelo, serie, nota):
     if df_geral is None or df_geral.empty:
         return []
     df = df_geral
-    if apenas_normais and "Status Final" in df.columns:
-        df = df[df["Status Final"].astype(str) == "NORMAIS"]
     out = []
     for _, row in df.iterrows():
         if not _modelo_serie_coincidem(row, modelo, serie):
@@ -1355,8 +1252,8 @@ PASSO A PASSO
 4. (Opcional) Lateral “Último nº por série”: **só muda os buracos** (âncora a partir do último nº + mês; evita buraco gigante se vier nota velha no meio). O **garimpo e o resumo** continuam **totais**. Sem **Guardar referência** com linhas válidas, buracos usam toda a numeração lida.
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
-7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel/CSV com o filtro completo são opcionais à parte.
-8. Exportar lista específica: PDF Domínio, Excel com chaves, ou filtro por **período**, **faixa** (modelo/série/números) ou **uma nota**.
+7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel com o filtro completo é opcional à parte.
+8. Exportar lista específica: Excel com chaves, ou filtro por **período**, **faixa** (modelo/série/números) ou **uma nota**.
 
 O QUE O SISTEMA FAZ
 • Emissão própria: leitura e **resumo por série totais**; **buracos** com referência guardada ficam ancorados (séries indicadas); sem referência, buracos em todo o intervalo; canceladas/inutilizadas; trechos limitam saltos falsos.
@@ -1387,7 +1284,7 @@ with st.container():
                 <li><b>(Opcional)</b> Último nº + mês (lateral) → só **buracos** ancorados; leitura/resumo **sempre totais**.</li>
                 <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
                 <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
-                <li><b>Exportar:</b> Etapa 3 — ZIP em blocos de 10 000 XML (com Excel do bloco dentro); Excel/CSV do filtro completo opcionais à parte; ou lista por chaves (col. A).</li>
+                <li><b>Exportar:</b> Etapa 3 — ZIP em blocos de 10 000 XML (com Excel do bloco dentro); Excel do filtro completo opcional à parte; ou lista por chaves (col. A).</li>
             </ol>
         </div>
         """, unsafe_allow_html=True)
@@ -1398,7 +1295,7 @@ with st.container():
             <ul>
                 <li><b>Emissão própria:</b> Resumo **total** por série; buracos (referência opcional; trechos); canceladas e inutilizadas.</li>
                 <li><b>Terceiros:</b> Contagem por tipo de documento (NF-e, CT-e, etc.).</li>
-                <li><b>Exportação:</b> Etapa 3 — ZIP(s) com até 10 000 XML + Excel por bloco; relatório completo Excel/CSV opcional.</li>
+                <li><b>Exportação:</b> Etapa 3 — ZIP(s) com até 10 000 XML + Excel por bloco; relatório completo em Excel opcional.</li>
                 <li><b>Lista de chaves:</b> Planilha com chaves 44 dígitos → ZIP só com esses XMLs do lote.</li>
                 <li><b>Eventos:</b> Uma chave pode corresponder a vários XMLs (ex.: NF-e + evento).</li>
             </ul>
@@ -1448,15 +1345,10 @@ for k in keys_to_init:
         else: 
             st.session_state[k] = False
 
-if "export_csv_buffer" not in st.session_state:
-    st.session_state["export_csv_buffer"] = None
 if "excel_buffer" not in st.session_state:
     st.session_state["excel_buffer"] = None
 if "export_excel_name" not in st.session_state:
     st.session_state["export_excel_name"] = "relatorio.xlsx"
-if "export_csv_name" not in st.session_state:
-    st.session_state["export_csv_name"] = "relatorio.csv"
-
 if "seq_ref_ultimos" not in st.session_state:
     st.session_state["seq_ref_ultimos"] = None
 if "seq_ref_ano" not in st.session_state:
@@ -1851,7 +1743,6 @@ if st.session_state['confirmado']:
                 'garimpo_ok': True, 
                 'export_ready': False,
                 'excel_buffer': None,
-                'export_csv_buffer': None,
             })
             aplicar_compactacao_dfs_sessao()
             st.rerun()
@@ -1927,13 +1818,17 @@ if st.session_state['confirmado']:
         with col_audit:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
-            st.caption(
-                "Só **emissão própria**. **Resumo** e totais acima = **tudo** o que foi lido. Aqui: **números em falta** na sequência. "
-                "Com **Guardar referência** na lateral (mês + último nº por série), cada série indicada ignora XMLs de **meses antes** desse mês e "
-                "lista buracos **a partir do último nº + 1** — evita buraco gigante se aparecer uma nota fora da ordem (ex. janeiro no meio de março). "
-                "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
-                "Na **Etapa 3** escolhe o que exportar."
-            )
+            with st.expander(
+                "Como funcionam os buracos e a referência na lateral (último nº / mês)",
+                expanded=False,
+            ):
+                st.caption(
+                    "Só **emissão própria**. **Resumo** e totais acima = **tudo** o que foi lido. Aqui: **números em falta** na sequência. "
+                    "Com **Guardar referência** na lateral (mês + último nº por série), cada série indicada ignora XMLs de **meses antes** desse mês e "
+                    "lista buracos **a partir do último nº + 1** — evita buraco gigante se aparecer uma nota fora da ordem (ex. janeiro no meio de março). "
+                    "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
+                    "Na **Etapa 3** escolhe o que exportar."
+                )
             if not st.session_state['df_faltantes'].empty:
                 st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
             else: 
@@ -2276,7 +2171,7 @@ if st.session_state['confirmado']:
 • <b>Listas dependentes:</b> ao escolher só «Emissão própria», por exemplo, Ano/mês, Modelo, Série, etc. mostram <b>só</b> valores que existem nessa origem no lote (não aparecem séries só de terceiros).<br/><br/>
 <b>2) ZIP de XML (até 10 000 ficheiros por parte)</b> — cada parte inclui <b>sempre</b> um Excel dentro da pasta <code>RELATORIO_GARIMPEIRO/</code> só com as linhas do filtro que correspondem àqueles XMLs (não é opcional).<br/>
 • <b>Com pastas</b> e/ou <b>tudo na raiz</b> — pode marcar um ou os dois tipos de ZIP.<br/><br/>
-<b>3) Excel / CSV do filtro completo</b> — <b>opcionais</b>: ficheiros à parte com <b>todas</b> as linhas do filtro (não entram nos ZIPs).
+<b>3) Excel do filtro completo</b> — <b>opcional</b>: ficheiro à parte com <b>todas</b> as linhas do filtro (não entra nos ZIPs).
 </div>
             """,
             unsafe_allow_html=True,
@@ -2326,7 +2221,7 @@ if st.session_state['confirmado']:
             st.warning(_wp)
 
         with st.container():
-            f_col1, f_col2, f_col3, f_col4, f_col5 = st.columns(5)
+            f_col1, f_col2, f_col3, f_col4, f_col5, f_col6 = st.columns(6)
             with f_col1:
                 filtro_origem = st.multiselect(
                     "Origem (vazio = própria e terceiros)",
@@ -2362,6 +2257,17 @@ if st.session_state['confirmado']:
                     key="v2_f_stat",
                     help="Vazio = todos os status. Coluna «Status Final» na exportação.",
                 )
+            with f_col6:
+                if operacoes_opts:
+                    filtro_operacao = st.multiselect(
+                        "Operação (vazio = entrada e saída)",
+                        operacoes_opts,
+                        key="v2_f_op",
+                        help="Vazio = não filtra por operação. Várias opções = união.",
+                    )
+                else:
+                    st.caption("Operação: sem opções nos dados filtrados.")
+                    filtro_operacao = []
 
         _c_rep, _ = st.columns([1, 5])
         with _c_rep:
@@ -2371,16 +2277,6 @@ if st.session_state['confirmado']:
                         st.session_state[_kx] = []
 
         aplicar_mes_so_na_propria = True
-
-        if operacoes_opts:
-            filtro_operacao = st.multiselect(
-                "Operação (vazio = entrada e saída)",
-                operacoes_opts,
-                key="v2_f_op",
-                help="Vazio = não filtra por operação. Várias opções = união.",
-            )
-        else:
-            filtro_operacao = []
 
         df_preview = filtrar_df_geral_para_exportacao(
             df_g_base,
@@ -2427,7 +2323,7 @@ if st.session_state['confirmado']:
         st.markdown("##### Formato da exportação")
         st.caption(
             "Cada **parte de ZIP** (até 10 000 XML) inclui **automaticamente** um Excel com só as linhas daquele bloco, "
-            "em `RELATORIO_GARIMPEIRO/`. À parte pode optar por descarregar Excel e/ou CSV com **todo** o resultado do filtro."
+            "em `RELATORIO_GARIMPEIRO/`. À parte pode optar por descarregar **Excel** com **todo** o resultado do filtro."
         )
         z1, z2 = st.columns(2)
         with z1:
@@ -2452,15 +2348,10 @@ if st.session_state['confirmado']:
             value=False,
             key="v2_excel_completo",
         )
-        v2_incl_csv = st.checkbox(
-            "Gerar **CSV** com todas as linhas do filtro (descarregar à parte)",
-            value=False,
-            key="v2_incl_csv",
-        )
 
-        _quer_alguma_saida = v2_zip_org or v2_zip_plano or v2_excel_completo or v2_incl_csv
+        _quer_alguma_saida = v2_zip_org or v2_zip_plano or v2_excel_completo
         if not _quer_alguma_saida:
-            st.info("Marque **pelo menos** um tipo de ZIP ou Excel/CSV completo.")
+            st.info("Marque **pelo menos** um tipo de ZIP ou Excel completo.")
 
         _btn_dis = (nenhum_filtro and not confirm_export_total) or (df_g_base.empty) or (not _quer_alguma_saida)
 
@@ -2483,14 +2374,12 @@ if st.session_state['confirmado']:
             if df_geral_filtrado is None or df_geral_filtrado.empty:
                 st.warning("Resultado filtrado: 0 linhas. Altere os filtros (multiselects).")
             else:
-                with st.spinner("A gerar ZIPs (Excel por bloco) e ficheiros opcionais…"):
+                with st.spinner("A gerar ZIPs (Excel por bloco) e Excel opcional…"):
                     st.session_state["excel_buffer"] = None
-                    st.session_state["export_csv_buffer"] = None
                     gc.collect()
 
                     ts = datetime.now().strftime("%Y%m%d_%H%M")
                     st.session_state["export_excel_name"] = f"relatorio_completo_{ts}.xlsx"
-                    st.session_state["export_csv_name"] = f"relatorio_completo_{ts}.csv"
 
                     if v2_excel_completo:
                         buffer_excel = io.BytesIO()
@@ -2505,13 +2394,6 @@ if st.session_state['confirmado']:
                         st.session_state["excel_buffer"] = buffer_excel.getvalue()
                     else:
                         st.session_state["excel_buffer"] = None
-
-                    if v2_incl_csv:
-                        buf_csv = io.StringIO()
-                        df_geral_filtrado.to_csv(buf_csv, index=False, encoding="utf-8-sig")
-                        st.session_state["export_csv_buffer"] = buf_csv.getvalue().encode("utf-8-sig")
-                    else:
-                        st.session_state["export_csv_buffer"] = None
 
                     for f in os.listdir("."):
                         if f.startswith("z_org_final") or f.startswith("z_todos_final"):
@@ -2723,114 +2605,26 @@ if st.session_state['confirmado']:
                     key="v2_dl_xlsx",
                     use_container_width=True,
                 )
-            if st.session_state.get("export_csv_buffer"):
-                st.download_button(
-                    "Descarregar CSV completo (todo o filtro)",
-                    st.session_state["export_csv_buffer"],
-                    file_name=st.session_state.get(
-                        "export_csv_name", "relatorio_completo.csv"
-                    ),
-                    mime="text/csv",
-                    key="v2_dl_csv",
-                    use_container_width=True,
-                )
 
         if st.button("⛏️ NOVO GARIMPO / LIMPAR TUDO"):
             limpar_arquivos_temp(); st.session_state.clear(); st.rerun()
 
         # =====================================================================
-        # BLOCO 4: EXPORTAR LISTA ESPECÍFICA (PDF / EXCEL)
+        # BLOCO 4: EXPORTAR LISTA ESPECÍFICA
         # =====================================================================
         st.divider()
         st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
         with st.expander(
-            "PDF, Excel, período de datas, faixa modelo/série/números ou uma nota — gera ZIP(s) com XML do lote"
+            "Excel, período de datas, faixa modelo/série/números ou uma nota — gera ZIP(s) com XML do lote"
         ):
-            somente_normais_dom = st.checkbox(
-                "Só linhas com status NORMAIS no relatório geral",
-                value=True,
-                key="dom_espec_normais",
-            )
-            tab_pdf, tab_xlsx, tab_periodo, tab_faixa, tab_unica = st.tabs(
+            tab_xlsx, tab_periodo, tab_faixa, tab_unica = st.tabs(
                 [
-                    "📄 PDF (Domínio)",
                     "📊 Excel (chaves)",
                     "📅 Período",
                     "🔢 Faixa de notas",
                     "1️⃣ Nota única",
                 ]
             )
-
-            with tab_pdf:
-                pdf_dominio = st.file_uploader("Relatório de notas não lançadas (PDF):", type=["pdf"], key="pdf_dom_final")
-                st.caption(
-                    "O PDF é lido por texto: se o relatório for só imagem ou tiver outro layout, use o separador **Excel** com chaves de 44 dígitos."
-                )
-                if st.button("🔎 BUSCAR XMLS NO LOTE", key="btn_run_dom"):
-                    if pdf_dominio is None:
-                        st.warning("Selecione um ficheiro PDF antes de clicar em buscar.")
-                    else:
-                        with st.spinner("Analisando e organizando arquivos..."):
-                            notas_pdf, info_dom = extrair_notas_faltantes_dominio(pdf_dominio)
-                            if info_dom.get("erro"):
-                                st.error(f"Erro ao abrir o PDF: {info_dom['erro']}")
-                            elif not notas_pdf:
-                                st.warning(
-                                    "Não encontrámos no PDF o padrão **número + número + série + NF-e/NFC-e/CT-e**. "
-                                    "O Domínio pode exportar noutro formato, ou o PDF não tem texto selecionável."
-                                )
-                                with st.expander("Diagnóstico (amostra do texto extraído)", expanded=False):
-                                    st.text(info_dom.get("texto_amostra") or "(vazio — possível PDF só com imagem)")
-                                    st.caption(
-                                        f"Páginas: {info_dom.get('n_paginas', 0)} | "
-                                        f"Caracteres: {info_dom.get('n_chars', 0)} | "
-                                        f"Correspondências regex: {info_dom.get('n_tuplas_regex', 0)}"
-                                    )
-                            else:
-                                st.info(
-                                    f"PDF: **{len(notas_pdf)}** nota(s) identificada(s) para cruzar com o relatório geral."
-                                )
-                                ch_encontradas = []
-                                df_base = st.session_state["df_geral"]
-                                if df_base is None or df_base.empty:
-                                    st.warning("Relatório geral vazio — faça o garimpo primeiro.")
-                                else:
-                                    for n in notas_pdf:
-                                        f = df_base[
-                                            (df_base["Série"].astype(str) == str(n["Série"]))
-                                            & (df_base["Nota"] == n["Número"])
-                                            & (df_base["Status Final"] == "NORMAIS")
-                                        ]
-                                        if not f.empty:
-                                            ch_encontradas.append(f.iloc[0]["Chave"])
-
-                                    if not ch_encontradas:
-                                        st.warning(
-                                            "⚠️ Nenhuma dessas notas aparece no lote como **NORMAIS** "
-                                            "(série/número iguais ao PDF). Confira série, canceladas ou refaça o garimpo."
-                                        )
-                                    elif not os.path.exists(TEMP_UPLOADS_DIR):
-                                        st.error(
-                                            "A pasta dos XML carregados não existe (ex.: sessão no Cloud reiniciou). "
-                                            "Volte a correr **Iniciar grande garimpo** ou **Incluir mais XML**."
-                                        )
-                                    else:
-                                        partes, n_xml = escrever_zip_dominio_por_chaves(
-                                            cnpj_limpo, ch_encontradas
-                                        )
-                                        if partes and n_xml > 0:
-                                            st.session_state["ch_falt_dom"] = ch_encontradas
-                                            st.session_state["zip_dom_parts"] = partes
-                                            nl = len(partes)
-                                            st.success(
-                                                f"✅ {len(ch_encontradas)} chave(s) no lote; {n_xml} XML(s) em "
-                                                f"{nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
-                                            )
-                                        else:
-                                            st.warning(
-                                                "⚠️ Há chaves no relatório, mas **nenhum XML** foi encontrado em disco "
-                                                f"(`{TEMP_UPLOADS_DIR}`). Refaça o garimpo com os mesmos ficheiros."
-                                            )
 
             with tab_xlsx:
                 xlsx_dom = st.file_uploader(
@@ -2876,12 +2670,10 @@ if st.session_state['confirmado']:
                     if df_base is None or df_base.empty:
                         st.warning("Relatório geral vazio — faça o garimpo primeiro.")
                     else:
-                        ch_per = chaves_por_periodo_data(
-                            df_base, di, dfim, somente_normais_dom
-                        )
+                        ch_per = chaves_por_periodo_data(df_base, di, dfim)
                         if not ch_per:
                             st.warning(
-                                "Nenhuma chave de 44 dígitos no intervalo (ou nenhuma linha NORMAIS, se o filtro estiver ativo)."
+                                "Nenhuma chave de 44 dígitos no relatório geral para esse intervalo de datas."
                             )
                         elif not os.path.exists(TEMP_UPLOADS_DIR):
                             st.error(
@@ -2934,12 +2726,10 @@ if st.session_state['confirmado']:
                                     str(ser_f).strip(),
                                     a,
                                     b,
-                                    somente_normais_dom,
                                 )
                                 if not ch_f:
                                     st.warning(
-                                        "Nenhuma nota nessa faixa/modelo/série no relatório "
-                                        "(ou fora de NORMAIS com o filtro ativo)."
+                                        "Nenhuma nota nessa faixa/modelo/série no relatório geral."
                                     )
                                 elif not os.path.exists(TEMP_UPLOADS_DIR):
                                     st.error(
@@ -2987,12 +2777,10 @@ if st.session_state['confirmado']:
                                 mod_u,
                                 str(ser_u).strip(),
                                 nu,
-                                somente_normais_dom,
                             )
                             if not ch_u:
                                 st.warning(
-                                    "Nenhuma linha com esse modelo/série/número "
-                                    "(ou não é NORMAIS com o filtro ativo)."
+                                    "Nenhuma linha com esse modelo/série/número no relatório geral."
                                 )
                             elif not os.path.exists(TEMP_UPLOADS_DIR):
                                 st.error(
