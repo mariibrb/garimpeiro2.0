@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from datetime import date, datetime
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
-st.set_page_config(page_title="GARIMPEIRO 2", layout="wide", page_icon="⛏️")
+st.set_page_config(page_title="Garimpeiro", layout="wide", page_icon="⛏️")
 
 def aplicar_estilo_premium():
     st.markdown("""
@@ -49,13 +49,41 @@ def aplicar_estilo_premium():
         [data-testid="stSidebar"] {
             background-color: #FFFFFF !important;
             border-right: 1px solid #FFDEEF !important;
-            min-width: 280px !important;
-            max-width: min(340px, 100vw) !important;
+            min-width: min(312px, 100vw) !important;
+            max-width: min(400px, 100vw) !important;
         }
         /* Tabela do editor na lateral: evita cortar conteúdo */
         [data-testid="stSidebar"] [data-testid="stDataFrame"],
         [data-testid="stSidebar"] [data-testid="stDataEditor"] {
             overflow-x: auto !important;
+        }
+        /* Último nº por série: cartões em vez de “planilha” */
+        [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: linear-gradient(160deg, #fffafd 0%, #ffffff 50%, #fff8fc 100%) !important;
+            border: 1px solid rgba(255, 105, 180, 0.35) !important;
+            border-radius: 14px !important;
+            padding: 0.4rem 0.55rem 0.55rem !important;
+            margin-bottom: 0.5rem !important;
+            box-shadow: 0 2px 12px rgba(255, 105, 180, 0.07) !important;
+        }
+        [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] [data-baseweb="select"] > div {
+            border-radius: 10px !important;
+            border-color: #f8bbd0 !important;
+            min-height: 2.15rem !important;
+        }
+        [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] input {
+            border-radius: 10px !important;
+            border-color: #f5c6d8 !important;
+            min-height: 2.15rem !important;
+            font-family: 'Plus Jakarta Sans', sans-serif !important;
+        }
+        p.garim-seq-head {
+            font-family: 'Plus Jakarta Sans', sans-serif !important;
+            font-size: 0.82rem !important;
+            font-weight: 700 !important;
+            color: #c2185b !important;
+            margin: 0.35rem 0 0.15rem 0 !important;
+            letter-spacing: 0.02em !important;
         }
 
         div.stButton > button {
@@ -516,6 +544,20 @@ def normalize_seq_ref_editor_df(df):
     out["Série"] = out["Série"].map(_str_ser)
     out["Último número"] = out["Último número"].map(_ult_txt)
     return out
+
+
+def collect_seq_ref_from_widgets(struct_v: int, n_rows: int, default_modelo: str = "NF-e") -> pd.DataFrame:
+    """Lê select/text da sidebar (chaves sr_{v}_{i}_*) e devolve DataFrame normalizado."""
+    recs = []
+    for i in range(n_rows):
+        recs.append(
+            {
+                "Modelo": st.session_state.get(f"sr_{struct_v}_{i}_m", default_modelo),
+                "Série": str(st.session_state.get(f"sr_{struct_v}_{i}_s", "") or ""),
+                "Último número": str(st.session_state.get(f"sr_{struct_v}_{i}_u", "") or ""),
+            }
+        )
+    return normalize_seq_ref_editor_df(pd.DataFrame(recs))
 
 
 def item_registro_manual_inutilizado(cnpj_limpo, tipo_man, serie_man, nota_man):
@@ -1142,7 +1184,7 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
 
 # Texto espelhado nos cartões + área “copiar guia” (manter alinhado ao fluxo real da app)
 TEXTO_GUIA_GARIMPEIRO = """
-O GARIMPEIRO — Guia rápido (para copiar)
+Garimpeiro — Guia rápido (para copiar)
 
 PASSO A PASSO
 1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
@@ -1167,7 +1209,7 @@ DICAS
 
 
 # --- INTERFACE ---
-st.markdown("<h1>⛏️ O GARIMPEIRO</h1>", unsafe_allow_html=True)
+st.markdown("<h1>⛏️ Garimpeiro</h1>", unsafe_allow_html=True)
 
 with st.container():
     m_col1, m_col2 = st.columns(2)
@@ -1266,6 +1308,8 @@ if "seq_ref_rows" not in st.session_state:
         st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(
             pd.DataFrame([{"Modelo": "NF-e", "Série": "1", "Último número": ""}])
         )
+if "seq_struct_v" not in st.session_state:
+    st.session_state["seq_struct_v"] = 0
 
 with st.sidebar:
     st.markdown("### 🔍 Configuração")
@@ -1286,10 +1330,8 @@ with st.sidebar:
             a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
             st.caption(
-                "Indique a **última nota já emitida** pelo cliente em **cada série**, considerando só até ao **fim** "
-                "do mês/ano que escolher abaixo (ex.: conferência do **mês anterior** ao atual). "
-                "A grelha fica dentro de um **formulário**: os números só são gravados na sessão quando carregar em **Guardar referência** — "
-                "assim não desaparecem a meio da edição."
+                "Última nota **emitida** por série até ao **fim** do mês abaixo. "
+                "**Guardar referência** grava tudo e ativa a conferência no ecrã principal."
             )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
@@ -1305,102 +1347,150 @@ with st.sidebar:
                                 }
                             )
                         st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(pd.DataFrame(novas))
-                        for _k in ("seq_ref_data_editor",):
-                            if _k in st.session_state:
-                                del st.session_state[_k]
-                        st.success("Só falta preencher a coluna do último número e **Guardar referência**.")
+                        st.session_state["seq_struct_v"] = int(st.session_state.get("seq_struct_v", 0)) + 1
+                        st.success("Preencha **Últ. nº** em cada cartão e carregue em **Guardar referência**.")
                         st.rerun()
                     else:
                         st.warning("Resumo por série ainda vazio.")
 
             _opts = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
-            _df_ed = normalize_seq_ref_editor_df(st.session_state["seq_ref_rows"])
+            _df_base = normalize_seq_ref_editor_df(st.session_state["seq_ref_rows"])
+            _recs = (
+                _df_base.to_dict("records")
+                if not _df_base.empty
+                else [{"Modelo": "NF-e", "Série": "1", "Último número": ""}]
+            )
+            n_rows = len(_recs)
+            v = int(st.session_state.get("seq_struct_v", 0))
 
-            with st.form("seq_ref_form"):
+            ca, cm = st.columns(2)
+            with ca:
                 sr_ano = st.number_input(
-                    "Ano de referência (fim deste mês)",
+                    "Ano",
                     min_value=2000,
                     max_value=2100,
                     value=int(a0),
-                    key="seq_form_ano",
+                    key="seq_sidebar_ano",
                 )
+            with cm:
                 sr_mes = st.number_input(
-                    "Mês (1–12)",
+                    "Mês",
                     min_value=1,
                     max_value=12,
                     value=int(m0),
-                    key="seq_form_mes",
-                )
-                st.caption(
-                    "**Tipo:** NF-e, NFC-e, CT-e ou MDF-e (como no resumo). **Série:** ex. 1. "
-                    "**Últ. nº:** só dígitos — última nota emitida até ao fim do mês acima."
-                )
-                edited = st.data_editor(
-                    _df_ed,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    key="seq_ref_data_editor",
-                    column_config={
-                        "Modelo": st.column_config.SelectboxColumn(
-                            "Tipo doc.",
-                            options=_opts,
-                            required=False,
-                            width="small",
-                            help="Modelo (igual ao garimpo).",
-                        ),
-                        "Série": st.column_config.TextColumn(
-                            "Série",
-                            required=False,
-                            max_chars=10,
-                            width="small",
-                            help="Número da série.",
-                        ),
-                        "Último número": st.column_config.TextColumn(
-                            "Últ. nº",
-                            max_chars=15,
-                            width="small",
-                            help="Último número emitido até ao fim do mês (apenas números).",
-                        ),
-                    },
-                )
-                submitted = st.form_submit_button(
-                    "Guardar referência",
-                    use_container_width=True,
-                    help="Grava ano, mês e tabela na sessão (e ativa a conferência de sequência).",
+                    key="seq_sidebar_mes",
                 )
 
-            if submitted:
-                st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(edited)
+            st.markdown('<p class="garim-seq-head">Séries do cliente</p>', unsafe_allow_html=True)
+            st.markdown(
+                '<div style="display:flex;gap:6px;font-size:0.65rem;font-weight:700;color:#ad1457;'
+                'text-transform:uppercase;letter-spacing:0.07em;margin:0 0 6px 0;opacity:0.92;'
+                'font-family:Plus Jakarta Sans,sans-serif;">'
+                '<span style="flex:1.4;min-width:0;">Documento</span>'
+                '<span style="flex:0.55;min-width:0;">Sér.</span>'
+                '<span style="flex:0.65;min-width:0;">Últ.</span></div>',
+                unsafe_allow_html=True,
+            )
+
+            for i, row in enumerate(_recs):
+                modelo_cur = row.get("Modelo")
+                modelo_cur = modelo_cur if modelo_cur in _opts else "NF-e"
+                idx = _opts.index(modelo_cur)
+                ser_raw = row.get("Série")
+                if ser_raw is None or (isinstance(ser_raw, float) and pd.isna(ser_raw)):
+                    ser_cur = ""
+                else:
+                    ser_cur = str(ser_raw).strip()
+                ult_raw = row.get("Último número")
+                if ult_raw is None or (isinstance(ult_raw, float) and pd.isna(ult_raw)):
+                    ult_cur = ""
+                else:
+                    ult_cur = str(ult_raw).strip()
+
+                with st.container(border=True):
+                    c1, c2, c3 = st.columns([1.45, 0.55, 0.62], gap="small")
+                    with c1:
+                        st.selectbox(
+                            "Documento",
+                            _opts,
+                            index=idx,
+                            key=f"sr_{v}_{i}_m",
+                            label_visibility="collapsed",
+                        )
+                    with c2:
+                        st.text_input(
+                            "Série",
+                            value=ser_cur,
+                            key=f"sr_{v}_{i}_s",
+                            label_visibility="collapsed",
+                            max_chars=10,
+                            placeholder="1",
+                        )
+                    with c3:
+                        st.text_input(
+                            "Últ. nº",
+                            value=ult_cur,
+                            key=f"sr_{v}_{i}_u",
+                            label_visibility="collapsed",
+                            max_chars=15,
+                            placeholder="•••",
+                        )
+
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("➕ Série", key="seq_add_row", use_container_width=True):
+                    cur_df = collect_seq_ref_from_widgets(v, n_rows)
+                    novo = pd.DataFrame([{"Modelo": "NF-e", "Série": "", "Último número": ""}])
+                    st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(
+                        pd.concat([cur_df, novo], ignore_index=True)
+                    )
+                    st.session_state["seq_struct_v"] = v + 1
+                    st.rerun()
+            with b2:
+                if n_rows > 1 and st.button("➖ Última", key="seq_rem_row", use_container_width=True):
+                    cur_df = collect_seq_ref_from_widgets(v, n_rows)
+                    st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(cur_df.iloc[:-1])
+                    st.session_state["seq_struct_v"] = v + 1
+                    st.rerun()
+
+            if st.button(
+                "Guardar referência",
+                type="primary",
+                use_container_width=True,
+                key="seq_btn_guardar",
+                help="Grava ano, mês e séries na sessão.",
+            ):
+                cur_df = collect_seq_ref_from_widgets(v, n_rows)
+                st.session_state["seq_ref_rows"] = cur_df
                 st.session_state["seq_ref_ano"] = int(sr_ano)
                 st.session_state["seq_ref_mes"] = int(sr_mes)
-                parsed = ref_map_from_dataframe(st.session_state["seq_ref_rows"])
+                parsed = ref_map_from_dataframe(cur_df)
                 if parsed:
                     st.session_state["seq_ref_ultimos"] = parsed
                     st.success(f"{len(parsed)} série(s) guardada(s).")
                 else:
                     st.warning(
-                        "Tabela ou últimos números incompletos: preencha **tipo**, **série** e **últ. nº** (> 0) "
-                        "em pelo menos uma linha e volte a **Guardar referência**."
+                        "Preencha **documento**, **série** e **últ. nº** (> 0) em pelo menos um cartão e volte a guardar."
                     )
 
-            with st.expander("Colar lista (alternativa à grelha)", expanded=False):
-                st.caption("Uma linha por série, mesmo formato: `NF-e|1|1520` (modelo | série | último nº).")
+            with st.expander("Colar lista (várias séries de uma vez)", expanded=False):
+                st.caption("Uma linha por série: `NF-e|1|1520` (modelo | série | último nº).")
                 seq_paste = st.text_area(
                     "Linhas",
                     height=100,
                     key="seq_paste_txt",
                     placeholder="NF-e|1|1520\nNFC-e|2|890",
+                    label_visibility="collapsed",
                 )
-                if st.button("Aplicar texto à tabela", key="seq_paste_btn", use_container_width=True):
+                if st.button("Aplicar à lista", key="seq_paste_btn", use_container_width=True):
                     triplas = parse_linhas_inutil_manual(seq_paste)
                     if not triplas:
                         st.warning("Nenhuma linha válida.")
                     else:
                         rows = [{"Modelo": m, "Série": str(s), "Último número": str(n)} for m, s, n in triplas]
                         st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(pd.DataFrame(rows))
-                        if "seq_ref_data_editor" in st.session_state:
-                            del st.session_state["seq_ref_data_editor"]
-                        st.success(f"{len(rows)} linha(s) na tabela — abra o formulário e confira ou **Guardar referência**.")
+                        st.session_state["seq_struct_v"] = int(st.session_state.get("seq_struct_v", 0)) + 1
+                        st.success(f"{len(rows)} série(s) importadas — confira os cartões e **Guardar referência**.")
                         st.rerun()
 
             if st.session_state.get("seq_ref_ultimos"):
