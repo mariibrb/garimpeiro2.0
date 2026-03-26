@@ -444,28 +444,77 @@ def ref_map_from_dataframe(df):
         return out
     for _, row in df.iterrows():
         modelo = row.get("Modelo")
-        if modelo is None or (isinstance(modelo, float) and pd.isna(modelo)):
+        if modelo is None or pd.isna(modelo):
             continue
         modelo = str(modelo).strip()
-        if not modelo:
+        if not modelo or modelo.lower() == "nan":
             continue
         serie = row.get("Série")
-        if serie is None or (isinstance(serie, float) and pd.isna(serie)):
+        if serie is None or pd.isna(serie):
             serie = ""
         else:
             serie = str(serie).strip()
         if not serie:
             continue
         ult = row.get("Último número")
-        if ult is None or (isinstance(ult, float) and pd.isna(ult)):
+        if ult is None or pd.isna(ult):
             continue
-        try:
-            u = int(float(ult))
-        except (TypeError, ValueError):
-            continue
+        if isinstance(ult, str):
+            d = "".join(filter(str.isdigit, ult.strip()))
+            if not d:
+                continue
+            try:
+                u = int(d)
+            except ValueError:
+                continue
+        else:
+            try:
+                u = int(float(ult))
+            except (TypeError, ValueError):
+                continue
         if u <= 0:
             continue
         out[f"{modelo}|{serie}"] = u
+    return out
+
+
+def normalize_seq_ref_editor_df(df):
+    """Prepara a grelha: último nº em texto (evita float/NaN do NumberColumn que some ao recarregar)."""
+    cols = ["Modelo", "Série", "Último número"]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+
+    def _str_model(x):
+        if x is None or pd.isna(x):
+            return None
+        s = str(x).strip()
+        return s if s and s.lower() != "nan" else None
+
+    def _str_ser(x):
+        if x is None or pd.isna(x):
+            return ""
+        return str(x).strip()
+
+    def _ult_txt(x):
+        if x is None or pd.isna(x):
+            return ""
+        if isinstance(x, bool):
+            return ""
+        if isinstance(x, int):
+            return str(x) if x >= 0 else ""
+        if isinstance(x, float):
+            try:
+                if pd.isna(x):
+                    return ""
+                return str(int(x))
+            except (ValueError, OverflowError):
+                return ""
+        return "".join(filter(str.isdigit, str(x)))
+
+    out = df.reindex(columns=cols).copy()
+    out["Modelo"] = out["Modelo"].map(_str_model)
+    out["Série"] = out["Série"].map(_str_ser)
+    out["Último número"] = out["Último número"].map(_ult_txt)
     return out
 
 
@@ -1214,8 +1263,8 @@ if "seq_ref_rows" not in st.session_state:
     if st.session_state.get("seq_ref_ultimos"):
         st.session_state["seq_ref_rows"] = ultimos_dict_para_dataframe(st.session_state["seq_ref_ultimos"])
     else:
-        st.session_state["seq_ref_rows"] = pd.DataFrame(
-            [{"Modelo": "NF-e", "Série": "1", "Último número": None}]
+        st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(
+            pd.DataFrame([{"Modelo": "NF-e", "Série": "1", "Último número": ""}])
         )
 
 with st.sidebar:
@@ -1230,18 +1279,17 @@ with st.sidebar:
         if st.button("✅ LIBERAR OPERAÇÃO"): 
             st.session_state['confirmado'] = True
 
-        with st.expander("📌 Último nº por série (mês de referência)"):
+        with st.expander("📌 Último nº por série (fim do mês de referência)"):
             d = date.today()
             def_ano = d.year - 1 if d.month == 1 else d.year
             def_mes = 12 if d.month == 1 else d.month - 1
             a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
-            sr_ano = st.number_input("Ano de referência", min_value=2000, max_value=2100, value=int(a0), key="seq_in_ano")
-            sr_mes = st.number_input("Mês (1–12)", min_value=1, max_value=12, value=int(m0), key="seq_in_mes")
             st.caption(
-                "**Col. 1 — Tipo:** NF-e, NFC-e, CT-e ou MDF-e (o mesmo nome que aparece no resumo por série). "
-                "**Col. 2 — Série:** só o número da série (ex.: 1). "
-                "**Col. 3 — Último nº:** última nota **já emitida** até ao **fim** do mês/ano escolhidos acima."
+                "Indique a **última nota já emitida** pelo cliente em **cada série**, considerando só até ao **fim** "
+                "do mês/ano que escolher abaixo (ex.: conferência do **mês anterior** ao atual). "
+                "A grelha fica dentro de um **formulário**: os números só são gravados na sessão quando carregar em **Guardar referência** — "
+                "assim não desaparecem a meio da edição."
             )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
@@ -1253,54 +1301,108 @@ with st.sidebar:
                                 {
                                     "Modelo": r["Documento"],
                                     "Série": str(r["Série"]),
-                                    "Último número": None,
+                                    "Último número": "",
                                 }
                             )
-                        st.session_state["seq_ref_rows"] = pd.DataFrame(novas)
-                        st.success("Só falta preencher a coluna do último número.")
+                        st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(pd.DataFrame(novas))
+                        for _k in ("seq_ref_data_editor",):
+                            if _k in st.session_state:
+                                del st.session_state[_k]
+                        st.success("Só falta preencher a coluna do último número e **Guardar referência**.")
                         st.rerun()
                     else:
                         st.warning("Resumo por série ainda vazio.")
+
             _opts = ["NF-e", "NFC-e", "CT-e", "MDF-e"]
-            _tbl = st.data_editor(
-                st.session_state["seq_ref_rows"],
-                num_rows="dynamic",
-                use_container_width=True,
-                column_config={
-                    "Modelo": st.column_config.SelectboxColumn(
-                        "Tipo doc.",
-                        options=_opts,
-                        required=True,
-                        width="small",
-                        help="Modelo do documento (igual ao garimpo).",
-                    ),
-                    "Série": st.column_config.TextColumn(
-                        "Série",
-                        required=True,
-                        max_chars=10,
-                        width="small",
-                        help="Número da série.",
-                    ),
-                    "Último número": st.column_config.NumberColumn(
-                        "Últ. nº",
-                        min_value=0,
-                        step=1,
-                        format="%d",
-                        width="small",
-                        help="Último número emitido até ao fim do mês de referência.",
-                    ),
-                },
-            )
-            st.session_state["seq_ref_rows"] = _tbl.copy()
-            if st.button("Guardar referência", key="seq_btn_guardar", use_container_width=True):
+            _df_ed = normalize_seq_ref_editor_df(st.session_state["seq_ref_rows"])
+
+            with st.form("seq_ref_form"):
+                sr_ano = st.number_input(
+                    "Ano de referência (fim deste mês)",
+                    min_value=2000,
+                    max_value=2100,
+                    value=int(a0),
+                    key="seq_form_ano",
+                )
+                sr_mes = st.number_input(
+                    "Mês (1–12)",
+                    min_value=1,
+                    max_value=12,
+                    value=int(m0),
+                    key="seq_form_mes",
+                )
+                st.caption(
+                    "**Tipo:** NF-e, NFC-e, CT-e ou MDF-e (como no resumo). **Série:** ex. 1. "
+                    "**Últ. nº:** só dígitos — última nota emitida até ao fim do mês acima."
+                )
+                edited = st.data_editor(
+                    _df_ed,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="seq_ref_data_editor",
+                    column_config={
+                        "Modelo": st.column_config.SelectboxColumn(
+                            "Tipo doc.",
+                            options=_opts,
+                            required=False,
+                            width="small",
+                            help="Modelo (igual ao garimpo).",
+                        ),
+                        "Série": st.column_config.TextColumn(
+                            "Série",
+                            required=False,
+                            max_chars=10,
+                            width="small",
+                            help="Número da série.",
+                        ),
+                        "Último número": st.column_config.TextColumn(
+                            "Últ. nº",
+                            max_chars=15,
+                            width="small",
+                            help="Último número emitido até ao fim do mês (apenas números).",
+                        ),
+                    },
+                )
+                submitted = st.form_submit_button(
+                    "Guardar referência",
+                    use_container_width=True,
+                    help="Grava ano, mês e tabela na sessão (e ativa a conferência de sequência).",
+                )
+
+            if submitted:
+                st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(edited)
+                st.session_state["seq_ref_ano"] = int(sr_ano)
+                st.session_state["seq_ref_mes"] = int(sr_mes)
                 parsed = ref_map_from_dataframe(st.session_state["seq_ref_rows"])
                 if parsed:
-                    st.session_state["seq_ref_ano"] = int(sr_ano)
-                    st.session_state["seq_ref_mes"] = int(sr_mes)
                     st.session_state["seq_ref_ultimos"] = parsed
                     st.success(f"{len(parsed)} série(s) guardada(s).")
                 else:
-                    st.warning("Preencha pelo menos uma linha com modelo, série e último número (> 0).")
+                    st.warning(
+                        "Tabela ou últimos números incompletos: preencha **tipo**, **série** e **últ. nº** (> 0) "
+                        "em pelo menos uma linha e volte a **Guardar referência**."
+                    )
+
+            with st.expander("Colar lista (alternativa à grelha)", expanded=False):
+                st.caption("Uma linha por série, mesmo formato: `NF-e|1|1520` (modelo | série | último nº).")
+                seq_paste = st.text_area(
+                    "Linhas",
+                    height=100,
+                    key="seq_paste_txt",
+                    placeholder="NF-e|1|1520\nNFC-e|2|890",
+                )
+                if st.button("Aplicar texto à tabela", key="seq_paste_btn", use_container_width=True):
+                    triplas = parse_linhas_inutil_manual(seq_paste)
+                    if not triplas:
+                        st.warning("Nenhuma linha válida.")
+                    else:
+                        rows = [{"Modelo": m, "Série": str(s), "Último número": str(n)} for m, s, n in triplas]
+                        st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(pd.DataFrame(rows))
+                        if "seq_ref_data_editor" in st.session_state:
+                            del st.session_state["seq_ref_data_editor"]
+                        st.success(f"{len(rows)} linha(s) na tabela — abra o formulário e confira ou **Guardar referência**.")
+                        st.rerun()
+
             if st.session_state.get("seq_ref_ultimos"):
                 st.info(
                     f"Referência ativa: {st.session_state['seq_ref_ano']}/"
