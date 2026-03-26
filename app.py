@@ -1069,6 +1069,171 @@ def extrair_chaves_de_excel(arquivo_excel):
     return list(dict.fromkeys(chaves))
 
 
+_MAX_FAIXA_EXPORT_DOM = 5000  # Máx. largura de faixa por linha (lista específica / inutilizadas)
+
+
+def _excel_celula_int(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            return int(float(s.replace(",", ".")))
+        except ValueError:
+            return None
+    try:
+        return int(float(val))
+    except (TypeError, ValueError):
+        return None
+
+
+def _excel_celula_serie(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        try:
+            f = float(val)
+            if f.is_integer():
+                return str(int(f))
+        except (ValueError, OverflowError):
+            pass
+    return str(val).strip()
+
+
+def _coluna_por_palavras(nomes_cols, palavras, ja_usados):
+    """Índice da primeira coluna cujo nome contém alguma palavra-chave (não em ja_usados)."""
+    for i, nome in enumerate(nomes_cols):
+        if i in ja_usados:
+            continue
+        c = str(nome).strip().lower().replace("_", " ")
+        comp = c.replace(" ", "")
+        for p in palavras:
+            p2 = p.lower().replace(" ", "")
+            if p2 in comp or p.lower() in c:
+                return i
+    return None
+
+
+def extrair_faixas_ini_fim_serie_excel(arquivo_excel):
+    """
+    Planilha com numeração inicial, final e série (3 colunas).
+    Aceita cabeçalhos em português ou dados nas colunas A, B, C sem título.
+    Retorno: (lista de dicts n_ini, n_fim, serie, linhas_ignoradas, mensagem_erro).
+    """
+    try:
+        df = pd.read_excel(arquivo_excel)
+    except Exception:
+        return [], 0, "Não foi possível ler o ficheiro Excel."
+
+    if df is None or df.empty:
+        return [], 0, "Planilha vazia."
+
+    nomes = list(df.columns)
+    lowered = [str(x).strip().lower() for x in nomes]
+
+    i_ini = _coluna_por_palavras(
+        lowered,
+        [
+            "numeracao inicial",
+            "numeração inicial",
+            "nota inicial",
+            "n inicial",
+            "inicial",
+            "inicio",
+            "início",
+        ],
+        set(),
+    )
+    i_fim = _coluna_por_palavras(
+        lowered,
+        [
+            "numeracao final",
+            "numeração final",
+            "nota final",
+            "n final",
+            "final",
+            "fim",
+            "até",
+            "ate",
+        ],
+        {i_ini} if i_ini is not None else set(),
+    )
+    _us_ser = set()
+    if i_ini is not None:
+        _us_ser.add(i_ini)
+    if i_fim is not None:
+        _us_ser.add(i_fim)
+    i_ser = _coluna_por_palavras(
+        lowered,
+        ["serie", "série", "ser"],
+        _us_ser,
+    )
+
+    if i_ini is None or i_fim is None or i_ser is None:
+        if len(nomes) >= 3:
+            i_ini, i_fim, i_ser = 0, 1, 2
+        else:
+            return (
+                [],
+                0,
+                "Indique 3 colunas (inicial, final, série) ou use cabeçalhos reconhecíveis.",
+            )
+
+    c_ini, c_fim, c_ser = nomes[i_ini], nomes[i_fim], nomes[i_ser]
+    faixas = []
+    ignoradas = 0
+
+    for _, row in df.iterrows():
+        n0 = _excel_celula_int(row[c_ini])
+        n1 = _excel_celula_int(row[c_fim])
+        ser = _excel_celula_serie(row[c_ser])
+        if n0 is None or n1 is None or not ser:
+            ignoradas += 1
+            continue
+        if n0 > n1:
+            n0, n1 = n1, n0
+        if (n1 - n0 + 1) > _MAX_FAIXA_EXPORT_DOM:
+            ignoradas += 1
+            continue
+        faixas.append({"n_ini": n0, "n_fim": n1, "serie": ser})
+
+    if not faixas:
+        msg = "Nenhuma linha válida."
+        if ignoradas:
+            msg += f" ({ignoradas} linha(s) ignorada(s): vazias, série em falta ou faixa acima de {_MAX_FAIXA_EXPORT_DOM} notas.)"
+        return [], ignoradas, msg
+
+    return faixas, ignoradas, None
+
+
+_MAX_CHAVES_EXCEL_FAIXAS = 75000  # Limite de chaves agregadas por planilha (várias linhas)
+
+
+def chaves_agregadas_de_excel_faixas(df_geral, faixas_lista, modelo):
+    """Cruza cada faixa com o relatório geral; devolve (chaves únicas, cortado_por_limite)."""
+    if df_geral is None or df_geral.empty or not faixas_lista:
+        return [], False
+    vistos = set()
+    ordenadas = []
+    for fx in faixas_lista:
+        ch_sub = chaves_por_faixa_numeracao(
+            df_geral,
+            modelo,
+            fx["serie"],
+            fx["n_ini"],
+            fx["n_fim"],
+        )
+        for ch in ch_sub:
+            if ch not in vistos:
+                vistos.add(ch)
+                ordenadas.append(ch)
+                if len(ordenadas) >= _MAX_CHAVES_EXCEL_FAIXAS:
+                    return ordenadas, True
+    return ordenadas, False
+
+
 def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
     """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada). Retorna (lista_caminhos, total_xml)."""
     if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
@@ -1124,9 +1289,6 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista):
         return [], 0
 
     return parts, count_xml
-
-
-_MAX_FAIXA_EXPORT_DOM = 5000  # Máx. largura de faixa (modelo/série) — alinhado à faixa de inutilizadas
 
 
 def _intervalo_mes_relatorio(ano, mes):
@@ -1186,12 +1348,67 @@ def _nota_int_linha(row):
             return None
 
 
+# Código <mod> da Sefaz → rótulo usado na coluna Modelo do relatório geral
+_MODELO_SEFAZ_PARA_RELATORIO = {
+    "55": "NF-e",
+    "65": "NFC-e",
+    "57": "CT-e",
+    "58": "MDF-e",
+}
+
+
+def _normaliza_modelo_filtro(modelo):
+    """Aceita NF-e, NFC-e… ou 55, 65… (código Sefaz) para cruzar com df_geral."""
+    if modelo is None:
+        return ""
+    s = str(modelo).strip()
+    if not s:
+        return ""
+    if s in _MODELO_SEFAZ_PARA_RELATORIO:
+        return _MODELO_SEFAZ_PARA_RELATORIO[s]
+    try:
+        k = str(int(float(s.replace(",", "."))))
+        if k in _MODELO_SEFAZ_PARA_RELATORIO:
+            return _MODELO_SEFAZ_PARA_RELATORIO[k]
+    except (ValueError, TypeError):
+        pass
+    return s
+
+
+def _normaliza_serie_filtro(serie):
+    """Alinha com a chave: série na app costuma vir sem zeros à esquerda (ex. 1 em vez de 001)."""
+    if serie is None or (isinstance(serie, float) and pd.isna(serie)):
+        return ""
+    if isinstance(serie, (int, float)) and not isinstance(serie, bool):
+        try:
+            f = float(serie)
+            if f.is_integer():
+                return str(int(f))
+        except (ValueError, OverflowError):
+            pass
+    t = str(serie).strip()
+    if not t:
+        return ""
+    try:
+        f = float(t.replace(",", "."))
+        if f.is_integer():
+            return str(int(f))
+    except ValueError:
+        pass
+    return t
+
+
 def _modelo_serie_coincidem(row, modelo, serie):
     m = row.get("Modelo")
     s = row.get("Série")
     if m is None or s is None:
         return False
-    return str(m).strip() == str(modelo).strip() and str(s).strip() == str(serie).strip()
+    mn = _normaliza_modelo_filtro(modelo)
+    sn = _normaliza_serie_filtro(serie)
+    return (
+        str(m).strip() == mn
+        and _normaliza_serie_filtro(s) == sn
+    )
 
 
 def chaves_por_periodo_data(df_geral, d_ini, d_fim):
@@ -1253,7 +1470,7 @@ PASSO A PASSO
 5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
 6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
 7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel com o filtro completo é opcional à parte.
-8. Exportar lista específica: Excel com chaves, ou filtro por **período**, **faixa** (modelo/série/números) ou **uma nota**.
+8. Exportar lista específica: Excel com **chaves**, Excel com **inicial/final/série**, **período**, **faixa** ou **uma nota**.
 
 O QUE O SISTEMA FAZ
 • Emissão própria: leitura e **resumo por série totais**; **buracos** com referência guardada ficam ancorados (séries indicadas); sem referência, buracos em todo o intervalo; canceladas/inutilizadas; trechos limitam saltos falsos.
@@ -1818,6 +2035,10 @@ if st.session_state['confirmado']:
         with col_audit:
             qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
             st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
+            if not st.session_state['df_faltantes'].empty:
+                st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
+            else:
+                st.info("✅ Tudo em ordem.")
             with st.expander(
                 "Como funcionam os buracos e a referência na lateral (último nº / mês)",
                 expanded=False,
@@ -1829,10 +2050,6 @@ if st.session_state['confirmado']:
                     "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
                     "Na **Etapa 3** escolhe o que exportar."
                 )
-            if not st.session_state['df_faltantes'].empty:
-                st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
-            else: 
-                st.info("✅ Tudo em ordem.")
                 
         with col_canc:
             _q_canc = (
@@ -2278,28 +2495,6 @@ if st.session_state['confirmado']:
 
         aplicar_mes_so_na_propria = True
 
-        df_preview = filtrar_df_geral_para_exportacao(
-            df_g_base,
-            filtro_origem,
-            filtro_meses,
-            aplicar_mes_so_na_propria,
-            filtro_modelos,
-            filtro_series,
-            filtro_status,
-            filtro_operacao,
-        )
-        _n_lin = len(df_preview) if df_preview is not None and not df_preview.empty else 0
-        _n_ch = (
-            int(df_preview["Chave"].nunique())
-            if df_preview is not None and not df_preview.empty
-            else 0
-        )
-        _n_tot = len(df_g_base) if not df_g_base.empty else 0
-        st.caption(
-            f"**Pré-visualização:** **{_n_lin}** linhas vão para o Excel/XML · **{_n_ch}** chaves distintas · "
-            f"**{_n_tot}** linhas no relatório geral se não usasse filtros"
-        )
-
         nenhum_filtro = (
             len(filtro_origem) == 0
             and len(filtro_meses) == 0
@@ -2615,11 +2810,12 @@ if st.session_state['confirmado']:
         st.divider()
         st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
         with st.expander(
-            "Excel, período de datas, faixa modelo/série/números ou uma nota — gera ZIP(s) com XML do lote"
+            "Excel (chaves ou inicial/final/série), período, faixa ou uma nota — gera ZIP(s) com XML do lote"
         ):
-            tab_xlsx, tab_periodo, tab_faixa, tab_unica = st.tabs(
+            tab_xlsx, tab_xlsx_ns, tab_periodo, tab_faixa, tab_unica = st.tabs(
                 [
                     "📊 Excel (chaves)",
+                    "📋 Excel (nº e série)",
                     "📅 Período",
                     "🔢 Faixa de notas",
                     "1️⃣ Nota única",
@@ -2649,6 +2845,69 @@ if st.session_state['confirmado']:
                                 )
                             else:
                                 st.warning("⚠️ Nenhum XML encontrado no lote para essas chaves.")
+
+            with tab_xlsx_ns:
+                xlsx_ns = st.file_uploader(
+                    "Planilha (.xlsx ou .xls): **inicial**, **final** e **série** (uma faixa por linha)",
+                    type=["xlsx", "xls"],
+                    key="xlsx_dom_ns",
+                )
+                mod_ns = st.selectbox(
+                    "Modelo no relatório geral",
+                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    index=0,
+                    key="dom_ns_modelo",
+                    help="Deve coincidir com o tipo das linhas no garimpo (coluna Modelo).",
+                )
+                st.caption(
+                    f"Reconhece cabeçalhos como *Inicial*, *Final*, *Série* (ou sem cabeçalho: colunas A, B, C). "
+                    f"Até **{_MAX_FAIXA_EXPORT_DOM}** notas por linha; até **{_MAX_CHAVES_EXCEL_FAIXAS}** chaves no total da planilha."
+                )
+                if xlsx_ns and st.button(
+                    "🔎 BUSCAR XMLS NO LOTE (EXCEL Nº E SÉRIE)", key="btn_run_dom_xlsx_ns"
+                ):
+                    with st.spinner("A ler faixas e cruzar com o relatório geral..."):
+                        faixas_ns, ign_ns, err_ns = extrair_faixas_ini_fim_serie_excel(xlsx_ns)
+                        if err_ns and not faixas_ns:
+                            st.warning(err_ns)
+                        else:
+                            if ign_ns:
+                                st.caption(f"ℹ️ {ign_ns} linha(s) da planilha ignorada(s) (vazias, série em falta ou faixa larga demais).")
+                            df_base = st.session_state.get("df_geral")
+                            if df_base is None or df_base.empty:
+                                st.warning("Relatório geral vazio — faça o garimpo primeiro.")
+                            else:
+                                ch_ns, cortado_ns = chaves_agregadas_de_excel_faixas(
+                                    df_base, faixas_ns, mod_ns
+                                )
+                                if cortado_ns:
+                                    st.warning(
+                                        f"⚠️ Limite de {_MAX_CHAVES_EXCEL_FAIXAS} chaves atingido — divida a planilha ou refine as faixas."
+                                    )
+                                if not ch_ns:
+                                    st.warning(
+                                        "Nenhuma chave encontrada no relatório geral para essas faixas/modelo/série."
+                                    )
+                                elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                    st.error(
+                                        "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                    )
+                                else:
+                                    partes, n_xml = escrever_zip_dominio_por_chaves(
+                                        cnpj_limpo, ch_ns
+                                    )
+                                    if partes and n_xml > 0:
+                                        st.session_state["ch_falt_dom"] = ch_ns
+                                        st.session_state["zip_dom_parts"] = partes
+                                        nl = len(partes)
+                                        st.success(
+                                            f"✅ {len(faixas_ns)} linha(s) na planilha → **{len(ch_ns)}** chave(s); "
+                                            f"{n_xml} XML(s) em {nl} ZIP(s) (até {MAX_XML_PER_ZIP} por ficheiro)."
+                                        )
+                                    else:
+                                        st.warning(
+                                            "⚠️ Há chaves no relatório, mas **nenhum XML** correspondente no lote em disco."
+                                        )
 
             with tab_periodo:
                 c_p1, c_p2 = st.columns(2)
@@ -2698,7 +2957,13 @@ if st.session_state['confirmado']:
                                 )
 
             with tab_faixa:
-                mod_f = st.text_input("Modelo", value="55", key="dom_faixa_modelo")
+                mod_f = st.selectbox(
+                    "Modelo",
+                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    index=0,
+                    key="dom_faixa_modelo",
+                    help="Igual à coluna Modelo do relatório geral (não use 55/65 — isso é o código Sefaz).",
+                )
                 ser_f = st.text_input("Série", key="dom_faixa_serie")
                 cf1, cf2 = st.columns(2)
                 n0_f = int(cf1.number_input("Nota inicial", min_value=1, value=1, step=1, key="dom_faixa_n0"))
@@ -2753,7 +3018,13 @@ if st.session_state['confirmado']:
                                         )
 
             with tab_unica:
-                mod_u = st.text_input("Modelo", value="55", key="dom_unica_modelo")
+                mod_u = st.selectbox(
+                    "Modelo",
+                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    index=0,
+                    key="dom_unica_modelo",
+                    help="Igual à coluna Modelo do relatório geral.",
+                )
                 ser_u = st.text_input("Série", key="dom_unica_serie")
                 nu = int(
                     st.number_input(
@@ -2780,7 +3051,9 @@ if st.session_state['confirmado']:
                             )
                             if not ch_u:
                                 st.warning(
-                                    "Nenhuma linha com esse modelo/série/número no relatório geral."
+                                    "Nenhuma linha com esse modelo/série/número no relatório geral. "
+                                    "Confirme **Modelo** (NF-e, NFC-e…) como na tabela do garimpo, **série** e **número**; "
+                                    "a série no relatório vem sem zeros à esquerda (ex. **1**, não 001)."
                                 )
                             elif not os.path.exists(TEMP_UPLOADS_DIR):
                                 st.error(
