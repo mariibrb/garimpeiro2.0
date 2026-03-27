@@ -2595,10 +2595,7 @@ def excel_bytes_relatorio_bloco(df_filtrado: pd.DataFrame, chaves_bloco: set):
     """Bytes de um .xlsx só com as linhas cujas Chave aparecem no bloco de XML (máx. 10k ficheiros)."""
     if df_filtrado is None or df_filtrado.empty or not chaves_bloco:
         return None
-    if "Chave" not in df_filtrado.columns:
-        return None
-    _norm = df_filtrado["Chave"].map(_chave_para_conjunto_export)
-    dfp = df_filtrado.loc[_norm.isin(chaves_bloco)]
+    dfp = df_filtrado[df_filtrado["Chave"].isin(chaves_bloco)]
     if dfp.empty:
         return None
     buf = io.BytesIO()
@@ -3187,30 +3184,6 @@ def _chave44_de_linha(row):
     s = "".join(filter(str.isdigit, str(ch)))
     if len(s) >= 44:
         return s[:44]
-    return None
-
-
-def _chave_para_conjunto_export(ch):
-    """
-    Normaliza Chave para cruzar df_geral com identify_xml_info ao gerar ZIPs (Etapa 3).
-    Evita falhas por float/.0 na coluna, notação científica parcial ou espaços — casos em que
-    `res['Chave'] in set(df['Chave'])` nunca era verdadeiro.
-    """
-    if ch is None:
-        return None
-    try:
-        if pd.isna(ch):
-            return None
-    except (TypeError, ValueError):
-        pass
-    t = str(ch).strip()
-    if not t or t.lower() == "nan":
-        return None
-    if t.startswith("INUT_"):
-        return t
-    d = "".join(filter(str.isdigit, t))
-    if len(d) >= 44:
-        return d[:44]
     return None
 
 
@@ -4716,14 +4689,7 @@ if st.session_state['confirmado']:
                             except OSError:
                                 pass
 
-                    filtro_chaves = {
-                        k
-                        for k in (
-                            _chave_para_conjunto_export(x)
-                            for x in df_geral_filtrado["Chave"].tolist()
-                        )
-                        if k
-                    }
+                    filtro_chaves = set(df_geral_filtrado["Chave"].tolist())
                     Z = {
                         "z_org": None,
                         "z_todos": None,
@@ -4735,7 +4701,6 @@ if st.session_state['confirmado']:
                         "curr_todos_part": 1,
                         "chaves_bloco": set(),
                         "seq_bloco": 1,
-                        "xml_matched": 0,
                     }
 
                     def _fechar_bloco_zip():
@@ -4796,14 +4761,8 @@ if st.session_state['confirmado']:
                             with open(f_path, "rb") as f_temp:
                                 for name, xml_data in extrair_recursivo(f_temp, f_name):
                                     res, _ = identify_xml_info(xml_data, cnpj_limpo, name)
-                                    ck = (
-                                        _chave_para_conjunto_export(res["Chave"])
-                                        if res
-                                        else None
-                                    )
-                                    if res and ck and ck in filtro_chaves:
-                                        Z["xml_matched"] += 1
-                                        Z["chaves_bloco"].add(ck)
+                                    if res and res["Chave"] in filtro_chaves:
+                                        Z["chaves_bloco"].add(res["Chave"])
                                         if v2_zip_org and Z["z_org"] is not None:
                                             Z["z_org"].writestr(
                                                 f"{res['Pasta']}/{name}", xml_data
@@ -4869,16 +4828,6 @@ if st.session_state['confirmado']:
                             pass
                         todos_parts = []
 
-                    if (v2_zip_org or v2_zip_plano) and Z.get("xml_matched", 0) == 0:
-                        st.session_state["v2_export_sem_xml"] = (
-                            "Nenhum XML em disco correspondeu às chaves do filtro. "
-                            "Causas frequentes: pasta do garimpo apagada (use **Reset** só depois de exportar), "
-                            "filtros a excluir todas as linhas com chave válida, ou chaves na tabela em formato "
-                            "que não bate com o lido dos ficheiros — tente exportação completa sem filtros."
-                        )
-                    else:
-                        st.session_state.pop("v2_export_sem_xml", None)
-
                     st.session_state.update(
                         {
                             "org_zip_parts": org_parts if v2_zip_org else [],
@@ -4890,9 +4839,6 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         if st.session_state.get("export_ready"):
-            _sem = st.session_state.pop("v2_export_sem_xml", None)
-            if _sem:
-                st.warning(_sem)
             st.success("Geração concluída. Use **Baixar XML** para cada ZIP e **Baixar Excel** para o relatório completo, se existir.")
             _parts_o = st.session_state.get("org_zip_parts") or []
             _parts_t = st.session_state.get("todos_zip_parts") or []
@@ -5240,5 +5186,4 @@ if st.session_state['confirmado']:
                                 )
 else:
     st.warning("👈 Insira o CNPJ lateral para começar.")
-
 
