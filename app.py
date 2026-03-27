@@ -1,3 +1,5 @@
+# Garimpeiro — código-fonte único: faça todas as alterações neste ficheiro (app2.py).
+# app.py só reencaminha para aqui quando a Cloud usa app.py como entrada.
 import streamlit as st
 import zipfile
 import io
@@ -10,6 +12,36 @@ import shutil
 from collections import Counter, defaultdict
 from calendar import monthrange
 from datetime import date, datetime
+import unicodedata
+import sys
+from pathlib import Path
+
+
+def _instrucoes_instalar_fpdf2_markdown():
+    """Streamlit corre com o interpretador em sys.executable — fpdf2 tem de estar aí."""
+    exe = sys.executable or "python"
+    cmd = f'"{exe}" -m pip install fpdf2'
+    cloud = "/home/adminuser/" in exe or "/mount/src/" in exe
+    if cloud:
+        return (
+            "No **Streamlit Community Cloud** não é possível instalar pacotes a partir da app — o ambiente "
+            "é montado só com o que está no repositório.\n\n"
+            "1. Confirme que na **raiz do repositório** existe `requirements.txt` com a linha **`fpdf2>=2.7.0`** "
+            "(o projeto Garimpeiro já a inclui).\n"
+            "2. Faça **commit** e **push** desse ficheiro para o ramo que a Cloud usa.\n"
+            "3. No painel [share.streamlit.io](https://share.streamlit.io), abra a app → **⋮** → "
+            "**Reboot app** (ou desligue e volte a publicar) para reinstalar dependências.\n\n"
+            "Se a app aponta para uma **pasta** dentro do repo, a Cloud continua a ler `requirements.txt` "
+            "só da **raiz** — não pode haver outro `requirements.txt` sem `fpdf2` a substituir."
+        )
+    return (
+        "O pacote **fpdf2** não está instalado no **mesmo Python** que está a executar o Streamlit.\n\n"
+        f"No terminal, corra:\n\n`{cmd}`\n\n"
+        "Se usa **ambiente virtual**, ative-o antes desse comando, instale e **volte a iniciar** a app "
+        "(`streamlit run …`). O ficheiro **requirements.txt** já inclui `fpdf2` — também pode usar "
+        "`pip install -r requirements.txt` nesse ambiente."
+    )
+
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
 st.set_page_config(page_title="Garimpeiro", layout="wide", page_icon="⛏️")
@@ -50,32 +82,46 @@ def aplicar_estilo_premium():
             background-color: #FFFFFF !important;
             border-right: 1px solid #FFDEEF !important;
             min-width: min(312px, 100vw) !important;
-            max-width: min(400px, 100vw) !important;
+            max-width: min(460px, 100vw) !important;
+        }
+        /* Colunas na lateral: sem min-width por defeito do flex = conteúdo cortado */
+        [data-testid="stSidebar"] [data-testid="column"] {
+            min-width: 0 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div {
+            min-width: 0 !important;
         }
         /* Tabela do editor na lateral: evita cortar conteúdo */
         [data-testid="stSidebar"] [data-testid="stDataFrame"],
         [data-testid="stSidebar"] [data-testid="stDataEditor"] {
             overflow-x: auto !important;
         }
-        /* Último nº por série: cartões em vez de “planilha” */
+        /* Último nº por série: cartões; scroll horizontal se ainda faltar espaço */
         [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] {
             background: linear-gradient(160deg, #fffafd 0%, #ffffff 50%, #fff8fc 100%) !important;
             border: 1px solid rgba(255, 105, 180, 0.35) !important;
             border-radius: 14px !important;
-            padding: 0.4rem 0.55rem 0.55rem !important;
+            padding: 0.5rem 0.65rem 0.6rem !important;
             margin-bottom: 0.5rem !important;
             box-shadow: 0 2px 12px rgba(255, 105, 180, 0.07) !important;
+            overflow-x: auto !important;
+            overflow-y: visible !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
         }
         [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] [data-baseweb="select"] > div {
             border-radius: 10px !important;
             border-color: #f8bbd0 !important;
             min-height: 2.15rem !important;
+            max-width: 100% !important;
         }
         [data-testid="stSidebar"] div[data-testid="stVerticalBlockBorderWrapper"] input {
             border-radius: 10px !important;
             border-color: #f5c6d8 !important;
             min-height: 2.15rem !important;
             font-family: 'Plus Jakarta Sans', sans-serif !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
         }
         p.garim-seq-head {
             font-family: 'Plus Jakarta Sans', sans-serif !important;
@@ -178,6 +224,23 @@ def aplicar_estilo_premium():
             border: 1px solid #FFDEEF !important;
             padding: 15px !important;
         }
+
+        h3.garim-sec {
+            font-family: 'Montserrat', sans-serif !important;
+            font-weight: 800 !important;
+            font-size: 1.02rem !important;
+            color: #5D1B36 !important;
+            text-align: left !important;
+            margin: 1.25rem 0 0.45rem 0 !important;
+            letter-spacing: 0.02em;
+            border-left: 4px solid #A1869E;
+            padding: 0.15rem 0 0.15rem 0.65rem;
+        }
+        section.main [data-testid="stDataFrame"] {
+            border-radius: 12px;
+            border: 1px solid rgba(161, 134, 158, 0.28);
+            overflow: hidden;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -190,6 +253,24 @@ MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (lista específica e Etap
 # Se dois números emitidos consecutivos (ordenados) diferem mais que isto, tratamos como outra faixa.
 # Assim evitamos milhões de "buracos" falsos (ex.: uma chave/XML errado com nº gigante ou duas séries distantes misturadas).
 MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS = 25000
+
+
+def format_cnpj_visual(digits: str) -> str:
+    """Máscara CNPJ (00.000.000/0000-00) a partir apenas de dígitos, até 14."""
+    d = "".join(c for c in str(digits) if c.isdigit())[:14]
+    if not d:
+        return ""
+    n = len(d)
+    if n <= 2:
+        return d
+    if n <= 5:
+        return f"{d[:2]}.{d[2:]}"
+    if n <= 8:
+        return f"{d[:2]}.{d[2:5]}.{d[5:]}"
+    if n <= 12:
+        return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:]}"
+    return f"{d[:2]}.{d[2:5]}.{d[5:8]}/{d[8:12]}-{d[12:]}"
+
 
 # --- MOTOR DE IDENTIFICAÇÃO ---
 def identify_xml_info(content_bytes, client_cnpj, file_name):
@@ -413,6 +494,1417 @@ def compactar_dataframe_memoria(df):
     for col in out.select_dtypes(include=["int64"]).columns:
         out[col] = pd.to_numeric(out[col], downcast="integer")
     return out
+
+
+def dataframe_para_excel_bytes(df, sheet_name="Dados"):
+    """Excel com as mesmas colunas do DataFrame (para download alinhado à tabela na tela)."""
+    if df is None or df.empty:
+        return None
+    buf = io.BytesIO()
+    sn = (sheet_name or "Dados")[:31]
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.reset_index(drop=True).to_excel(writer, sheet_name=sn, index=False)
+    return buf.getvalue()
+
+
+# Limites de linhas por tabela no PDF do dashboard (evita ficheiros gigantes).
+_DASH_PDF_MAX = {"resumo": 100, "tabela": 90, "geral": 75}
+# Colunas preferidas no relatório geral no PDF (espelho legível do ecrã).
+_DASH_PDF_GERAL_COLS = [
+    "Modelo",
+    "Série",
+    "Nota",
+    "Data Emissão",
+    "Status Final",
+    "Valor",
+    "Origem",
+    "Chave",
+]
+
+
+def _format_celula_pdf_col(nome_col, val):
+    if val is None:
+        return "-"
+    try:
+        if pd.isna(val):
+            return "-"
+    except (TypeError, ValueError):
+        pass
+    nome = str(nome_col).strip().lower()
+    s = str(val).strip()
+    if nome == "chave" and len(s) > 18:
+        return f"...{s[-14:]}"
+    if len(s) > 48:
+        return s[:45] + "..."
+    return s
+
+
+def _preview_df_para_pdf(df, max_rows, colunas_preferidas=None, msg_se_vazio=None):
+    """
+    Prepara cabeçalhos e linhas para desenhar tabela no PDF.
+    Retorno: cols, rows (listas de str), total, truncated, empty_msg opcional.
+    """
+    if df is None or df.empty:
+        return {
+            "cols": [],
+            "rows": [],
+            "total": 0,
+            "truncated": False,
+            "empty_msg": msg_se_vazio,
+        }
+    d = df.reset_index(drop=True)
+    if colunas_preferidas:
+        existentes = [c for c in colunas_preferidas if c in d.columns]
+        if existentes:
+            d = d[existentes]
+        # se nenhuma coluna preferida existir, usa todas
+        elif not existentes:
+            pass
+    cols = [str(c) for c in d.columns]
+    total = len(d)
+    truncated = total > max_rows
+    sub = d.head(max_rows)
+    rows = []
+    for _, r in sub.iterrows():
+        rows.append([_format_celula_pdf_col(c, r[c]) for c in d.columns])
+    return {"cols": cols, "rows": rows, "total": total, "truncated": truncated, "empty_msg": None}
+
+
+def _preview_terceiros_para_pdf(terc_cnt):
+    if not terc_cnt:
+        return {
+            "cols": [],
+            "rows": [],
+            "total": 0,
+            "truncated": False,
+            "empty_msg": "Nenhum XML de terceiros no lote.",
+        }
+    rows = [[str(m), str(int(q))] for m, q in sorted(terc_cnt.items(), key=lambda x: x[0])]
+    return {
+        "cols": ["Modelo", "Quantidade"],
+        "rows": rows,
+        "total": len(rows),
+        "truncated": False,
+        "empty_msg": None,
+    }
+
+
+def coletar_kpis_dashboard():
+    """Indicadores agregados para dashboard na app, Excel (folha Dashboard) e PDF."""
+    rel = st.session_state.get("relatorio") or []
+    sc = st.session_state.get("st_counts") or {}
+    df_g = st.session_state.get("df_geral")
+    df_r = st.session_state.get("df_resumo")
+    df_f = st.session_state.get("df_faltantes")
+    n_geral = len(df_g) if df_g is not None and not df_g.empty else 0
+    n_bur = len(df_f) if df_f is not None and not df_f.empty else 0
+    n_proprios = sum(1 for x in rel if "EMITIDOS_CLIENTE" in (x.get("Pasta") or ""))
+    n_terc = sum(1 for x in rel if "RECEBIDOS_TERCEIROS" in (x.get("Pasta") or ""))
+    terc_cnt = Counter()
+    for x in rel:
+        if "RECEBIDOS_TERCEIROS" in (x.get("Pasta") or ""):
+            terc_cnt[x.get("Tipo") or "Outros"] += 1
+    valor = 0.0
+    if df_r is not None and not df_r.empty and "Valor Contábil (R$)" in df_r.columns:
+        try:
+            valor = float(df_r["Valor Contábil (R$)"].sum())
+        except (TypeError, ValueError):
+            valor = 0.0
+    status_dist = {}
+    if df_g is not None and not df_g.empty and "Status Final" in df_g.columns:
+        vc = df_g["Status Final"].value_counts()
+        status_dist = {str(k): int(v) for k, v in vc.items()}
+    terc_status_dist = {}
+    if (
+        df_g is not None
+        and not df_g.empty
+        and "Origem" in df_g.columns
+        and "Status Final" in df_g.columns
+    ):
+        _m_terc = df_g["Origem"].astype(str).str.contains("TERCEIROS", case=False, na=False)
+        if _m_terc.any():
+            _vc_terc = df_g.loc[_m_terc, "Status Final"].value_counts()
+            terc_status_dist = {str(k): int(v) for k, v in _vc_terc.items()}
+    ref_ok = bool(st.session_state.get("seq_ref_ultimos"))
+    val_ok = bool(st.session_state.get("validation_done"))
+    pares = [
+        ("Gerado em", datetime.now().strftime("%d/%m/%Y %H:%M")),
+        ("Linhas no relatório geral", n_geral),
+        ("Itens no lote (relatório bruto)", len(rel)),
+        ("Autorizadas (emissão própria)", int(sc.get("AUTORIZADAS", 0) or 0)),
+        ("Canceladas (emissão própria)", int(sc.get("CANCELADOS", 0) or 0)),
+        ("Inutilizadas (emissão própria)", int(sc.get("INUTILIZADOS", 0) or 0)),
+        ("Buracos na sequência", n_bur),
+        ("XML emissão própria (itens)", n_proprios),
+        ("XML terceiros (itens)", n_terc),
+        ("Valor contábil — resumo séries (R$)", round(valor, 2)),
+        ("Referência último nº guardada", "Sim" if ref_ok else "Não"),
+        ("Validação autenticidade (Etapa 2)", "Sim" if val_ok else "Não"),
+    ]
+    df_inu = st.session_state.get("df_inutilizadas")
+    df_can = st.session_state.get("df_canceladas")
+    df_aut = st.session_state.get("df_autorizadas")
+    pdf_previews = {
+        "resumo": _preview_df_para_pdf(
+            df_r,
+            _DASH_PDF_MAX["resumo"],
+            msg_se_vazio="Sem linhas no resumo por série.",
+        ),
+        "terceiros": _preview_terceiros_para_pdf(dict(terc_cnt)),
+        "buracos": _preview_df_para_pdf(
+            df_f,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Tudo em ordem — nenhum buraco na auditoria.",
+        ),
+        "inutilizadas": _preview_df_para_pdf(
+            df_inu,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Nenhuma inutilizada listada neste detalhe.",
+        ),
+        "canceladas": _preview_df_para_pdf(
+            df_can,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Nenhuma cancelada listada neste detalhe.",
+        ),
+        "autorizadas": _preview_df_para_pdf(
+            df_aut,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Nenhuma autorizada listada neste detalhe.",
+        ),
+        "geral": _preview_df_para_pdf(
+            df_g,
+            _DASH_PDF_MAX["geral"],
+            _DASH_PDF_GERAL_COLS,
+            msg_se_vazio="Relatório geral vazio.",
+        ),
+    }
+    return {
+        "pares": pares,
+        "n_geral": n_geral,
+        "n_bur": n_bur,
+        "n_terc": n_terc,
+        "n_docs": len(rel),
+        "valor": valor,
+        "status_dist": status_dist,
+        "terc_cnt": dict(terc_cnt),
+        "terc_status_dist": terc_status_dist,
+        "sc": sc,
+        "pdf_previews": pdf_previews,
+    }
+
+
+def _excel_nome_folha_seguro(nome, usados):
+    """Nomes de folha Excel: máx. 31 caracteres; sem \\ / * ? : [ ]."""
+    inv = frozenset('[]:*?/\\')
+    base = "".join(c for c in str(nome) if c not in inv).strip()[:31] or "Sheet"
+    out = base
+    k = 2
+    while out in usados:
+        suf = f" ({k})"
+        out = (base[: max(1, 31 - len(suf))] + suf).strip()
+        k += 1
+    usados.add(out)
+    return out
+
+
+def _excel_escrever_folha_df(writer, df, nome_desejado, usados):
+    """Escreve um DataFrame na folha; se vazio, cabeçalhos ou nota curta."""
+    sn = _excel_nome_folha_seguro(nome_desejado, usados)
+    if df is None:
+        pd.DataFrame({"Nota": ["Sem dados nesta vista."]}).to_excel(
+            writer, sheet_name=sn, index=False
+        )
+        return
+    d = df.reset_index(drop=True)
+    if d.empty:
+        if len(d.columns) > 0:
+            d.to_excel(writer, sheet_name=sn, index=False)
+        else:
+            pd.DataFrame({"Nota": ["Sem registos nesta vista."]}).to_excel(
+                writer, sheet_name=sn, index=False
+            )
+    else:
+        d.to_excel(writer, sheet_name=sn, index=False)
+
+
+def _excel_df_conta_par_modelo_serie(df, col_mod, col_ser):
+    if df is None or df.empty or col_mod not in df.columns or col_ser not in df.columns:
+        return {}
+    d = df[[col_mod, col_ser]].copy()
+    d["_k"] = d[col_mod].astype(str).str.strip() + "|" + d[col_ser].astype(str).str.strip()
+    return d.groupby("_k").size().to_dict()
+
+
+def _excel_fmt_milhar_pt(n):
+    try:
+        return f"{int(n):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _excel_fmt_reais_pt_str(valor):
+    try:
+        v = float(valor)
+    except (TypeError, ValueError):
+        return "R$ 0,00"
+    neg = v < 0
+    v = abs(v)
+    cent = int(round(v * 100 + 1e-9))
+    inte, frac = divmod(cent, 100)
+    s = str(inte)
+    parts = []
+    while len(s) > 3:
+        parts.insert(0, s[-3:])
+        s = s[:-3]
+    if s:
+        parts.insert(0, s)
+    body = ".".join(parts)
+    out = f"R$ {body},{frac:02d}"
+    return f"- {out}" if neg else out
+
+
+def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
+    """
+    Folha estilo dashboard (grelha tipo Excel + gráficos nativos), alinhada ao mock «Painel Fiscal».
+    Dados reais do kpi / dataframes em sessão.
+    """
+    sn = _excel_nome_folha_seguro("Painel Fiscal", usados_nomes)
+    ws = wb.add_worksheet(sn)
+    # Parece mais “painel” / menos folha de cálculo (ideia de mock com Excel visual).
+    try:
+        ws.hide_gridlines(2)
+    except Exception:
+        pass
+
+    pm = dict(kpi.get("pares") or [])
+    sc = kpi.get("sc") or {}
+    n_docs = int(kpi.get("n_docs") or 0)
+    try:
+        n_prop = int(pm.get("XML emissão própria (itens)", 0) or 0)
+    except (TypeError, ValueError):
+        n_prop = 0
+    try:
+        n_terc_xml = int(pm.get("XML terceiros (itens)", 0) or 0)
+    except (TypeError, ValueError):
+        n_terc_xml = 0
+    aut = int(sc.get("AUTORIZADAS", 0) or 0)
+    can = int(sc.get("CANCELADOS", 0) or 0)
+    inu = int(sc.get("INUTILIZADOS", 0) or 0)
+    valor = float(kpi.get("valor") or 0)
+    n_bur = int(kpi.get("n_bur") or 0)
+    terc_cnt = kpi.get("terc_cnt") or {}
+    if not isinstance(terc_cnt, dict):
+        terc_cnt = {}
+
+    df_r = st.session_state.get("df_resumo")
+    df_aut = st.session_state.get("df_autorizadas")
+    df_can = st.session_state.get("df_canceladas")
+    df_inu = st.session_state.get("df_inutilizadas")
+    df_bur = st.session_state.get("df_faltantes")
+    if df_bur is not None and not df_bur.empty:
+        if "Serie" in df_bur.columns and "Série" not in df_bur.columns:
+            df_bur = df_bur.rename(columns={"Serie": "Série"})
+
+    c_aut = _excel_df_conta_par_modelo_serie(df_aut, "Modelo", "Série")
+    c_can = _excel_df_conta_par_modelo_serie(df_can, "Modelo", "Série")
+    c_inu = _excel_df_conta_par_modelo_serie(df_inu, "Modelo", "Série")
+    c_bur = _excel_df_conta_par_modelo_serie(df_bur, "Tipo", "Série")
+
+    mes_ref = datetime.now().strftime("%m/%Y")
+    ref_txt = "Sim" if pm.get("Referência último nº guardada") == "Sim" else "Não"
+    val_txt = "Sim" if pm.get("Validação autenticidade (Etapa 2)") == "Sim" else "Não"
+    _df_div = st.session_state.get("df_divergencias")
+    if _df_div is not None and isinstance(_df_div, pd.DataFrame) and not _df_div.empty:
+        n_div = len(_df_div)
+    else:
+        n_div = 0
+
+    cor_fundo = "#FDFBF7"
+    cor_vinho = "#5D1B36"
+    cor_borda = "#A1869E"
+    cor_texto = "#20232A"
+    marrom = cor_vinho
+
+    fmt_fundo = wb.add_format({"bg_color": cor_fundo})
+    fmt_titulo_dash = wb.add_format(
+        {
+            "bold": True,
+            "font_color": cor_vinho,
+            "bg_color": cor_fundo,
+            "font_size": 14,
+            "valign": "vcenter",
+            "align": "center",
+        }
+    )
+    fmt_titulo_card = wb.add_format(
+        {
+            "bold": True,
+            "font_color": cor_texto,
+            "bg_color": "#FFFFFF",
+            "top": 2,
+            "left": 2,
+            "right": 2,
+            "top_color": cor_borda,
+            "left_color": cor_borda,
+            "right_color": cor_borda,
+            "font_size": 9,
+            "align": "center",
+            "valign": "vcenter",
+            "text_wrap": True,
+        }
+    )
+    fmt_valor_card = wb.add_format(
+        {
+            "bold": True,
+            "font_color": cor_texto,
+            "bg_color": "#FFFFFF",
+            "left": 2,
+            "right": 2,
+            "left_color": cor_borda,
+            "right_color": cor_borda,
+            "font_size": 16,
+            "align": "center",
+            "valign": "vcenter",
+        }
+    )
+    fmt_rodape_card = wb.add_format(
+        {
+            "font_color": cor_texto,
+            "bg_color": "#FFFFFF",
+            "bottom": 2,
+            "left": 2,
+            "right": 2,
+            "bottom_color": cor_borda,
+            "left_color": cor_borda,
+            "right_color": cor_borda,
+            "font_size": 9,
+            "align": "center",
+            "valign": "top",
+            "text_wrap": True,
+        }
+    )
+    fmt_kpi_t = wb.add_format(
+        {
+            "bold": True,
+            "font_size": 10,
+            "font_color": cor_vinho,
+            "bg_color": cor_fundo,
+            "border": 1,
+            "border_color": cor_borda,
+            "text_wrap": True,
+            "valign": "vcenter",
+        }
+    )
+    fmt_kpi_l = wb.add_format(
+        {
+            "font_size": 9,
+            "border": 1,
+            "text_wrap": True,
+            "valign": "vcenter",
+            "bg_color": "#FFFFFF",
+        }
+    )
+    fmt_tab_h = wb.add_format(
+        {
+            "bold": True,
+            "font_color": "#FFFFFF",
+            "bg_color": marrom,
+            "border": 1,
+            "align": "center",
+            "valign": "vcenter",
+            "text_wrap": True,
+        }
+    )
+    fmt_tab_c = wb.add_format({"border": 1, "valign": "vcenter"})
+    fmt_tab_warn = wb.add_format({"border": 1, "font_color": "#C62828", "bold": True})
+    fmt_tab_ok = wb.add_format({"border": 1, "font_color": "#2E7D32"})
+    fmt_foot = wb.add_format({"italic": True, "font_size": 9, "font_color": "#777777"})
+
+    for row in range(0, 42):
+        ws.set_row(row, 20, fmt_fundo)
+    ws.set_row(0, 26)
+    ws.set_row(1, 22)
+    ws.set_column(0, 0, 4, fmt_fundo)
+    ws.set_column(1, 12, 13, fmt_fundo)
+
+    ws.merge_range(0, 1, 0, 12, "GARIMPEIRO | PAINEL FISCAL", fmt_titulo_dash)
+    ws.merge_range(1, 1, 1, 12, "Olá! Bem-vinda à sua boutique de dados.", fmt_titulo_dash)
+
+    terc_rodape = []
+    try:
+        itens = sorted(terc_cnt.items(), key=lambda x: int(x[1] or 0), reverse=True)
+        for mod, q in itens[:2]:
+            terc_rodape.append(f"{str(mod).strip()}: {_excel_fmt_milhar_pt(int(q or 0))}")
+    except Exception:
+        terc_rodape = []
+    if not terc_rodape:
+        terc_rodape = ["—"]
+
+    ws.merge_range(3, 1, 3, 3, "TOTAL DE DOCUMENTOS\nLIDOS (NUM GERAL)", fmt_titulo_card)
+    ws.merge_range(4, 1, 5, 3, _excel_fmt_milhar_pt(n_docs), fmt_valor_card)
+    ws.merge_range(
+        6,
+        1,
+        7,
+        3,
+        f"Próprios: {_excel_fmt_milhar_pt(n_prop)}\nTerceiros: {_excel_fmt_milhar_pt(n_terc_xml)}",
+        fmt_rodape_card,
+    )
+
+    ws.merge_range(3, 4, 3, 6, "DETALHAMENTO\nEMISSÃO PRÓPRIA", fmt_titulo_card)
+    ws.merge_range(4, 4, 5, 6, f"{_excel_fmt_milhar_pt(aut)} Aut.", fmt_valor_card)
+    ws.merge_range(
+        6,
+        4,
+        7,
+        6,
+        f"Canceladas: {_excel_fmt_milhar_pt(can)}\nInutilizadas: {_excel_fmt_milhar_pt(inu)}",
+        fmt_rodape_card,
+    )
+
+    ws.merge_range(3, 7, 3, 9, "DETALHAMENTO\nDOCUMENTOS TERCEIROS", fmt_titulo_card)
+    ws.merge_range(4, 7, 5, 9, f"{_excel_fmt_milhar_pt(n_terc_xml)} Terc.", fmt_valor_card)
+    ws.merge_range(6, 7, 7, 9, "\n".join(terc_rodape), fmt_rodape_card)
+
+    ws.merge_range(3, 10, 3, 12, "VOLUME\nFINANCEIRO", fmt_titulo_card)
+    ws.merge_range(4, 10, 5, 12, _excel_fmt_reais_pt_str(valor), fmt_valor_card)
+    ws.merge_range(6, 10, 7, 12, "", fmt_rodape_card)
+
+    chart_row = 10
+
+    # Dados ocultos para gráficos (colunas Q-S = 16+)
+    hid_c = 16
+    r0 = 40
+    ws.write(r0, hid_c, "Categoria", fmt_kpi_l)
+    ws.write(r0, hid_c + 1, "Valor", fmt_kpi_l)
+    ws.write(r0 + 1, hid_c, "Autorizadas")
+    ws.write_number(r0 + 1, hid_c + 1, max(0, aut))
+    ws.write(r0 + 2, hid_c, "Canceladas")
+    ws.write_number(r0 + 2, hid_c + 1, max(0, can))
+    ws.write(r0 + 3, hid_c, "Inutilizadas")
+    ws.write_number(r0 + 3, hid_c + 1, max(0, inu))
+
+    r1 = r0 + 5
+    terc_items = sorted(terc_cnt.items(), key=lambda x: -x[1])[:8]
+    if not terc_items:
+        ws.write(r1, hid_c, "—")
+        ws.write_number(r1, hid_c + 1, 1)
+        n_trows = 1
+    else:
+        n_trows = 0
+        for mod, q in terc_items:
+            ws.write(r1 + n_trows, hid_c, str(mod))
+            ws.write_number(r1 + n_trows, hid_c + 1, int(q))
+            n_trows += 1
+
+    r2 = r1 + max(n_trows, 1) + 2
+    ws.write(r2, hid_c, "Própria (aut.)")
+    ws.write_number(r2, hid_c + 1, max(0, aut))
+    ws.write(r2 + 1, hid_c, "Terceiros (XML)")
+    ws.write_number(r2 + 1, hid_c + 1, max(0, n_terc_xml))
+
+    ws.set_column(hid_c, hid_c + 1, None, None, {"hidden": True})
+
+    ch1 = wb.add_chart({"type": "doughnut"})
+    ch1.add_series(
+        {
+            "name": "Emissão própria",
+            "categories": [sn, r0 + 1, hid_c, r0 + 3, hid_c],
+            "values": [sn, r0 + 1, hid_c + 1, r0 + 3, hid_c + 1],
+        }
+    )
+    ch1.set_title({"name": f"STATUS DE EMISSÃO PRÓPRIA ({mes_ref})"})
+    ch1.set_style(10)
+    ws.insert_chart(chart_row, 0, ch1, {"x_scale": 0.95, "y_scale": 0.95})
+
+    ch2 = wb.add_chart({"type": "doughnut"})
+    last_tr = r1 + n_trows - 1
+    ch2.add_series(
+        {
+            "name": "Terceiros",
+            "categories": [sn, r1, hid_c, last_tr, hid_c],
+            "values": [sn, r1, hid_c + 1, last_tr, hid_c + 1],
+        }
+    )
+    ch2.set_title({"name": f"DISTRIBUIÇÃO TERCEIROS POR MODELO ({mes_ref})"})
+    ch2.set_style(10)
+    ws.insert_chart(chart_row, 5, ch2, {"x_scale": 0.95, "y_scale": 0.95})
+
+    ch3 = wb.add_chart({"type": "area"})
+    ch3.add_series(
+        {
+            "name": "No lote",
+            "categories": [sn, r2, hid_c, r2 + 1, hid_c],
+            "values": [sn, r2, hid_c + 1, r2 + 1, hid_c + 1],
+            "fill": {"color": cor_borda},
+            "line": {"color": cor_vinho},
+        }
+    )
+    ch3.set_title({"name": "RESUMO RÁPIDO (autorizadas própria vs XML terceiros)"})
+    ch3.set_legend({"none": True})
+    ws.insert_chart(chart_row, 10, ch3, {"x_scale": 0.95, "y_scale": 0.95})
+
+    # Alertas de série (séries com buracos) — à direita, acima dos gráficos
+    alert_row = 3
+    ws.write(alert_row, 14, "ALERTAS DE SÉRIE", fmt_kpi_t)
+    if df_bur is not None and not df_bur.empty and "Tipo" in df_bur.columns and "Série" in df_bur.columns:
+        gb = df_bur.groupby(["Tipo", "Série"]).size().reset_index(name="n")
+        gb = gb.sort_values("n", ascending=False).head(8)
+        ar = alert_row + 1
+        for _, rr in gb.iterrows():
+            ws.write(ar, 14, f"{rr['Tipo']} sér. {rr['Série']}: {int(rr['n'])} buraco(s)", fmt_tab_warn)
+            ar += 1
+            if ar > alert_row + 6:
+                break
+        if ar == alert_row + 1:
+            ws.write(ar, 14, "Nenhum buraco listado.", fmt_tab_ok)
+    else:
+        ws.write(alert_row + 1, 14, "Sem buracos ou dados indisponíveis.", fmt_tab_ok)
+
+    ctx_r = alert_row + 10
+    ws.write(ctx_r, 14, f"Último nº guardado: {ref_txt}", fmt_kpi_l)
+    ws.write(ctx_r + 1, 14, f"Etapa 2: {val_txt}", fmt_kpi_l)
+    if n_div:
+        ws.write(ctx_r + 2, 14, f"Divergências XML×Sefaz: {n_div}", fmt_tab_warn)
+
+    # Tabela totalizador (abaixo dos gráficos)
+    t_row = chart_row + 16
+    ws.merge_range(
+        t_row,
+        0,
+        t_row,
+        8,
+        f"TOTALIZADOR DE SÉRIE E FAIXAS ({mes_ref})",
+        fmt_kpi_t,
+    )
+    t_row += 1
+    headers = [
+        "Modelo",
+        "Série",
+        "Faixa (início–fim)",
+        "Qtd lidos",
+        "Autorizadas",
+        "Canceladas",
+        "Inutilizadas",
+        "Buracos",
+        "OK?",
+    ]
+    for c, h in enumerate(headers):
+        ws.write(t_row, c, h, fmt_tab_h)
+    t_row += 1
+
+    if df_r is not None and not df_r.empty:
+        doc_col = "Documento" if "Documento" in df_r.columns else None
+        ser_col = "Série" if "Série" in df_r.columns else None
+        if doc_col and ser_col:
+            for _, row in df_r.iterrows():
+                mod = str(row.get(doc_col, "")).strip()
+                ser = str(row.get(ser_col, "")).strip()
+                k = f"{mod}|{ser}"
+                ini = row.get("Início", "")
+                fim = row.get("Fim", "")
+                faixa = f"{ini} – {fim}"
+                qtd = row.get("Quantidade", "")
+                na = int(c_aut.get(k, 0))
+                nc = int(c_can.get(k, 0))
+                ni = int(c_inu.get(k, 0))
+                nb = int(c_bur.get(k, 0))
+                ok = "✓" if nb == 0 else "▲"
+                fmt_end = fmt_tab_ok if nb == 0 else fmt_tab_warn
+                ws.write(t_row, 0, mod, fmt_tab_c)
+                ws.write(t_row, 1, ser, fmt_tab_c)
+                ws.write(t_row, 2, faixa, fmt_tab_c)
+                ws.write(t_row, 3, qtd, fmt_tab_c)
+                ws.write_number(t_row, 4, na, fmt_tab_c)
+                ws.write_number(t_row, 5, nc, fmt_tab_c)
+                ws.write_number(t_row, 6, ni, fmt_tab_c)
+                ws.write_number(t_row, 7, nb, fmt_tab_c)
+                ws.write(t_row, 8, ok, fmt_end)
+                t_row += 1
+        else:
+            ws.merge_range(t_row, 0, t_row, 8, "Resumo por série sem colunas esperadas.", fmt_tab_c)
+            t_row += 1
+    else:
+        ws.merge_range(t_row, 0, t_row, 8, "Sem resumo por série neste lote.", fmt_tab_c)
+        t_row += 1
+
+    t_row += 1
+    ws.merge_range(t_row, 0, t_row, 8, "Garimpeiro · Painel gerado a partir do lote atual (mesmos dados que na app).", fmt_foot)
+
+    ws.set_column(0, 0, 12)
+    ws.set_column(1, 1, 10)
+    ws.set_column(2, 2, 24)
+    ws.set_column(3, 8, 11)
+    ws.set_column(14, 15, 20)
+
+
+def excel_relatorio_geral_com_dashboard_bytes(df_geral):
+    """
+    Excel com várias folhas alinhadas às abas do ecrã:
+    Geral, Buracos, Inutilizadas, Canceladas, Autorizadas, CT-e lidas, Terceiros lidas, Dashboard, Painel Fiscal.
+    """
+    if df_geral is None or df_geral.empty:
+        return None
+    kpi = coletar_kpis_dashboard()
+    buf = io.BytesIO()
+    usados_nomes = set()
+
+    df_bur = st.session_state.get("df_faltantes")
+    df_inu = st.session_state.get("df_inutilizadas")
+    df_can = st.session_state.get("df_canceladas")
+    df_aut = st.session_state.get("df_autorizadas")
+
+    df_g = df_geral.reset_index(drop=True)
+    if "Modelo" in df_g.columns:
+        df_cte = df_g[df_g["Modelo"].astype(str).str.strip().eq("CT-e")].copy()
+    else:
+        df_cte = pd.DataFrame()
+    if "Origem" in df_g.columns:
+        df_terc_rows = df_g[
+            df_g["Origem"].astype(str).str.contains("TERCEIROS", case=False, na=False)
+        ].copy()
+    else:
+        df_terc_rows = pd.DataFrame()
+
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        _excel_escrever_folha_df(writer, df_g, "Geral", usados_nomes)
+        _excel_escrever_folha_df(writer, df_bur, "Buracos", usados_nomes)
+        _excel_escrever_folha_df(writer, df_inu, "Inutilizadas", usados_nomes)
+        _excel_escrever_folha_df(writer, df_can, "Canceladas", usados_nomes)
+        _excel_escrever_folha_df(writer, df_aut, "Autorizadas", usados_nomes)
+        _excel_escrever_folha_df(writer, df_cte, "CT-e lidas", usados_nomes)
+        _excel_escrever_folha_df(writer, df_terc_rows, "Terceiros lidas", usados_nomes)
+
+        wb = writer.book
+        dash_sn = _excel_nome_folha_seguro("Dashboard", usados_nomes)
+        ws = wb.add_worksheet(dash_sn)
+        title_f = wb.add_format(
+            {"bold": True, "font_size": 16, "font_color": "#AD1457", "valign": "vcenter"}
+        )
+        hdr_f = wb.add_format(
+            {"bold": True, "bg_color": "#F8BBD0", "border": 1, "valign": "vcenter"}
+        )
+        cell_f = wb.add_format({"border": 1, "valign": "vcenter"})
+        sub_f = wb.add_format({"bold": True, "font_size": 11, "bg_color": "#FCE4EC", "border": 1})
+
+        ws.merge_range(0, 0, 0, 3, "Garimpeiro — Dashboard", title_f)
+        ws.set_row(0, 26)
+        row = 2
+        ws.write(row, 0, "Indicador", hdr_f)
+        ws.write(row, 1, "Valor", hdr_f)
+        row += 1
+        for lab, val in kpi["pares"]:
+            ws.write(row, 0, lab, cell_f)
+            ws.write(row, 1, val, cell_f)
+            row += 1
+        row += 1
+
+        df_r = st.session_state.get("df_resumo")
+        if df_r is not None and not df_r.empty:
+            last_c = max(5, len(df_r.columns) - 1)
+            ws.merge_range(row, 0, row, last_c, "Resumo por série (emissão própria)", sub_f)
+            row += 1
+            for c, colname in enumerate(df_r.columns):
+                ws.write(row, c, str(colname), hdr_f)
+            row += 1
+            for _, rr in df_r.iterrows():
+                for c, colname in enumerate(df_r.columns):
+                    v = rr[colname]
+                    ws.write(row, c, v, cell_f)
+                row += 1
+            row += 1
+
+        tc = kpi.get("terc_cnt") or {}
+        if tc:
+            ws.merge_range(row, 0, row, 2, "Terceiros — quantidade por modelo", sub_f)
+            row += 1
+            ws.write(row, 0, "Modelo", hdr_f)
+            ws.write(row, 1, "Quantidade", hdr_f)
+            row += 1
+            for mod, q in sorted(tc.items(), key=lambda x: x[0]):
+                ws.write(row, 0, mod, cell_f)
+                ws.write(row, 1, int(q), cell_f)
+                row += 1
+
+        ws.set_column(0, 0, 42)
+        ws.set_column(1, 1, 22)
+
+        _excel_escrever_painel_fiscal(wb, kpi, usados_nomes)
+
+    return buf.getvalue()
+
+
+def _pdf_ascii_seguro(txt):
+    if txt is None:
+        return ""
+    s = str(txt)
+    return (
+        unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii") or "-"
+    )
+
+
+def _pdf_txt(pdf, s, use_dejavu):
+    if use_dejavu:
+        return str(s)
+    return _pdf_ascii_seguro(s)
+
+
+def _pdf_font(pdf, use_dejavu, style="", size=10):
+    fam = "DejaVu" if use_dejavu else "Helvetica"
+    try:
+        pdf.set_font(fam, style, size)
+    except Exception:
+        if use_dejavu and style == "B":
+            try:
+                pdf.set_font("DejaVu", "", min(size + 1.4, 16))
+            except Exception:
+                pdf.set_font("Helvetica", "B", size)
+        else:
+            pdf.set_font("Helvetica", "" if not style else "B", size)
+
+
+def _pdf_multi_texto_largura_total(pdf, altura_linha, texto, use_dejavu):
+    """
+    Texto em bloco na largura útil da página.
+    Evita FPDFException (fpdf2): multi_cell(0, ...) com get_x() à direita — largura útil ~0.
+    """
+    pdf.set_x(pdf.l_margin)
+    w = max(30.0, pdf.w - pdf.l_margin - pdf.r_margin)
+    pdf.multi_cell(w, altura_linha, _pdf_txt(pdf, texto, use_dejavu))
+
+
+def _pdf_cabecalho_executivo_painel(pdf, use_dejavu, linha_extra=None):
+    """Cabeçalho alinhado ao painel da app: off-white, texto vinho."""
+    y = pdf.get_y()
+    w = pdf.w - pdf.l_margin - pdf.r_margin
+    h = 20.0
+    pdf.set_fill_color(253, 251, 247)
+    pdf.set_draw_color(220, 210, 200)
+    pdf.set_line_width(0.25)
+    pdf.rect(pdf.l_margin, y, w, h, "DF")
+    _pdf_font(pdf, use_dejavu, "B", 12)
+    pdf.set_text_color(93, 27, 54)
+    pdf.set_xy(pdf.l_margin + 4, y + 3.5)
+    pdf.cell(w - 8, 6, _pdf_txt(pdf, "GARIMPEIRO · PAINEL DO LOTE", use_dejavu), ln=False)
+    _pdf_font(pdf, use_dejavu, "", 7.5)
+    pdf.set_text_color(90, 75, 85)
+    sub = "Boutique de dados · mesmo desenho que no ecrã principal."
+    if linha_extra:
+        sub = f"{linha_extra} · {sub}"
+    pdf.set_xy(pdf.l_margin + 4, y + 10)
+    pdf.cell(w - 8, 4.5, _pdf_txt(pdf, sub, use_dejavu), ln=False)
+    dt = datetime.now().strftime("%d/%m/%Y · %H:%M")
+    _pdf_font(pdf, use_dejavu, "", 6.5)
+    pdf.set_text_color(130, 115, 125)
+    pdf.set_xy(pdf.l_margin + 4, y + 15)
+    pdf.cell(w - 8, 4, _pdf_txt(pdf, dt, use_dejavu), ln=False)
+    pdf.set_text_color(32, 35, 42)
+    pdf.set_xy(pdf.l_margin, y + h + 3)
+
+
+def _pdf_quatro_kpi_cards_executivo(pdf, kpi, use_dejavu):
+    """Quatro cartões KPI como no Streamlit / Excel (borda #A1869E, fundo branco)."""
+    pm = dict(kpi.get("pares") or [])
+    try:
+        n_prop = int(pm.get("XML emissão própria (itens)", 0) or 0)
+    except (TypeError, ValueError):
+        n_prop = 0
+    try:
+        n_terc_xml = int(pm.get("XML terceiros (itens)", 0) or 0)
+    except (TypeError, ValueError):
+        n_terc_xml = 0
+    n_docs = int(kpi.get("n_docs") or 0)
+    sc = kpi.get("sc") or {}
+    aut = int(sc.get("AUTORIZADAS", 0) or 0)
+    can = int(sc.get("CANCELADOS", 0) or 0)
+    inu = int(sc.get("INUTILIZADOS", 0) or 0)
+    valor = float(kpi.get("valor") or 0.0)
+    terc_cnt = kpi.get("terc_cnt") or {}
+    if not isinstance(terc_cnt, dict):
+        terc_cnt = {}
+    terc_linhas = []
+    try:
+        itens = sorted(terc_cnt.items(), key=lambda x: int(x[1] or 0), reverse=True)
+        for mod, q in itens[:2]:
+            terc_linhas.append(f"{str(mod).strip()}: {_excel_fmt_milhar_pt(int(q or 0))}")
+    except Exception:
+        terc_linhas = []
+    if not terc_linhas:
+        terc_linhas = ["—"]
+
+    specs = [
+        (
+            "TOTAL DE DOCUMENTOS\nLIDOS (NUM GERAL)",
+            _excel_fmt_milhar_pt(n_docs),
+            f"Próprios: {_excel_fmt_milhar_pt(n_prop)}\nTerceiros: {_excel_fmt_milhar_pt(n_terc_xml)}",
+        ),
+        (
+            "DETALHAMENTO\nEMISSÃO PRÓPRIA",
+            f"{_excel_fmt_milhar_pt(aut)} Aut.",
+            f"Canceladas: {_excel_fmt_milhar_pt(can)}\nInutilizadas: {_excel_fmt_milhar_pt(inu)}",
+        ),
+        (
+            "DETALHAMENTO\nDOCUMENTOS TERCEIROS",
+            f"{_excel_fmt_milhar_pt(n_terc_xml)} Terc.",
+            "\n".join(terc_linhas),
+        ),
+        (
+            "VOLUME\nFINANCEIRO",
+            _excel_fmt_reais_pt_str(valor),
+            "Soma no resumo por série",
+        ),
+    ]
+
+    margin = pdf.l_margin
+    full = pdf.w - margin - pdf.r_margin
+    gap = 2.4
+    ncols = 4
+    cw = (full - gap * (ncols - 1)) / ncols
+    y0 = pdf.get_y()
+    card_h = 38.0
+    title_h = 10.5
+    foot_h = 12.0
+    val_h = card_h - title_h - foot_h
+    bor = (161, 134, 158)
+    sep = (210, 195, 205)
+
+    pdf.set_line_width(0.45)
+    for i, (tit, val, foot) in enumerate(specs):
+        x = margin + i * (cw + gap)
+        pdf.set_fill_color(255, 255, 255)
+        pdf.set_draw_color(*bor)
+        pdf.rect(x, y0, cw, card_h, "D")
+        pdf.set_draw_color(*sep)
+        pdf.set_line_width(0.15)
+        pdf.line(x, y0 + title_h, x + cw, y0 + title_h)
+        pdf.line(x, y0 + title_h + val_h, x + cw, y0 + title_h + val_h)
+        pdf.set_line_width(0.45)
+
+        _pdf_font(pdf, use_dejavu, "B", 5.8)
+        pdf.set_text_color(32, 35, 42)
+        yl = y0 + 2.2
+        for part in str(tit).split("\n")[:2]:
+            pdf.set_xy(x + 1.5, yl)
+            pdf.cell(cw - 3, 3.4, _pdf_txt(pdf, part.strip(), use_dejavu), align="C", ln=False)
+            yl += 3.5
+
+        _pdf_font(pdf, use_dejavu, "B", 9.5 if len(val) < 14 else 8.0)
+        pdf.set_text_color(32, 35, 42)
+        pdf.set_xy(x + 1.5, y0 + title_h + 3.5)
+        pdf.cell(cw - 3, val_h - 4, _pdf_txt(pdf, val, use_dejavu), align="C", ln=False)
+
+        _pdf_font(pdf, use_dejavu, "", 5.6)
+        pdf.set_text_color(61, 53, 64)
+        yf = y0 + title_h + val_h + 2.0
+        for fl in str(foot).split("\n")[:3]:
+            pdf.set_xy(x + 1.5, yf)
+            pdf.cell(cw - 3, 3.2, _pdf_txt(pdf, fl.strip(), use_dejavu), align="C", ln=False)
+            yf += 3.25
+
+    pdf.set_xy(pdf.l_margin, y0 + card_h + 4)
+
+
+def _pdf_faixa_buracos_executivo(pdf, n_bur, use_dejavu):
+    """Uma linha de contexto: buracos (saiu do antigo quadro 2×2)."""
+    margin = pdf.l_margin
+    full = pdf.w - margin - pdf.r_margin
+    y = pdf.get_y()
+    h = 7.5
+    pdf.set_fill_color(255, 255, 255)
+    pdf.set_draw_color(161, 134, 158)
+    pdf.set_line_width(0.2)
+    pdf.rect(margin, y, full, h, "D")
+    _pdf_font(pdf, use_dejavu, "", 7)
+    pdf.set_text_color(93, 27, 54)
+    pdf.set_xy(margin + 3, y + 2)
+    pdf.cell(
+        full - 6,
+        4,
+        _pdf_txt(
+            pdf,
+            f"Buracos na sequência (emissão própria): {_excel_fmt_milhar_pt(int(n_bur or 0))}",
+            use_dejavu,
+        ),
+        ln=False,
+    )
+    pdf.set_xy(pdf.l_margin, y + h + 3)
+
+
+def _pdf_serie_cards_emissao_propria(pdf, df_resumo, use_dejavu):
+    """Cartões no mesmo padrão dos KPI: cada série da emissão própria com faixa inicial–final."""
+    pdf.ln(1)
+    _pdf_font(pdf, use_dejavu, "B", 9)
+    pdf.set_text_color(93, 27, 54)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(0, 5, _pdf_txt(pdf, "Emissão própria — séries e faixas de numeração", use_dejavu), ln=True)
+    _pdf_font(pdf, use_dejavu, "", 7)
+    pdf.set_text_color(90, 75, 85)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(
+        0,
+        4,
+        _pdf_txt(
+            pdf,
+            "Um cartão por modelo e série: primeiro e último número encontrados nos XML do lote.",
+            use_dejavu,
+        ),
+        ln=True,
+    )
+    pdf.ln(1.5)
+
+    if df_resumo is None or not isinstance(df_resumo, pd.DataFrame) or df_resumo.empty:
+        _pdf_font(pdf, use_dejavu, "", 8)
+        pdf.set_text_color(130, 115, 125)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 5, _pdf_txt(pdf, "Sem linhas no resumo por série.", use_dejavu), ln=True)
+        pdf.ln(2)
+        return
+
+    doc_col = "Documento" if "Documento" in df_resumo.columns else None
+    ser_col = "Série" if "Série" in df_resumo.columns else ("Serie" if "Serie" in df_resumo.columns else None)
+    if not doc_col or not ser_col:
+        _pdf_font(pdf, use_dejavu, "", 8)
+        pdf.set_text_color(180, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(
+            0,
+            5,
+            _pdf_txt(pdf, "Resumo sem colunas Documento/Série — cartões não gerados.", use_dejavu),
+            ln=True,
+        )
+        pdf.ln(2)
+        return
+
+    ini_col = "Início" if "Início" in df_resumo.columns else ("Inicio" if "Inicio" in df_resumo.columns else None)
+    fim_col = "Fim" if "Fim" in df_resumo.columns else None
+    qtd_col = "Quantidade" if "Quantidade" in df_resumo.columns else None
+    val_col = "Valor Contábil (R$)" if "Valor Contábil (R$)" in df_resumo.columns else None
+
+    margin = pdf.l_margin
+    full = pdf.w - margin - pdf.r_margin
+    gap_h = 2.4
+    gap_v = 2.8
+    ncols = 2
+    cw = (full - gap_h * (ncols - 1)) / ncols
+    card_h = 33.0
+    title_h = 10.0
+    foot_h = 10.5
+    val_h = card_h - title_h - foot_h
+    bor = (161, 134, 158)
+    sep = (210, 195, 205)
+
+    recs = [row for _, row in df_resumo.iterrows()]
+    idx = 0
+    while idx < len(recs):
+        y0 = pdf.get_y()
+        if y0 + card_h > 275:
+            pdf.add_page()
+            y0 = pdf.get_y()
+        for col in range(ncols):
+            if idx >= len(recs):
+                break
+            row = recs[idx]
+            x = margin + col * (cw + gap_h)
+            doc = str(row.get(doc_col, "") or "").strip()
+            ser = str(row.get(ser_col, "") or "").strip()
+            if len(doc) > 24:
+                doc = doc[:22] + "…"
+            tit_a = doc if doc else "—"
+            tit_b = f"Série {ser}" if ser else "Série —"
+            ini = row.get(ini_col, "") if ini_col else ""
+            fim = row.get(fim_col, "") if fim_col else ""
+            val_mid = f"{ini} – {fim}" if (str(ini) != "" or str(fim) != "") else "—"
+            foot_lines = []
+            if qtd_col is not None and row.get(qtd_col, "") != "" and str(row.get(qtd_col)).strip() != "":
+                try:
+                    qv = int(row[qtd_col])
+                    foot_lines.append(f"Quantidade: {_excel_fmt_milhar_pt(qv)}")
+                except (TypeError, ValueError):
+                    foot_lines.append(f"Quantidade: {row.get(qtd_col)}")
+            if val_col is not None:
+                try:
+                    vv = float(row[val_col])
+                    foot_lines.append(_excel_fmt_reais_pt_str(vv))
+                except (TypeError, ValueError):
+                    pass
+
+            pdf.set_line_width(0.45)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.set_draw_color(*bor)
+            pdf.rect(x, y0, cw, card_h, "D")
+            pdf.set_draw_color(*sep)
+            pdf.set_line_width(0.15)
+            pdf.line(x, y0 + title_h, x + cw, y0 + title_h)
+            pdf.line(x, y0 + title_h + val_h, x + cw, y0 + title_h + val_h)
+            pdf.set_line_width(0.45)
+
+            _pdf_font(pdf, use_dejavu, "B", 6.5)
+            pdf.set_text_color(32, 35, 42)
+            yl = y0 + 2.0
+            pdf.set_xy(x + 1.5, yl)
+            pdf.cell(cw - 3, 3.3, _pdf_txt(pdf, tit_a, use_dejavu), align="C", ln=False)
+            yl += 3.5
+            pdf.set_xy(x + 1.5, yl)
+            pdf.cell(cw - 3, 3.3, _pdf_txt(pdf, tit_b, use_dejavu), align="C", ln=False)
+
+            vm = str(val_mid)
+            fs_val = 11.0 if len(vm) < 20 else (9.0 if len(vm) < 28 else 7.5)
+            _pdf_font(pdf, use_dejavu, "B", fs_val)
+            pdf.set_text_color(32, 35, 42)
+            pdf.set_xy(x + 1.5, y0 + title_h + 3.5)
+            pdf.cell(cw - 3, val_h - 4, _pdf_txt(pdf, vm, use_dejavu), align="C", ln=False)
+
+            _pdf_font(pdf, use_dejavu, "", 5.8)
+            pdf.set_text_color(61, 53, 64)
+            yf = y0 + title_h + val_h + 1.8
+            for fl in foot_lines[:2]:
+                if not str(fl).strip():
+                    continue
+                pdf.set_xy(x + 1.5, yf)
+                pdf.cell(cw - 3, 3.0, _pdf_txt(pdf, fl, use_dejavu), align="C", ln=False)
+                yf += 3.05
+
+            idx += 1
+        pdf.set_xy(margin, y0 + card_h + gap_v)
+
+    pdf.ln(1)
+
+
+def _pdf_lista_rosa(pdf, titulo, pares, use_dejavu, subtitulo=None):
+    """Lista rótulo → número com linhas em grelha suave (folha 1, como no PDF de referência)."""
+    if not pares:
+        return
+    pdf.ln(2)
+    _pdf_font(pdf, use_dejavu, "B", 9)
+    pdf.set_text_color(173, 20, 87)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(0, 5, _pdf_txt(pdf, titulo, use_dejavu), ln=True)
+    if subtitulo:
+        _pdf_font(pdf, use_dejavu, "", 7)
+        pdf.set_text_color(130, 85, 115)
+        _pdf_multi_texto_largura_total(pdf, 3.5, subtitulo, use_dejavu)
+    pdf.ln(1)
+    full = pdf.w - pdf.l_margin - pdf.r_margin
+    row_h = 6
+    for lab, val in pares:
+        if pdf.get_y() > 268:
+            pdf.add_page()
+        y = pdf.get_y()
+        pdf.set_fill_color(255, 252, 254)
+        pdf.set_draw_color(255, 192, 216)
+        pdf.rect(pdf.l_margin, y, full, row_h, "D")
+        _pdf_font(pdf, use_dejavu, "", 8)
+        pdf.set_text_color(95, 55, 80)
+        pdf.set_xy(pdf.l_margin + 3, y + 1.3)
+        pdf.cell(full * 0.62, row_h - 2, _pdf_txt(pdf, str(lab), use_dejavu), ln=False)
+        _pdf_font(pdf, use_dejavu, "B", 9.5)
+        pdf.set_text_color(199, 21, 133)
+        pdf.set_xy(pdf.l_margin + full * 0.65, y + 1)
+        pdf.cell(full * 0.32, row_h - 2, _pdf_txt(pdf, str(val), use_dejavu), ln=False, align="R")
+        pdf.set_xy(pdf.l_margin, y + row_h)
+    pdf.ln(0.5)
+
+
+def _pdf_extras_lote_lista_rosa(pdf, kpi, use_dejavu):
+    """Linhas do relatório geral, valor, XML próprio/terceiro — lista simples."""
+    pm = dict(kpi.get("pares") or [])
+    val = float(kpi.get("valor") or 0)
+    val_txt = f"{val:,.2f}".replace(",", " ").replace(".", ",") + " R$"
+    itens = []
+    if "Linhas no relatório geral" in pm:
+        itens.append(("Linhas no relatório geral (expandido)", str(pm["Linhas no relatório geral"])))
+    itens.append(("Valor contábil no resumo por série", val_txt))
+    if "XML emissão própria (itens)" in pm:
+        itens.append(("XML emissão própria", str(pm["XML emissão própria (itens)"])))
+    if "XML terceiros (itens)" in pm:
+        itens.append(("XML terceiros", str(pm["XML terceiros (itens)"])))
+    _pdf_lista_rosa(
+        pdf,
+        "Mais números do lote",
+        itens,
+        use_dejavu,
+        subtitulo="Complemento aos totalizadores acima (sem gráficos — só contagem neste garimpo).",
+    )
+
+
+def _pdf_contexto_lista_rosa(pdf, pares_lista, use_dejavu):
+    """Referência lateral, Etapa 2, gerado em — estilo suave."""
+    pm = dict(pares_lista or [])
+    rotulos = [
+        ("Gerado em", "Gerado em"),
+        ("Referência último nº guardada", "Último nº por série (lateral)"),
+        ("Validação autenticidade (Etapa 2)", "Autenticidade (Etapa 2)"),
+    ]
+    itens = [(c, pm[k]) for k, c in rotulos if k in pm]
+    if not itens:
+        return
+    _pdf_lista_rosa(
+        pdf,
+        "Contexto na app (opcional)",
+        itens,
+        use_dejavu,
+        subtitulo="Opções que usou na barra lateral ou na Etapa 2.",
+    )
+
+
+def _pdf_secao_resumo_folha(pdf, titulo, use_dejavu, texto_explicativo=None):
+    """Título de secção + texto explicativo (folhas descritivas 2+)."""
+    pdf.ln(3)
+    pdf.set_draw_color(255, 105, 180)
+    pdf.set_line_width(0.35)
+    yl = pdf.get_y()
+    pdf.line(pdf.l_margin, yl, pdf.l_margin + 28, yl)
+    pdf.set_line_width(0.2)
+    pdf.set_draw_color(255, 192, 216)
+    pdf.line(pdf.l_margin + 30, yl, pdf.w - pdf.r_margin, yl)
+    pdf.ln(2)
+    _pdf_font(pdf, use_dejavu, "B", 9.5)
+    pdf.set_text_color(136, 14, 79)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(0, 5, _pdf_txt(pdf, titulo, use_dejavu), ln=True)
+    pdf.set_text_color(95, 55, 80)
+    pdf.ln(0.5)
+    if texto_explicativo:
+        _pdf_font(pdf, use_dejavu, "", 7.5)
+        pdf.set_text_color(130, 85, 115)
+        _pdf_multi_texto_largura_total(pdf, 3.6, texto_explicativo, use_dejavu)
+        pdf.set_text_color(60, 40, 55)
+        pdf.ln(0.5)
+
+
+def _pdf_tabela_preview(pdf, preview, use_dejavu, y_max=276, estilo_moderno=False):
+    cols = preview.get("cols") or []
+    rows = preview.get("rows") or []
+    em = preview.get("empty_msg")
+    if em and not cols:
+        _pdf_font(pdf, use_dejavu, "", 8.5)
+        pdf.set_text_color(148, 163, 184)
+        _pdf_multi_texto_largura_total(pdf, 4.5, em, use_dejavu)
+        pdf.set_text_color(30, 41, 59)
+        return
+    if not cols:
+        return
+    max_w = pdf.w - pdf.l_margin - pdf.r_margin
+    n = len(cols)
+    fs = 6.0 if n >= 8 else 7.0
+    row_h = 3.8
+    cw = max_w / n
+
+    def _cabecalho():
+        if estilo_moderno:
+            pdf.set_fill_color(252, 210, 228)
+            pdf.set_draw_color(244, 143, 177)
+            pdf.set_text_color(99, 17, 58)
+        else:
+            pdf.set_fill_color(248, 187, 208)
+            pdf.set_draw_color(236, 160, 188)
+            pdf.set_text_color(55, 55, 60)
+        _pdf_font(pdf, use_dejavu, "B", fs - 0.2)
+        for c in cols:
+            t = str(c)[:16] + ("…" if len(str(c)) > 16 else "")
+            pdf.cell(cw, row_h + 0.7, _pdf_txt(pdf, t, use_dejavu), border=1, align="C", fill=True)
+        pdf.ln()
+
+    _cabecalho()
+    _pdf_font(pdf, use_dejavu, "", fs)
+    for ri, row in enumerate(rows):
+        if pdf.get_y() > y_max:
+            pdf.add_page()
+            _cabecalho()
+            _pdf_font(pdf, use_dejavu, "", fs)
+        if estilo_moderno and ri % 2 == 0:
+            pdf.set_fill_color(255, 248, 252)
+        else:
+            pdf.set_fill_color(255, 255, 255)
+        pdf.set_draw_color(255, 205, 220)
+        for j, cell in enumerate(row):
+            s = str(cell)
+            lim = 14 if cw < 22 else 22
+            if len(s) > lim:
+                s = s[: max(1, lim - 2)] + "…"
+            pdf.set_text_color(75, 40, 60)
+            pdf.cell(cw, row_h, _pdf_txt(pdf, s, use_dejavu), border=1, align="L", fill=True)
+        pdf.ln()
+    pdf.set_text_color(30, 41, 59)
+    if preview.get("truncated"):
+        pdf.ln(1)
+        _pdf_font(pdf, use_dejavu, "", 6.5)
+        pdf.set_text_color(148, 163, 184)
+        tot = preview.get("total", 0)
+        most = len(rows)
+        msg = f"Amostra: {most}/{tot} linhas — Excel na app para tudo."
+        _pdf_multi_texto_largura_total(pdf, 3.5, msg, use_dejavu)
+        pdf.set_text_color(30, 41, 59)
+
+
+def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
+    """
+    PDF: folha 1 = cabeçalho executivo + quatro cartões KPI, faixa de buracos, cartões por série (emissão própria),
+    listas terceiros / extras; folhas seguintes = indicadores detalhados em tabelas com bordas.
+    """
+    try:
+        from fpdf import FPDF
+        import fpdf as _fpdf_mod
+    except ImportError:
+        return None
+    if not kpi:
+        return None
+
+    font_path = None
+    font_bold_path = None
+    try:
+        _root = Path(_fpdf_mod.__file__).resolve().parent / "font"
+        _p = _root / "DejaVuSans.ttf"
+        if _p.is_file():
+            font_path = str(_p)
+        _pb = _root / "DejaVuSans-Bold.ttf"
+        if _pb.is_file():
+            font_bold_path = str(_pb)
+    except Exception:
+        font_path = None
+        font_bold_path = None
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.set_margins(12, 12, 12)
+    pdf.add_page()
+
+    use_dejavu = bool(font_path)
+    if use_dejavu:
+        pdf.add_font("DejaVu", "", font_path)
+        if font_bold_path:
+            pdf.add_font("DejaVu", "B", font_bold_path)
+
+    linha_cnpj = f"CNPJ {cnpj_fmt}" if cnpj_fmt else None
+    _pdf_cabecalho_executivo_painel(pdf, use_dejavu, linha_cnpj)
+    _pdf_quatro_kpi_cards_executivo(pdf, kpi, use_dejavu)
+    _pdf_faixa_buracos_executivo(pdf, int(kpi.get("n_bur") or 0), use_dejavu)
+    _pdf_serie_cards_emissao_propria(pdf, df_resumo, use_dejavu)
+
+    tc = kpi.get("terc_cnt") or {}
+    if tc:
+        pares_tc = sorted(tc.items(), key=lambda x: x[0])
+        _pdf_lista_rosa(
+            pdf,
+            "Terceiros · por tipo de documento",
+            [(str(m), str(int(q))) for m, q in pares_tc],
+            use_dejavu,
+            subtitulo="Contagem de XML recebidos de terceiros (NF-e, NFC-e, CT-e, MDF-e…).",
+        )
+
+    tsd = kpi.get("terc_status_dist") or {}
+    if tsd:
+        pares_st = sorted(tsd.items(), key=lambda x: -x[1])
+        _pdf_lista_rosa(
+            pdf,
+            "Terceiros · por status (como na emissão própria)",
+            [(str(k), str(int(v))) for k, v in pares_st],
+            use_dejavu,
+            subtitulo="Situação das linhas de terceiros no relatório geral: normal, cancelada, inutilizada, etc.",
+        )
+
+    _pdf_extras_lote_lista_rosa(pdf, kpi, use_dejavu)
+    _pdf_contexto_lista_rosa(pdf, kpi.get("pares", []), use_dejavu)
+
+    pv = kpi.get("pdf_previews") or {}
+
+    pdf.add_page()
+    _pdf_font(pdf, use_dejavu, "B", 11)
+    pdf.set_text_color(136, 14, 79)
+    pdf.set_x(pdf.l_margin)
+    pdf.cell(0, 7, _pdf_txt(pdf, "Indicadores detalhados", use_dejavu), ln=True)
+    _pdf_font(pdf, use_dejavu, "", 7.5)
+    pdf.set_text_color(130, 85, 115)
+    _pdf_multi_texto_largura_total(
+        pdf,
+        3.8,
+        "As secções abaixo repetem a mesma ordem e o mesmo significado que no ecrã do Garimpeiro "
+        "(resumo por série, terceiros e cada aba do relatório da leitura). Cada bloco inclui uma "
+        "nota curta sobre o que a tabela representa.",
+        use_dejavu,
+    )
+    pdf.ln(1)
+    pdf.set_text_color(60, 40, 55)
+
+    def _folha_se_cheio(ymin=238):
+        if pdf.get_y() > ymin:
+            pdf.add_page()
+
+    _ex = {
+        "serie": (
+            "Corresponde ao quadro «Resumo por série» na página de resultados: para cada modelo e série "
+            "da emissão própria, o intervalo de numeração encontrado nos ficheiros, a quantidade de notas "
+            "e o valor contábil somado."
+        ),
+        "terc": (
+            "Corresponde a «Terceiros — total por tipo»: soma de documentos recebidos de terceiros "
+            "(por exemplo NF-e, NFC-e, CT-e, MDF-e) contados neste lote."
+        ),
+        "bur": (
+            "Corresponde à aba «Buracos»: números em falta na sequência da numeração da emissão própria. "
+            "Se guardou «último nº por série» na lateral, a lista respeita esse mês de referência e o último número."
+        ),
+        "inut": (
+            "Corresponde à aba «Inutilizadas»: notas inutilizadas na Sefaz, incluindo as que declarou "
+            "manualmente sem XML (quando usou essa opção na app)."
+        ),
+        "canc": (
+            "Corresponde à aba «Canceladas»: notas canceladas no conjunto analisado. Se carregou o Excel "
+            "da Etapa 2 (autenticidade), o status fica alinhado à Sefaz."
+        ),
+        "aut": (
+            "Corresponde à aba «Autorizadas»: notas com situação normal/autorizada na emissão própria, neste lote."
+        ),
+        "geral": (
+            "Corresponde à aba «Relatório geral», com as colunas principais. A chave de acesso aparece "
+            "abreviada neste PDF; use «Baixar Excel» na app para todas as linhas e colunas completas."
+        ),
+    }
+
+    _pdf_secao_resumo_folha(pdf, "Resumo por série", use_dejavu, _ex["serie"])
+    _pdf_tabela_preview(pdf, pv.get("resumo") or {}, use_dejavu, estilo_moderno=True)
+
+    _pdf_secao_resumo_folha(pdf, "Terceiros — total por tipo", use_dejavu, _ex["terc"])
+    _pdf_tabela_preview(pdf, pv.get("terceiros") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Buracos", use_dejavu, _ex["bur"])
+    _pdf_tabela_preview(pdf, pv.get("buracos") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Inutilizadas", use_dejavu, _ex["inut"])
+    _pdf_tabela_preview(pdf, pv.get("inutilizadas") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Canceladas", use_dejavu, _ex["canc"])
+    _pdf_tabela_preview(pdf, pv.get("canceladas") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Autorizadas", use_dejavu, _ex["aut"])
+    _pdf_tabela_preview(pdf, pv.get("autorizadas") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio(220)
+    _pdf_secao_resumo_folha(pdf, "Relatório geral (colunas principais)", use_dejavu, _ex["geral"])
+    _pdf_tabela_preview(pdf, pv.get("geral") or {}, use_dejavu, estilo_moderno=True)
+
+    pdf.ln(4)
+    _pdf_font(pdf, use_dejavu, "", 6.5)
+    pdf.set_text_color(148, 163, 184)
+    _pdf_multi_texto_largura_total(
+        pdf,
+        3.5,
+        "Garimpeiro · Chaves abreviadas no PDF. Lista completa: Excel na app.",
+        use_dejavu,
+    )
+
+    raw = pdf.output(dest="S")
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        return raw
+    if isinstance(raw, bytearray):
+        return bytes(raw)
+    return str(raw).encode("latin-1", "replace")
 
 
 def aplicar_compactacao_dfs_sessao():
@@ -682,50 +2174,272 @@ def _inutil_sem_xml_manual(res):
     ).startswith("MANUAL_INUT_")
 
 
-def parse_linhas_inutil_manual(text):
-    """Linhas: MODELO|SÉRIE|NÚMERO (pipes opcionais com espaços)."""
-    triplas = []
+def parse_numeros_um_por_linha(text):
+    """Um inteiro por linha (só dígitos na linha são usados)."""
+    out = []
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        parts = [p.strip() for p in line.split("|")]
-        if len(parts) < 3:
-            continue
-        mod, ser, num = parts[0], parts[1], parts[2]
-        d = "".join(filter(str.isdigit, num))
+        d = "".join(filter(str.isdigit, line))
         if not d:
             continue
         try:
-            n = int(d)
+            out.append(int(d))
         except ValueError:
             continue
-        if n <= 0 or not mod or not ser:
+    return out
+
+
+def _norm_cab_inutil_col(c):
+    s = unicodedata.normalize("NFD", str(c).strip().lower())
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    return s.replace(" ", "_")
+
+
+def triplas_inutil_de_dataframe(df):
+    """
+    Cabeçalhos flexíveis → lista (modelo, série, nota).
+    Modelo: modelo, documento, tipo, doc… | Série: série, serie, ser… | Nota: nota, número, num, num_faltante…
+    """
+    if df is None or df.empty:
+        return None, "A planilha está vazia."
+    df = df.dropna(how="all")
+    if df.empty:
+        return None, "A planilha está vazia."
+    ren = {c: _norm_cab_inutil_col(c) for c in df.columns}
+    d2 = df.rename(columns=ren)
+
+    def col(*aliases):
+        for a in aliases:
+            if a in d2.columns:
+                return a
+        return None
+
+    cm = col("modelo", "documento", "tipo", "doc", "document", "mod", "cod_mod", "codigo")
+    cs = col("serie", "ser")
+    cn = col("nota", "numero", "num", "num_faltante", "n", "numeracao", "no")
+    if not cm or not cs or not cn:
+        return (
+            None,
+            "Faltam colunas reconhecíveis. Use **Modelo** (código Sefaz **55**, **65**, **57**, **58** ou NF-e…), "
+            "**Série** e **Nota** (ou Número / Num_Faltante).",
+        )
+    out = []
+    for _, row in d2.iterrows():
+        m = row.get(cm)
+        s = row.get(cs)
+        nraw = row.get(cn)
+        if (m is None or pd.isna(m)) and (s is None or pd.isna(s)) and (nraw is None or pd.isna(nraw)):
             continue
-        triplas.append((mod, ser, n))
-    return triplas
+        if m is None or pd.isna(m) or s is None or pd.isna(s) or nraw is None or pd.isna(nraw):
+            continue
+        mod = _normaliza_modelo_filtro(m)
+        ser = _normaliza_serie_filtro(s)
+        if not mod or not ser:
+            continue
+        if isinstance(nraw, (int, float)) and not pd.isna(nraw):
+            try:
+                n = int(float(nraw))
+            except (TypeError, ValueError):
+                continue
+        else:
+            d = "".join(filter(str.isdigit, str(nraw)))
+            if not d:
+                continue
+            try:
+                n = int(d)
+            except ValueError:
+                continue
+        if n <= 0:
+            continue
+        out.append((mod, ser, n))
+    if not out:
+        return None, "Nenhuma linha válida (modelo, série e nota preenchidos)."
+    return out, None
+
+
+def dataframe_de_upload_inutil(uploaded_file, max_linhas=50000):
+    """Lê CSV ou Excel enviado pelo utilizador."""
+    if uploaded_file is None:
+        return None, None
+    nome = (getattr(uploaded_file, "name", None) or "").lower()
+    raw = uploaded_file.read()
+    try:
+        uploaded_file.seek(0)
+    except Exception:
+        pass
+    if nome.endswith(".csv"):
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                df = pd.read_csv(io.BytesIO(raw), sep=None, engine="python", encoding=enc)
+                break
+            except Exception:
+                df = None
+        if df is None:
+            return None, "Não foi possível ler o CSV (tente UTF-8 ou separador `;` / `,`)."
+    elif nome.endswith((".xlsx", ".xls")):
+        try:
+            df = pd.read_excel(io.BytesIO(raw))
+        except Exception as e:
+            return None, f"Erro ao ler Excel: {e}"
+    else:
+        return None, "Use ficheiro **.csv**, **.xlsx** ou **.xls**."
+    if len(df) > max_linhas:
+        return None, f"No máximo {max_linhas} linhas por ficheiro."
+    return df, None
+
+
+def conjunto_triplas_buracos(df_faltantes):
+    """{(Tipo, série_str, Num_Faltante)} a partir da tabela de buracos do garimpeiro."""
+    if df_faltantes is None or df_faltantes.empty:
+        return set()
+    d = df_faltantes.copy()
+    if "Serie" in d.columns and "Série" not in d.columns:
+        d = d.rename(columns={"Serie": "Série"})
+    if not {"Tipo", "Série", "Num_Faltante"}.issubset(d.columns):
+        return set()
+    out = set()
+    for _, row in d.iterrows():
+        try:
+            out.add(
+                (
+                    str(row["Tipo"]).strip(),
+                    str(row["Série"]).strip(),
+                    int(row["Num_Faltante"]),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _dataframe_modelo_planilha_inutil_sem_xml():
+    """Linhas de exemplo com código numérico Sefaz (como na página da Sefaz) — também aceita NF-e, NFC-e…"""
+    return pd.DataFrame(
+        [
+            {"Modelo": 55, "Série": 1, "Nota": 1520},
+            {"Modelo": 55, "Série": 1, "Nota": 1521},
+            {"Modelo": 65, "Série": 2, "Nota": 100},
+            {"Modelo": 57, "Série": 1, "Nota": 500},
+        ]
+    )
+
+
+def bytes_modelo_planilha_inutil_sem_xml_xlsx():
+    df = _dataframe_modelo_planilha_inutil_sem_xml()
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, sheet_name="Inutil_sem_XML", index=False)
+        ws = writer.sheets["Inutil_sem_XML"]
+        ws.set_column(0, 0, 14)
+        ws.set_column(1, 1, 10)
+        ws.set_column(2, 2, 12)
+    return buf.getvalue()
+
+
+def _item_inutil_manual_sem_xml(res):
+    """Inutilização «sem XML» inserida pelo utilizador (não vem de ficheiro)."""
+    return (
+        res.get("Status") == "INUTILIZADOS"
+        and _inutil_sem_xml_manual(res)
+        and "EMITIDOS_CLIENTE" in res.get("Pasta", "")
+    )
+
+
+def _lote_recalc_de_relatorio(relatorio_list):
+    """Mesma deduplicação por Chave que reconstruir_dataframes_relatorio_simples."""
+    lote = {}
+    for item in relatorio_list:
+        key = item["Chave"]
+        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
+        if key in lote:
+            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
+                lote[key] = (item, is_p)
+        else:
+            lote[key] = (item, is_p)
+    return lote
+
+
+def _conjunto_buracos_sem_inutil_manual(lote_recalc, ref_ar, ref_mr, ref_map):
+    """
+    Buracos atuais ignorando inutilizações manuais «sem XML».
+    Tuplas (Tipo, série_str, número) para cruzar com o que o utilizador declara.
+    """
+    audit_map = {}
+    for k, (res, is_p) in lote_recalc.items():
+        if not is_p:
+            continue
+        if _item_inutil_manual_sem_xml(res):
+            continue
+        sk = (res["Tipo"], res["Série"])
+        if sk not in audit_map:
+            audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+        ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
+        if res["Status"] == "INUTILIZADOS":
+            r = res.get("Range", (res["Número"], res["Número"]))
+            for n in range(r[0], r[1] + 1):
+                audit_map[sk]["nums"].add(n)
+                if incluir_numero_no_conjunto_buraco(
+                    res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                ):
+                    audit_map[sk]["nums_buraco"].add(n)
+        else:
+            if res["Número"] > 0:
+                audit_map[sk]["nums"].add(res["Número"])
+                if incluir_numero_no_conjunto_buraco(
+                    res["Ano"],
+                    res["Mes"],
+                    res["Número"],
+                    ref_ar,
+                    ref_mr,
+                    ult_u,
+                ):
+                    audit_map[sk]["nums_buraco"].add(res["Número"])
+                audit_map[sk]["valor"] += res["Valor"]
+
+    H = set()
+    for (t, s), dados in audit_map.items():
+        ult_lookup = ultimo_ref_lookup(ref_map, t, s) if ref_ar is not None else None
+        for row in falhas_buraco_por_serie(dados["nums_buraco"], t, s, ult_lookup):
+            H.add((row["Tipo"], str(row["Série"]).strip(), int(row["Num_Faltante"])))
+    return H
 
 
 def reconstruir_dataframes_relatorio_simples():
     """Recalcula tabelas a partir de st.session_state['relatorio'] (status no próprio item)."""
-    lote_recalc = {}
-    for item in st.session_state["relatorio"]:
-        key = item["Chave"]
-        is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-        if key in lote_recalc:
-            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
-                lote_recalc[key] = (item, is_p)
-        else:
-            lote_recalc[key] = (item, is_p)
-
+    rel_list = list(st.session_state["relatorio"])
     ref_ar, ref_mr, ref_map = buraco_ctx_sessao()
+
+    lote_full = _lote_recalc_de_relatorio(rel_list)
+    lote_sem_manual = {
+        k: v
+        for k, v in lote_full.items()
+        if not _item_inutil_manual_sem_xml(v[0])
+    }
+    H = _conjunto_buracos_sem_inutil_manual(lote_sem_manual, ref_ar, ref_mr, ref_map)
+
+    drop_ch = set()
+    for k, (res, is_p) in lote_full.items():
+        if not _item_inutil_manual_sem_xml(res):
+            continue
+        r = res.get("Range", (res["Número"], res["Número"]))
+        ra, rb = int(r[0]), int(r[1])
+        ser_s = str(res["Série"]).strip()
+        if not any((res["Tipo"], ser_s, n) in H for n in range(ra, rb + 1)):
+            drop_ch.add(k)
+    if drop_ch:
+        st.session_state["relatorio"] = [x for x in rel_list if x["Chave"] not in drop_ch]
+        rel_list = list(st.session_state["relatorio"])
+        lote_full = _lote_recalc_de_relatorio(rel_list)
+
     audit_map = {}
     canc_list = []
     inut_list = []
     aut_list = []
     geral_list = []
 
-    for k, (res, is_p) in lote_recalc.items():
+    for k, (res, is_p) in lote_full.items():
         if is_p:
             origem_label = f"EMISSÃO PRÓPRIA ({res['Operacao']})"
         else:
@@ -751,30 +2465,36 @@ def reconstruir_dataframes_relatorio_simples():
 
         if res["Status"] == "INUTILIZADOS":
             r = res.get("Range", (res["Número"], res["Número"]))
-            for n in range(r[0], r[1] + 1):
+            ra, rb = int(r[0]), int(r[1])
+            _man_inut = _inutil_sem_xml_manual(res)
+            for n in range(ra, rb + 1):
+                if _man_inut:
+                    if (res["Tipo"], str(res["Série"]).strip(), n) not in H:
+                        continue
                 item_inut = registro_detalhado.copy()
                 item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
                 geral_list.append(item_inut)
+                if is_p:
+                    sk = (res["Tipo"], res["Série"])
+                    if sk not in audit_map:
+                        audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                    ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
+                    audit_map[sk]["nums"].add(n)
+                    if _man_inut:
+                        audit_map[sk]["nums_buraco"].add(n)
+                    else:
+                        if incluir_numero_no_conjunto_buraco(
+                            res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                        ):
+                            audit_map[sk]["nums_buraco"].add(n)
+                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
         else:
             geral_list.append(registro_detalhado)
-
-        if is_p:
-            sk = (res["Tipo"], res["Série"])
-            if sk not in audit_map:
-                audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
-            ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
-
-            if res["Status"] == "INUTILIZADOS":
-                r = res.get("Range", (res["Número"], res["Número"]))
-                _man_inut = _inutil_sem_xml_manual(res)
-                for n in range(r[0], r[1] + 1):
-                    audit_map[sk]["nums"].add(n)
-                    if _man_inut or incluir_numero_no_conjunto_buraco(
-                        res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
-                    ):
-                        audit_map[sk]["nums_buraco"].add(n)
-                    inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-            else:
+            if is_p:
+                sk = (res["Tipo"], res["Série"])
+                if sk not in audit_map:
+                    audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
                 if res["Número"] > 0:
                     audit_map[sk]["nums"].add(res["Número"])
                     if incluir_numero_no_conjunto_buraco(
@@ -1028,9 +2748,17 @@ def v2_sanear_selecoes_contra_opcoes(
             st.session_state[key] = novo
 
 
+def v2_callback_repor_filtros():
+    """Limpa multiselects da Etapa 3. Deve ser usado com on_click (antes dos widgets na mesma corrida)."""
+    for _kx in ("v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"):
+        st.session_state[_kx] = []
+
+
 def rotulo_download_zip_parte(caminho_ficheiro):
     m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
-    return f"📥 Parte {m.group(1)}" if m else f"📥 {os.path.basename(caminho_ficheiro)}"
+    if m:
+        return f"Baixar XML (parte {m.group(1)})"
+    return f"Baixar XML — {os.path.basename(caminho_ficheiro)}"
 
 
 def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
@@ -1587,12 +3315,12 @@ TEXTO_GUIA_GARIMPEIRO = """
 Garimpeiro — Guia rápido (para copiar)
 
 PASSO A PASSO
-1. Na barra lateral: informe o CNPJ do emitente (cliente) e clique em Liberar operação.
+1. Na barra lateral: digite **só os 14 números** do CNPJ do emitente (cliente); pontos, barra e traço são colocados automaticamente (também pode colar já formatado). Depois clique em Liberar operação.
 2. Envie ZIP ou XML soltos (volumes grandes são suportados). Depois do primeiro resultado, pode incluir mais ficheiros no topo da página, sem reiniciar o garimpo.
 3. Clique em Iniciar grande garimpo e aguarde a leitura.
 4. (Opcional) Lateral “Último nº por série”: **só muda os buracos** (âncora a partir do último nº + mês; evita buraco gigante se vier nota velha no meio). O **garimpo e o resumo** continuam **totais**. Sem **Guardar referência** com linhas válidas, buracos usam toda a numeração lida.
-5. (Opcional) Etapa 2: suba o Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
-6. Inutilizadas sem XML: use as abas Dos buracos (filtro por modelo/série), Faixa de números ou Colar lista.
+5. (Opcional) Etapa 2: suba um ou mais Excel de autenticidade (coluna A = chave 44 dígitos; coluna F = status) para alinhar cancelamentos com a Sefaz.
+6. Inutilizadas sem XML: **Dos buracos**, **Planilha** (Excel/CSV) ou **Faixa** — só vale para o que o garimpeiro já listou como buraco (não alarga intervalos).
 7. Etapa 3: filtros em cascata; ZIPs em partes de até 10 mil XML, cada ZIP já traz Excel do bloco em RELATORIO_GARIMPEI/; Excel com o filtro completo é opcional à parte.
 8. Exportar lista específica: Excel com **chaves**, Excel com **inicial/final/série**, **período**, **faixa** ou **uma nota**.
 
@@ -1602,6 +3330,7 @@ O QUE O SISTEMA FAZ
 • Um mesmo documento pode gerar mais do que um XML no disco (ex.: nota e evento) — o mesmo número de chaves pode corresponder a vários ficheiros.
 
 DICAS
+• CNPJ na lateral: apenas dígitos ou colar com máscara — a app normaliza e mostra 00.000.000/0000-00.
 • Resetar sistema limpa sessão e temporários; use se trocar de cliente ou quiser recomeçar do zero.
 • Modelos na app: NF-e, NFC-e, CT-e, MDF-e (use estes nomes nas tabelas e colagens).
 • Etapa 3: lista vazia num critério = esse critério não corta nada. Seleções que deixam de existir após mudar outro filtro são limpas automaticamente.
@@ -1618,13 +3347,13 @@ with st.container():
         <div class="instrucoes-card">
             <h3>📖 Como usar (passo a passo)</h3>
             <ol>
-                <li><b>CNPJ:</b> Na lateral, o CNPJ do <b>emitente</b> (cliente) → Liberar operação.</li>
+                <li><b>CNPJ:</b> Na lateral, <b>só os 14 números</b> do emitente (cliente); a máscara preenche sozinha → Liberar operação.</li>
                 <li><b>Lote:</b> Envie ZIP ou XML. Grandes volumes são suportados.</li>
                 <li><b>Garimpo:</b> Iniciar grande garimpo e aguardar.</li>
                 <li><b>Mais ficheiros:</b> No <b>topo dos resultados</b>, inclua XML/ZIP extra <b>sem reiniciar</b>.</li>
                 <li><b>(Opcional)</b> Último nº + mês (lateral) → só **buracos** ancorados; leitura/resumo **sempre totais**.</li>
-                <li><b>(Opcional)</b> Etapa 2 — Excel de autenticidade (chave na col. A, status na col. F).</li>
-                <li><b>Inutilizadas sem XML:</b> Abas Dos buracos, Faixa ou Colar lista.</li>
+                <li><b>(Opcional)</b> Etapa 2 — um ou mais Excel de autenticidade (chave na col. A, status na col. F).</li>
+                <li><b>Inutilizadas sem XML:</b> Dos buracos, planilha Excel/CSV ou Faixa — só buracos já detectados.</li>
                 <li><b>Exportar:</b> Etapa 3 — ZIP em blocos de 10 000 XML (com Excel do bloco dentro); Excel do filtro completo opcional à parte; ou lista por chaves (col. A).</li>
             </ol>
         </div>
@@ -1649,7 +3378,7 @@ with st.container():
             "Guia",
             value=TEXTO_GUIA_GARIMPEIRO,
             height=320,
-            key="garimpeiro_guia_copiar",
+            key="garimpeiro_guia_copiar_v2",
             label_visibility="collapsed",
         )
 
@@ -1672,7 +3401,7 @@ keys_to_init = [
     'org_zip_parts',
     'todos_zip_parts',
     'ch_falt_dom',
-    'zip_dom_parts'
+    'zip_dom_parts',
 ]
 
 for k in keys_to_init:
@@ -1705,13 +3434,27 @@ if "seq_ref_rows" not in st.session_state:
         )
 if "seq_struct_v" not in st.session_state:
     st.session_state["seq_struct_v"] = 0
+if "cnpj_widget" not in st.session_state:
+    st.session_state["cnpj_widget"] = ""
 
 with st.sidebar:
     st.markdown("### 🔍 Configuração")
-    cnpj_input = st.text_input("CNPJ DO CLIENTE", placeholder="00.000.000/0001-00")
-    cnpj_limpo = "".join(filter(str.isdigit, cnpj_input))
-    
-    if cnpj_input and len(cnpj_limpo) != 14: 
+    # Normalizar máscara *antes* do text_input: depois do widget o Streamlit bloqueia
+    # `session_state["cnpj_widget"] = ...` na mesma execução (StreamlitAPIException).
+    _cnpj_key = "cnpj_widget"
+    _cnpj_raw = st.session_state.get(_cnpj_key, "")
+    cnpj_limpo = "".join(c for c in str(_cnpj_raw) if c.isdigit())[:14]
+    _cnpj_fmt = format_cnpj_visual(cnpj_limpo)
+    if _cnpj_fmt != str(_cnpj_raw):
+        st.session_state[_cnpj_key] = _cnpj_fmt
+    st.text_input(
+        "CNPJ DO CLIENTE",
+        key=_cnpj_key,
+        placeholder="somente numeros",
+        help="14 dígitos; pode colar com ou sem máscara. A formatação é aplicada ao digitar.",
+    )
+
+    if cnpj_limpo and len(cnpj_limpo) != 14:
         st.error("⚠️ CNPJ Inválido.")
         
     if len(cnpj_limpo) == 14:
@@ -1724,12 +3467,6 @@ with st.sidebar:
             def_mes = 12 if d.month == 1 else d.month - 1
             a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
-            st.caption(
-                "Última nota **emitida** por série até ao **fim** do mês abaixo. "
-                "Isto **não corta** o garimpo nem o resumo (continuam **totais**). Só a zona **Buracos** usa esta âncora: "
-                "a partir do último nº + 1 e sem contar competências anteriores ao mês escolhido **nas séries que preencher**. "
-                "Séries que não estiverem na tabela mantêm buracos em **toda** a numeração. Sem **Guardar referência** com sucesso, buracos voltam ao modo antigo (intervalos podem ficar enormes, ex.: nota de janeiro no meio de março)."
-            )
             if st.session_state.get("garimpo_ok"):
                 if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
                     dfr = st.session_state.get("df_resumo")
@@ -1779,15 +3516,6 @@ with st.sidebar:
                 )
 
             st.markdown('<p class="garim-seq-head">Séries do cliente</p>', unsafe_allow_html=True)
-            st.markdown(
-                '<div style="display:flex;gap:6px;font-size:0.65rem;font-weight:700;color:#ad1457;'
-                'text-transform:uppercase;letter-spacing:0.07em;margin:0 0 6px 0;opacity:0.92;'
-                'font-family:Plus Jakarta Sans,sans-serif;">'
-                '<span style="flex:0.95;min-width:0;">Documento</span>'
-                '<span style="flex:0.5;min-width:0;">Sér.</span>'
-                '<span style="flex:1.2;min-width:0;">Últ.</span></div>',
-                unsafe_allow_html=True,
-            )
 
             for i, row in enumerate(_recs):
                 modelo_raw = row.get("Modelo")
@@ -1815,30 +3543,29 @@ with st.sidebar:
                     ult_cur = str(ult_raw).strip()
 
                 with st.container(border=True):
-                    c1, c2, c3 = st.columns([0.95, 0.5, 1.3], gap="small")
-                    with c1:
-                        st.selectbox(
-                            "Documento",
-                            opts_row,
-                            index=idx,
-                            key=f"sr_{v}_{i}_m",
-                            label_visibility="collapsed",
-                        )
-                    with c2:
+                    st.selectbox(
+                        "Tipo de documento",
+                        opts_row,
+                        index=idx,
+                        key=f"sr_{v}_{i}_m",
+                        label_visibility="visible",
+                    )
+                    c_ser, c_ult = st.columns(2, gap="small")
+                    with c_ser:
                         st.text_input(
                             "Série",
                             value=ser_cur,
                             key=f"sr_{v}_{i}_s",
-                            label_visibility="collapsed",
+                            label_visibility="visible",
                             max_chars=10,
-                            placeholder="1",
+                            placeholder="ex. 1",
                         )
-                    with c3:
+                    with c_ult:
                         st.text_input(
-                            "Últ. nº",
+                            "Último nº",
                             value=ult_cur,
                             key=f"sr_{v}_{i}_u",
-                            label_visibility="collapsed",
+                            label_visibility="visible",
                             max_chars=18,
                             placeholder="nº",
                         )
@@ -1882,33 +3609,35 @@ with st.sidebar:
                 if st.session_state.get("garimpo_ok") and st.session_state.get("relatorio"):
                     reconstruir_dataframes_relatorio_simples()
 
-            with st.expander("Colar lista (várias séries de uma vez)", expanded=False):
-                st.caption("Uma linha por série: `NF-e|1|1520` (modelo | série | último nº).")
-                seq_paste = st.text_area(
-                    "Linhas",
-                    height=100,
-                    key="seq_paste_txt",
-                    placeholder="NF-e|1|1520\nNFC-e|2|890",
-                    label_visibility="collapsed",
-                )
-                if st.button("Aplicar à lista", key="seq_paste_btn", use_container_width=True):
-                    triplas = parse_linhas_inutil_manual(seq_paste)
-                    if not triplas:
-                        st.warning("Nenhuma linha válida.")
-                    else:
-                        rows = [{"Modelo": m, "Série": str(s), "Último número": str(n)} for m, s, n in triplas]
-                        st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(pd.DataFrame(rows))
-                        st.session_state["seq_struct_v"] = int(st.session_state.get("seq_struct_v", 0)) + 1
-                        st.success(f"{len(rows)} série(s) importadas — confira os cartões e **Guardar referência**.")
-                        st.rerun()
-
             if st.session_state.get("seq_ref_ultimos"):
                 st.info(
                     f"Referência ativa: {st.session_state['seq_ref_ano']}/"
                     f"{int(st.session_state['seq_ref_mes']):02d} — "
                     f"{len(st.session_state['seq_ref_ultimos'])} série(s)."
                 )
-            
+
+        if st.session_state.get("garimpo_ok") and st.session_state.get("relatorio"):
+            st.divider()
+            st.markdown("#### 📄 PDF do dashboard")
+            st.caption(
+                "Resumo do lote em PDF (métricas e amostras). Só descarrega o ficheiro — não altera o ecrã."
+            )
+            _kpi_sb = coletar_kpis_dashboard()
+            _cnpj_sb = format_cnpj_visual(cnpj_limpo) if len(cnpj_limpo) == 14 else ""
+            _df_res_pdf = st.session_state.get("df_resumo")
+            _pdf_sb = pdf_dashboard_garimpeiro_bytes(_kpi_sb, _cnpj_sb, _df_res_pdf)
+            if _pdf_sb:
+                st.download_button(
+                    "⬇️ Baixar PDF do dashboard",
+                    data=_pdf_sb,
+                    file_name="dashboard_garimpeiro.pdf",
+                    mime="application/pdf",
+                    key="dl_dash_pdf_sidebar",
+                    use_container_width=True,
+                )
+            else:
+                st.markdown(_instrucoes_instalar_fpdf2_markdown())
+
     st.divider()
     
     if st.button("🗑️ RESETAR SISTEMA"):
@@ -2089,13 +3818,7 @@ if st.session_state['confirmado']:
             aplicar_compactacao_dfs_sessao()
             st.rerun()
     else:
-        # --- RESULTADOS TELA INICIAL ---
-        sc = st.session_state['st_counts']
-        c1, c2, c3 = st.columns(3)
-        c1.metric("📦 AUTORIZADAS (PRÓPRIAS)", sc.get("AUTORIZADAS", 0))
-        c2.metric("❌ CANCELADAS (PRÓPRIAS)", sc.get("CANCELADOS", 0))
-        c3.metric("🚫 INUTILIZADAS (PRÓPRIAS)", sc.get("INUTILIZADOS", 0))
-
+        # --- RESULTADOS TELA INICIAL (painel em cartões só no PDF; aqui tabelas e abas) ---
         st.caption(
             "Se faltar XML ou ZIP, use o bloco abaixo sem reiniciar o garimpo: os totais e as tabelas atualizam na hora."
         )
@@ -2135,10 +3858,14 @@ if st.session_state['confirmado']:
                     reconstruir_dataframes_relatorio_simples()
                 st.rerun()
 
-        st.markdown("### 📊 RESUMO POR SÉRIE")
+        st.markdown(
+            '<h3 class="garim-sec">📊 Resumo por série</h3>', unsafe_allow_html=True
+        )
         st.dataframe(st.session_state['df_resumo'], use_container_width=True, hide_index=True)
 
-        st.markdown("### 📥 TERCEIROS — TOTAL POR TIPO")
+        st.markdown(
+            '<h3 class="garim-sec">📥 Terceiros — total por tipo</h3>', unsafe_allow_html=True
+        )
         _rels_terc = [
             r
             for r in st.session_state["relatorio"]
@@ -2155,13 +3882,37 @@ if st.session_state['confirmado']:
             st.dataframe(_df_terc, use_container_width=True, hide_index=True)
 
         st.markdown("---")
-        col_audit, col_canc, col_inut = st.columns(3)
-        
-        with col_audit:
-            qtd_buracos = len(st.session_state['df_faltantes']) if not st.session_state['df_faltantes'].empty else 0
-            st.markdown(f"### ⚠️ BURACOS ({qtd_buracos})")
-            if not st.session_state['df_faltantes'].empty:
-                st.dataframe(st.session_state['df_faltantes'], use_container_width=True, hide_index=True)
+        st.markdown(
+            '<h3 class="garim-sec">📊 Relatório da leitura (abas)</h3>', unsafe_allow_html=True
+        )
+        st.caption(
+            "Buracos, inutilizadas, canceladas, autorizadas e relatório geral — mesmas colunas que nas tabelas; use **Baixar Excel** abaixo de cada tabela."
+        )
+        tab_bur, tab_inut, tab_canc, tab_aut, tab_geral = st.tabs(
+            ["⚠️ Buracos", "🚫 Inutilizadas", "❌ Canceladas", "✅ Autorizadas", "📋 Relatório geral"]
+        )
+
+        df_fal = st.session_state["df_faltantes"]
+        df_inu = st.session_state["df_inutilizadas"]
+        df_can = st.session_state["df_canceladas"]
+        df_aut = st.session_state["df_autorizadas"]
+        df_ger = st.session_state["df_geral"]
+
+        with tab_bur:
+            qtd_buracos = len(df_fal) if not df_fal.empty else 0
+            st.markdown(f"#### ⚠️ Buracos ({qtd_buracos})")
+            if not df_fal.empty:
+                st.dataframe(df_fal, use_container_width=True, hide_index=True)
+                xlsx_b = dataframe_para_excel_bytes(df_fal, "Buracos")
+                if xlsx_b:
+                    st.download_button(
+                        "Baixar Excel",
+                        data=xlsx_b,
+                        file_name="relatorio_buracos.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rep_buracos_xlsx",
+                        use_container_width=True,
+                    )
             else:
                 st.info("✅ Tudo em ordem.")
             with st.expander(
@@ -2175,30 +3926,82 @@ if st.session_state['confirmado']:
                     "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
                     "Na **Etapa 3** escolhe o que exportar."
                 )
-                
-        with col_canc:
-            _q_canc = (
-                len(st.session_state["df_canceladas"])
-                if not st.session_state["df_canceladas"].empty
-                else 0
-            )
-            st.markdown(f"### ❌ CANCELADAS ({_q_canc})")
-            if not st.session_state['df_canceladas'].empty:
-                st.dataframe(st.session_state['df_canceladas'], use_container_width=True, hide_index=True)
-            else: 
+
+        with tab_inut:
+            _q_inut = len(df_inu) if not df_inu.empty else 0
+            st.markdown(f"#### 🚫 Inutilizadas ({_q_inut})")
+            if not df_inu.empty:
+                st.dataframe(df_inu, use_container_width=True, hide_index=True)
+                xlsx_i = dataframe_para_excel_bytes(df_inu, "Inutilizadas")
+                if xlsx_i:
+                    st.download_button(
+                        "Baixar Excel",
+                        data=xlsx_i,
+                        file_name="relatorio_inutilizadas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rep_inut_xlsx",
+                        use_container_width=True,
+                    )
+            else:
                 st.info("ℹ️ Nenhuma nota.")
-                
-        with col_inut:
-            _q_inut = (
-                len(st.session_state["df_inutilizadas"])
-                if not st.session_state["df_inutilizadas"].empty
-                else 0
-            )
-            st.markdown(f"### 🚫 INUTILIZADAS ({_q_inut})")
-            if not st.session_state['df_inutilizadas'].empty:
-                st.dataframe(st.session_state['df_inutilizadas'], use_container_width=True, hide_index=True)
-            else: 
+
+        with tab_canc:
+            _q_canc = len(df_can) if not df_can.empty else 0
+            st.markdown(f"#### ❌ Canceladas ({_q_canc})")
+            if not df_can.empty:
+                st.dataframe(df_can, use_container_width=True, hide_index=True)
+                xlsx_c = dataframe_para_excel_bytes(df_can, "Canceladas")
+                if xlsx_c:
+                    st.download_button(
+                        "Baixar Excel",
+                        data=xlsx_c,
+                        file_name="relatorio_canceladas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rep_canc_xlsx",
+                        use_container_width=True,
+                    )
+            else:
                 st.info("ℹ️ Nenhuma nota.")
+
+        with tab_aut:
+            _q_aut = len(df_aut) if not df_aut.empty else 0
+            st.markdown(f"#### ✅ Autorizadas ({_q_aut})")
+            if not df_aut.empty:
+                st.dataframe(df_aut, use_container_width=True, hide_index=True)
+                xlsx_a = dataframe_para_excel_bytes(df_aut, "Autorizadas")
+                if xlsx_a:
+                    st.download_button(
+                        "Baixar Excel",
+                        data=xlsx_a,
+                        file_name="relatorio_autorizadas.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rep_aut_xlsx",
+                        use_container_width=True,
+                    )
+            else:
+                st.info("ℹ️ Nenhuma nota autorizada na amostra.")
+
+        with tab_geral:
+            _q_ger = len(df_ger) if not df_ger.empty else 0
+            st.markdown(f"#### 📋 Relatório geral ({_q_ger})")
+            if not df_ger.empty:
+                st.caption(
+                    "O **Excel** inclui as folhas **Geral**, **Buracos**, **Inutilizadas**, **Canceladas**, **Autorizadas**, "
+                    "**CT-e lidas**, **Terceiros lidas** e **Dashboard** (indicadores e resumo por série)."
+                )
+                st.dataframe(df_ger, use_container_width=True, hide_index=True, height=420)
+                xlsx_g = excel_relatorio_geral_com_dashboard_bytes(df_ger)
+                if xlsx_g:
+                    st.download_button(
+                        "Baixar Excel",
+                        data=xlsx_g,
+                        file_name="relatorio_geral.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_rep_geral_xlsx",
+                        use_container_width=True,
+                    )
+            else:
+                st.info("Relatório geral vazio.")
 
         st.divider()
 
@@ -2211,16 +4014,18 @@ if st.session_state['confirmado']:
             expanded=False,
         ):
             st.caption(
-                "Três formas: escolher entre os **buracos** (com filtro), marcar uma **faixa** de números ou **colar** várias linhas."
+                "Só vale para **buracos** que o garimpeiro já listou: não cria novos buracos nem alarga intervalos. "
+                "**Dos buracos:** multiselect ou colar números. **Planilha:** Excel/CSV com modelo, série e nota (várias séries num ficheiro). "
+                "**Faixa:** só aplica notas que forem buraco nesse intervalo."
             )
-            tab_b, tab_f, tab_c = st.tabs(["Dos buracos", "Faixa de números", "Colar lista"])
+            tab_b, tab_p, tab_f = st.tabs(["Dos buracos", "Planilha (Excel/CSV)", "Faixa de números"])
 
             with tab_b:
                 df_b = st.session_state["df_faltantes"].copy()
                 if not df_b.empty and "Serie" in df_b.columns and "Série" not in df_b.columns:
                     df_b = df_b.rename(columns={"Serie": "Série"})
                 if df_b.empty:
-                    st.info("Sem buracos na auditoria — use **Faixa** ou **Colar**, ou faça o garimpo primeiro.")
+                    st.info("Sem buracos na auditoria — faça o garimpo primeiro ou verifique a referência de último nº.")
                 elif not {"Tipo", "Série", "Num_Faltante"}.issubset(df_b.columns):
                     st.warning(
                         "A tabela de buracos não tem o formato esperado (Tipo, Série, Num_Faltante). "
@@ -2234,7 +4039,8 @@ if st.session_state['confirmado']:
                     _sb = st.selectbox("Série", _sers_b, key="inut_b_ser")
                     _sub2_b = _sub_b[_sub_b["Série"].astype(str) == _sb]
                     _nums_b = sorted(_sub2_b["Num_Faltante"].astype(int).unique())
-                    st.caption(f"{len(_nums_b)} número(s) em falta neste modelo/série.")
+                    _set_buracos = set(_nums_b)
+                    st.caption(f"{len(_nums_b)} buraco(s) neste modelo/série — só estes podem ser declarados aqui.")
                     _pick_b = st.multiselect(
                         "Marque os que quer tratar como inutilizados:",
                         options=_nums_b,
@@ -2253,6 +4059,125 @@ if st.session_state['confirmado']:
                                 reconstruir_dataframes_relatorio_simples()
                             st.rerun()
 
+                    st.divider()
+                    st.markdown("**Colar lista de números** (mesmo modelo e série acima)")
+                    st.caption(
+                        "Um número por linha (só dígitos). Notas que **não** forem buraco aqui são **ignoradas**."
+                    )
+                    _lista_txt = st.text_area(
+                        "Números",
+                        height=110,
+                        key="inut_b_lista_txt",
+                        placeholder="1520\n1521\n1525",
+                        label_visibility="collapsed",
+                    )
+                    if st.button("Aplicar lista (só buracos)", type="secondary", key="inut_b_lista_go"):
+                        _parsed = parse_numeros_um_por_linha(_lista_txt)
+                        if not _parsed:
+                            st.warning("Cole pelo menos um número válido.")
+                        else:
+                            _ok = []
+                            for _pn in _parsed:
+                                if _pn in _set_buracos and _pn not in _ok:
+                                    _ok.append(_pn)
+                            _ign = sum(1 for _pn in _parsed if _pn not in _set_buracos)
+                            if not _ok:
+                                st.warning(
+                                    "Nenhum número da lista coincide com buraco neste modelo/série — nada foi aplicado."
+                                )
+                            else:
+                                with st.spinner("A atualizar…"):
+                                    for _nb in sorted(_ok):
+                                        st.session_state["relatorio"].append(
+                                            item_registro_manual_inutilizado(cnpj_limpo, _mb, _sb, _nb)
+                                        )
+                                    reconstruir_dataframes_relatorio_simples()
+                                if _ign > 0:
+                                    st.info(
+                                        f"Aplicados **{len(_ok)}** número(s) que eram buraco. "
+                                        f"**{_ign}** linha(s) ignoradas (não eram buraco neste modelo/série)."
+                                    )
+                                else:
+                                    st.success(f"Incluídos **{len(_ok)}** registo(s).")
+                                st.rerun()
+
+            with tab_p:
+                st.markdown("**Subir tabela** com inutilizadas a declarar")
+                st.caption(
+                    "Colunas (1.ª linha = cabeçalho): **Modelo** = código Sefaz (**55** NF-e, **65** NFC-e, **57** CT-e, **58** MDF-e) "
+                    "ou nome NF-e / NFC-e…; **Série**; **Nota** (ou Número / Num_Faltante). "
+                    "Ideal para copiar/colar da Sefaz. Só entram linhas que já forem **buraco** no garimpeiro."
+                )
+                st.download_button(
+                    "Baixar Excel",
+                    data=bytes_modelo_planilha_inutil_sem_xml_xlsx(),
+                    file_name="MODELO_inutilizadas_sem_XML_garimpeiro.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_modelo_inut_xlsx",
+                    use_container_width=True,
+                )
+                st.caption(
+                    "No modelo: **Modelo** em número (55, 65, 57, 58) como na Sefaz; **Série** e **Nota**. "
+                    "Substitua ou apague as linhas de exemplo e guarde antes de importar."
+                )
+                _up_inut = st.file_uploader(
+                    "Ficheiro .csv, .xlsx ou .xls",
+                    type=["csv", "xlsx", "xls"],
+                    key="inut_planilha_up",
+                )
+                if st.button("Importar planilha (só buracos)", type="primary", key="inut_planilha_go"):
+                    if _up_inut is None:
+                        st.warning("Escolha um ficheiro primeiro.")
+                    else:
+                        _df_up, _err_up = dataframe_de_upload_inutil(_up_inut)
+                        if _err_up:
+                            st.error(_err_up)
+                        else:
+                            _tri, _err_tr = triplas_inutil_de_dataframe(_df_up)
+                            if _err_tr:
+                                st.warning(_err_tr)
+                            else:
+                                _df_bu = st.session_state["df_faltantes"].copy()
+                                _bur_t = conjunto_triplas_buracos(_df_bu)
+                                if not _bur_t:
+                                    st.warning(
+                                        "Não há buracos na auditoria — nada a aplicar. Faça o garimpeiro primeiro."
+                                    )
+                                else:
+                                    _aplic_rows = []
+                                    _ign = 0
+                                    _seen = set()
+                                    for _mod, _ser, _nota in _tri:
+                                        _k = (_mod.strip(), str(_ser).strip(), int(_nota))
+                                        if _k not in _bur_t:
+                                            _ign += 1
+                                            continue
+                                        if _k in _seen:
+                                            continue
+                                        _seen.add(_k)
+                                        _aplic_rows.append((_mod.strip(), str(_ser).strip(), int(_nota)))
+                                    if not _aplic_rows:
+                                        st.warning(
+                                            "Nenhuma linha da planilha coincide com buraco listado pelo garimpeiro."
+                                        )
+                                    else:
+                                        with st.spinner("A atualizar…"):
+                                            for _mod, _ser, _nota in _aplic_rows:
+                                                st.session_state["relatorio"].append(
+                                                    item_registro_manual_inutilizado(
+                                                        cnpj_limpo, _mod, _ser, _nota
+                                                    )
+                                                )
+                                            reconstruir_dataframes_relatorio_simples()
+                                        st.success(
+                                            f"Incluídos **{len(_aplic_rows)}** registo(s) que eram buraco."
+                                        )
+                                        if _ign > 0:
+                                            st.info(
+                                                f"**{_ign}** linha(s) ignoradas (não eram buraco neste garimpo)."
+                                            )
+                                        st.rerun()
+
             with tab_f:
                 _mf = st.selectbox("Modelo", ["NF-e", "NFC-e", "CT-e", "MDF-e"], key="inut_f_mod")
                 _sf = st.text_input("Série", value="1", key="inut_f_ser").strip()
@@ -2260,43 +4185,55 @@ if st.session_state['confirmado']:
                 _n0 = _c1f.number_input("Nota inicial", min_value=1, value=1, step=1, key="inut_f_i")
                 _n1 = _c2f.number_input("Nota final", min_value=1, value=1, step=1, key="inut_f_f")
                 _MAX_FAIXA_INUT = 5000
-                st.caption(f"No máximo {_MAX_FAIXA_INUT} notas por vez (proteção do sistema).")
-                if st.button("Marcar faixa inteira", type="primary", key="inut_f_go"):
+                df_fb = st.session_state["df_faltantes"].copy()
+                if not df_fb.empty and "Serie" in df_fb.columns and "Série" not in df_fb.columns:
+                    df_fb = df_fb.rename(columns={"Serie": "Série"})
+                _bur_f = set()
+                if (
+                    not df_fb.empty
+                    and {"Tipo", "Série", "Num_Faltante"}.issubset(df_fb.columns)
+                ):
+                    _subf = df_fb[
+                        (df_fb["Tipo"].astype(str) == _mf)
+                        & (df_fb["Série"].astype(str) == str(_sf).strip())
+                    ]
+                    _bur_f = set(_subf["Num_Faltante"].astype(int).unique())
+                st.caption(
+                    f"No máximo {_MAX_FAIXA_INUT} notas analisadas por vez. "
+                    f"Só entram na inutilização manual as que forem **buraco** neste modelo/série "
+                    f"({len(_bur_f)} buraco(s) conhecidos)."
+                )
+                if st.button("Marcar buracos na faixa", type="primary", key="inut_f_go"):
                     if not _sf:
                         st.warning("Indique a série.")
                     elif _n0 > _n1:
                         st.warning("A nota inicial não pode ser maior que a final.")
                     elif (_n1 - _n0 + 1) > _MAX_FAIXA_INUT:
                         st.warning(f"Reduza a faixa (máximo {_MAX_FAIXA_INUT} notas).")
+                    elif not _bur_f:
+                        st.warning(
+                            "Não há buracos listados para este modelo/série — verifique o garimpeiro ou a referência."
+                        )
                     else:
-                        with st.spinner("A atualizar…"):
-                            for _nn in range(int(_n0), int(_n1) + 1):
-                                st.session_state["relatorio"].append(
-                                    item_registro_manual_inutilizado(cnpj_limpo, _mf, _sf, _nn)
+                        _aplic = [n for n in range(int(_n0), int(_n1) + 1) if n in _bur_f]
+                        _pul = (int(_n1) - int(_n0) + 1) - len(_aplic)
+                        if not _aplic:
+                            st.warning("Nenhum número desta faixa é buraco — nada foi aplicado.")
+                        else:
+                            with st.spinner("A atualizar…"):
+                                for _nn in _aplic:
+                                    st.session_state["relatorio"].append(
+                                        item_registro_manual_inutilizado(cnpj_limpo, _mf, _sf, _nn)
+                                    )
+                                reconstruir_dataframes_relatorio_simples()
+                            if _pul > 0:
+                                st.info(
+                                    f"Aplicados **{len(_aplic)}** número(s) que eram buraco na faixa. "
+                                    f"**{_pul}** número(s) ignorados (não eram buraco)."
                                 )
-                            reconstruir_dataframes_relatorio_simples()
-                        st.rerun()
-
-            with tab_c:
-                st.caption("Uma nota por linha: `NF-e|1|100` (modelo | série | número).")
-                _txt_c = st.text_area(
-                    "Linhas",
-                    height=120,
-                    key="inut_c_txt",
-                    placeholder="NF-e|1|100\nNF-e|1|101",
-                )
-                if st.button("Importar e aplicar", type="primary", key="inut_c_go"):
-                    _tri = parse_linhas_inutil_manual(_txt_c)
-                    if not _tri:
-                        st.warning("Nenhuma linha válida.")
-                    else:
-                        with st.spinner("A atualizar…"):
-                            for _mod, _ser, _nota in _tri:
-                                st.session_state["relatorio"].append(
-                                    item_registro_manual_inutilizado(cnpj_limpo, _mod, _ser, _nota)
-                                )
-                            reconstruir_dataframes_relatorio_simples()
-                        st.rerun()
+                            else:
+                                st.success(f"Incluídos **{len(_aplic)}** registo(s).")
+                            st.rerun()
 
         # =====================================================================
         # MÓDULO: DESFAZER INUTILIZAÇÃO MANUAL
@@ -2352,28 +4289,50 @@ if st.session_state['confirmado']:
                 st.success("✅ O status dos XMLs está alinhado com a SEFAZ.")
 
         with st.expander("Clique aqui para subir o Excel e atualizar o status real"):
-            auth_file = st.file_uploader("Suba o Excel (.xlsx) [Col A=Chave, Col F=Status]", type=["xlsx", "xls"], key="auth_up")
-            if auth_file and st.button("🔄 VALIDAR E ATUALIZAR"):
-                df_auth = pd.read_excel(auth_file)
+            auth_files = st.file_uploader(
+                "Suba um ou mais Excel (.xlsx / .xls) [Col A=Chave, Col F=Status]",
+                type=["xlsx", "xls"],
+                accept_multiple_files=True,
+                key="auth_up",
+            )
+            st.caption(
+                "Pode escolher vários relatórios de uma vez; as chaves são reunidas. "
+                "Se a mesma chave aparecer em mais do que um ficheiro, prevalece o status do **último** ficheiro processado."
+            )
+            if auth_files and st.button("🔄 VALIDAR E ATUALIZAR"):
                 auth_dict = {}
-                
-                for idx, row in df_auth.iterrows():
-                    chave_lida = str(row.iloc[0]).strip()
-                    status_lido = str(row.iloc[5]).strip().upper()
-                    if len(chave_lida) == 44:
-                        auth_dict[chave_lida] = status_lido
+                for auth_file in auth_files:
+                    df_auth = pd.read_excel(auth_file)
+                    for idx, row in df_auth.iterrows():
+                        chave_lida = str(row.iloc[0]).strip()
+                        status_lido = str(row.iloc[5]).strip().upper()
+                        if len(chave_lida) == 44:
+                            auth_dict[chave_lida] = status_lido
                         
-                lote_recalc = {}
-                for item in st.session_state['relatorio']:
-                    key = item["Chave"]
-                    is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
-                    if key in lote_recalc:
-                        if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
-                            lote_recalc[key] = (item, is_p)
-                    else: 
-                        lote_recalc[key] = (item, is_p)
-
+                lote_full = _lote_recalc_de_relatorio(st.session_state["relatorio"])
                 ref_ar, ref_mr, ref_map = buraco_ctx_sessao()
+                lote_sem_manual = {
+                    k: v
+                    for k, v in lote_full.items()
+                    if not _item_inutil_manual_sem_xml(v[0])
+                }
+                H_val = _conjunto_buracos_sem_inutil_manual(lote_sem_manual, ref_ar, ref_mr, ref_map)
+                drop_ch_v = set()
+                for k, (res, is_p) in lote_full.items():
+                    if not _item_inutil_manual_sem_xml(res):
+                        continue
+                    r0 = res.get("Range", (res["Número"], res["Número"]))
+                    ra, rb = int(r0[0]), int(r0[1])
+                    ser_s = str(res["Série"]).strip()
+                    if not any((res["Tipo"], ser_s, n) in H_val for n in range(ra, rb + 1)):
+                        drop_ch_v.add(k)
+                if drop_ch_v:
+                    st.session_state["relatorio"] = [
+                        x for x in st.session_state["relatorio"] if x["Chave"] not in drop_ch_v
+                    ]
+                    lote_full = _lote_recalc_de_relatorio(st.session_state["relatorio"])
+
+                lote_recalc = lote_full
                 audit_map = {}
                 canc_list = []
                 inut_list = []
@@ -2419,30 +4378,36 @@ if st.session_state['confirmado']:
                     
                     if status_final == "INUTILIZADOS":
                         r = res.get("Range", (res["Número"], res["Número"]))
-                        for n in range(r[0], r[1] + 1):
+                        ra, rb = int(r[0]), int(r[1])
+                        _man_inut = _inutil_sem_xml_manual(res)
+                        for n in range(ra, rb + 1):
+                            if _man_inut:
+                                if (res["Tipo"], str(res["Série"]).strip(), n) not in H_val:
+                                    continue
                             item_inut = registro_detalhado.copy()
                             item_inut.update({"Nota": n, "Status Final": "INUTILIZADA", "Valor": 0.0})
                             geral_list.append(item_inut)
-                    else: 
-                        geral_list.append(registro_detalhado)
-
-                    if is_p:
-                        sk = (res["Tipo"], res["Série"])
-                        if sk not in audit_map: 
-                            audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
-                        ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
-                            
-                        if status_final == "INUTILIZADOS":
-                            r = res.get("Range", (res["Número"], res["Número"]))
-                            _man_inut = _inutil_sem_xml_manual(res)
-                            for n in range(r[0], r[1] + 1): 
+                            if is_p:
+                                sk = (res["Tipo"], res["Série"])
+                                if sk not in audit_map:
+                                    audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                                ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
                                 audit_map[sk]["nums"].add(n)
-                                if _man_inut or incluir_numero_no_conjunto_buraco(
-                                    res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
-                                ):
+                                if _man_inut:
                                     audit_map[sk]["nums_buraco"].add(n)
+                                else:
+                                    if incluir_numero_no_conjunto_buraco(
+                                        res["Ano"], res["Mes"], n, ref_ar, ref_mr, ult_u
+                                    ):
+                                        audit_map[sk]["nums_buraco"].add(n)
                                 inut_list.append({"Modelo": res["Tipo"], "Série": res["Série"], "Nota": n})
-                        else:
+                    else:
+                        geral_list.append(registro_detalhado)
+                        if is_p:
+                            sk = (res["Tipo"], res["Série"])
+                            if sk not in audit_map:
+                                audit_map[sk] = {"nums": set(), "nums_buraco": set(), "valor": 0.0}
+                            ult_u = ultimo_ref_lookup(ref_map, res["Tipo"], res["Série"])
                             if res["Número"] > 0:
                                 audit_map[sk]["nums"].add(res["Número"])
                                 if incluir_numero_no_conjunto_buraco(
@@ -2454,9 +4419,9 @@ if st.session_state['confirmado']:
                                     ult_u,
                                 ):
                                     audit_map[sk]["nums_buraco"].add(res["Número"])
-                                if status_final == "CANCELADOS": 
+                                if status_final == "CANCELADOS":
                                     canc_list.append(registro_detalhado)
-                                elif status_final == "NORMAIS": 
+                                elif status_final == "NORMAIS":
                                     aut_list.append(registro_detalhado)
                                 audit_map[sk]["valor"] += res["Valor"]
                                 
@@ -2614,10 +4579,11 @@ if st.session_state['confirmado']:
 
         _c_rep, _ = st.columns([1, 5])
         with _c_rep:
-            if st.button("Repor filtros", key="v2_pre_clr"):
-                for _kx in ["v2_f_orig", "v2_f_mes", "v2_f_mod", "v2_f_ser", "v2_f_stat", "v2_f_op"]:
-                    if _kx in st.session_state:
-                        st.session_state[_kx] = []
+            st.button(
+                "Repor filtros",
+                key="v2_pre_clr",
+                on_click=v2_callback_repor_filtros,
+            )
 
         aplicar_mes_so_na_propria = True
 
@@ -2873,7 +4839,7 @@ if st.session_state['confirmado']:
                 st.rerun()
 
         if st.session_state.get("export_ready"):
-            st.success("Geração concluída. Use os botões abaixo para descarregar.")
+            st.success("Geração concluída. Use **Baixar XML** para cada ZIP e **Baixar Excel** para o relatório completo, se existir.")
             _parts_o = st.session_state.get("org_zip_parts") or []
             _parts_t = st.session_state.get("todos_zip_parts") or []
             _dl_i = 0
@@ -2911,7 +4877,7 @@ if st.session_state['confirmado']:
             _xbuf = st.session_state.get("excel_buffer")
             if _xbuf:
                 st.download_button(
-                    "Descarregar Excel completo (todo o filtro)",
+                    "Baixar Excel",
                     _xbuf,
                     file_name=st.session_state.get(
                         "export_excel_name", "relatorio_completo.xlsx"
@@ -3211,7 +5177,7 @@ if st.session_state['confirmado']:
                         if os.path.exists(part):
                             with open(part, "rb") as f_final:
                                 cols[idx].download_button(
-                                    label=f"📥 {os.path.basename(part)}",
+                                    label=rotulo_download_zip_parte(part),
                                     data=f_final.read(),
                                     file_name=os.path.basename(part),
                                     mime="application/zip",
