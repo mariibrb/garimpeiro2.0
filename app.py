@@ -1,7 +1,34 @@
+# Garimpeiro — código-fonte único: faça todas as alterações neste ficheiro (app2.py).
+# app.py só reencaminha para aqui quando a Cloud usa app.py como entrada.
+import os
+import sys
+
+
+def _garimpeiro_forcar_temp_na_pasta_do_projeto():
+    """
+    TEMP/TMP e PIP_CACHE_DIR ficam na pasta do app2.py (ex.: disco D:).
+    Assim Excel/xlsxwriter e ferramentas Python não dependem de C:\\Users\\…\\Temp
+    (crítico quando C: está sem espaço). Corre antes dos restantes imports.
+    """
+    try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        tmp = os.path.join(root, "temp_windows_ambiente")
+        os.makedirs(tmp, exist_ok=True)
+        os.environ["TEMP"] = tmp
+        os.environ["TMP"] = tmp
+        pipc = os.path.join(root, "pip_cache_local")
+        os.makedirs(pipc, exist_ok=True)
+        os.environ["PIP_CACHE_DIR"] = pipc
+    except OSError:
+        pass
+
+
+_garimpeiro_forcar_temp_na_pasta_do_projeto()
+
 import streamlit as st
 import zipfile
 import io
-import os
+from contextlib import contextmanager
 import hashlib
 import re
 import pandas as pd
@@ -12,9 +39,35 @@ from collections import Counter, defaultdict
 from calendar import monthrange
 from datetime import date, datetime
 import unicodedata
-import sys
 import json
 from pathlib import Path
+
+
+def _erro_sem_espaco_disco(exc: BaseException) -> bool:
+    """errno 28 / temp ou disco cheio (xlsxwriter FileCreateError envolve OSError)."""
+    if exc is None:
+        return False
+    o: BaseException | None = exc
+    for _ in range(5):
+        if isinstance(o, OSError) and getattr(o, "errno", None) == 28:
+            return True
+        if type(o).__name__ == "FileCreateError" and getattr(o, "args", None):
+            o = o.args[0] if isinstance(o.args[0], BaseException) else None
+            if o is None:
+                break
+            continue
+        break
+    s = str(exc).lower()
+    return "errno 28" in s or "no space left" in s or "no space" in s
+
+
+def _msg_sem_espaco_disco_garimpeiro() -> str:
+    return (
+        "ERR:Sem espaço em disco (errno 28). O Garimpeiro força **TEMP/TMP** na pasta do projeto "
+        "**temp_windows_ambiente** (mesmo disco que o app2.py). Liberte espaço **nesse disco** e apague ficheiros antigos nessa pasta se precisar. "
+        "Se ainda aparecer C: no erro, confirme que abriu a app com **streamlit run app2.py** (o arranque do Python tem de carregar o início do ficheiro)."
+    )
+
 
 _AGGRID_LOCALE_PT_BR_CACHE = None
 
@@ -186,6 +239,13 @@ def _df_com_data_emissao_dd_mm_yyyy(df):
     out = df.copy()
     out["Data Emissão"] = out["Data Emissão"].map(_valor_data_emissao_dd_mm_yyyy)
     return out
+
+
+def _garim_emoji(grapheme: str) -> str:
+    """Envolve um emoji em span — só o ícone fica maior (.garim-emoji); usar com unsafe_allow_html=True."""
+    if not grapheme:
+        return ""
+    return f'<span class="garim-emoji" aria-hidden="true">{grapheme}</span>'
 
 
 # --- CONFIGURAÇÃO E ESTILO (CLONE ABSOLUTO DO DIAMOND TAX) ---
@@ -453,6 +513,43 @@ def aplicar_estilo_premium():
             color: #FF69B4 !important;
             text-align: center;
         }
+        /* Só emojis com span.garim-emoji — texto ao lado mantém tamanho normal */
+        span.garim-emoji {
+            font-size: 1.38em;
+            line-height: 1;
+            display: inline-block;
+            vertical-align: -0.1em;
+        }
+        h3.garim-sec span.garim-emoji {
+            vertical-align: -0.05em;
+        }
+        h1 span.garim-emoji {
+            vertical-align: -0.06em;
+        }
+        /* Ajuda dos buracos: <details> dentro do expander «Emissão própria» (evita expander aninhado) */
+        details.garim-detalhe-ajuda {
+            margin: 0.35rem 0 0.5rem 0 !important;
+            padding: 0.35rem 0.5rem !important;
+            border-radius: 8px !important;
+            border: 1px solid rgba(161, 134, 158, 0.28) !important;
+            background: rgba(255, 255, 255, 0.55) !important;
+        }
+        details.garim-detalhe-ajuda summary {
+            cursor: pointer !important;
+            font-size: 0.88rem !important;
+            color: #5D1B36 !important;
+        }
+        /* h4/h5 em HTML próprio: espaçamento semelhante ao markdown ##### da app */
+        [data-testid="stMarkdown"] h4 {
+            margin: 0.5rem 0 0.35rem 0 !important;
+            font-size: 1rem !important;
+            font-weight: 600;
+        }
+        [data-testid="stMarkdown"] h5 {
+            margin: 0.85rem 0 0.4rem 0 !important;
+            font-size: 0.875rem !important;
+            font-weight: 600;
+        }
 
         .instrucoes-card {
             background-color: rgba(255, 255, 255, 0.7);
@@ -542,6 +639,666 @@ aplicar_estilo_premium()
 TEMP_EXTRACT_DIR = "temp_garimpo_zips"
 TEMP_UPLOADS_DIR = "temp_garimpo_uploads"
 MAX_XML_PER_ZIP = 10000  # Máx. XMLs por ficheiro ZIP (lista específica e Etapa 3); reparte em vários lotes
+ZIP_EXPORT_COMPRESSLEVEL = 9  # 1–9: 9 = .zip menores na exportação (mais CPU ao gravar)
+
+# Exportação dedicada: ZIPs ~50 MB, só NF-e/NFC-e série 4 autorizadas (emissão própria).
+CNPJ_CLIENTE_EXPORT_SERIE4_ZIP50MB = "45785442000390"
+ZIP50_SERIE4_MAX_BYTES = 50 * 1024 * 1024
+SESSION_KEY_SERIE4_ZIP50_PARTS = "_garim_serie4_emitidas_zip50_parts"
+
+
+def _zipfile_open_write_export(path: str):
+    """ZIP de download/pacotes: DEFLATE com compressão máxima."""
+    return zipfile.ZipFile(
+        str(path), "w", zipfile.ZIP_DEFLATED, compresslevel=ZIP_EXPORT_COMPRESSLEVEL
+    )
+
+
+def _lista_ficheiros_pasta_uploads():
+    """
+    Só ficheiros em TEMP_UPLOADS_DIR (ignora subpastas).
+    Abrir uma pasta com open(..., 'rb') no Windows gera erro — o garimpo e os ZIPs devem iterar só ficheiros.
+    """
+    if not os.path.isdir(TEMP_UPLOADS_DIR):
+        return []
+    try:
+        return [
+            f
+            for f in os.listdir(TEMP_UPLOADS_DIR)
+            if os.path.isfile(os.path.join(TEMP_UPLOADS_DIR, f))
+        ]
+    except OSError:
+        return []
+
+
+# Bytes dos XML/ZIP do lote atual (garimpo + «incluir mais»), quando não se grava em disco local.
+SESSION_KEY_FONTES_XML_MEMORIA = "_garimpo_fontes_xml_memoria"
+# SHA-256 de ficheiros já incorporados ao lote via «Incluir mais» (evita duplicar a cada rerun / duplo Processar).
+SESSION_KEY_EXTRA_DIGESTS = "_garimpo_extra_sha256_vistos"
+
+
+def _session_state_get_garimpo(key, default=None):
+    """
+    Lê session_state sem rebentar com «SessionInfo before initialization».
+    O get_script_run_ctx() sozinho não basta em algumas versões; só try/except é fiável.
+    """
+    try:
+        return st.session_state.get(key, default)
+    except Exception:
+        return default
+
+
+def _session_state_pop_garimpo(key):
+    try:
+        st.session_state.pop(key, None)
+    except Exception:
+        pass
+
+
+def _garimpo_analise_sem_pasta_local_projeto() -> bool:
+    """
+    True (omissão): durante a análise **não** grava uploads em `temp_garimpo_uploads` na pasta do projeto —
+    mantém os bytes na sessão Streamlit até nova análise. Exportações ZIP/Excel continuam a ir para a pasta **que escolher**.
+    Defina `GARIMPEIRO_ANALISE_SEM_DISCO_LOCAL=0` para voltar a gravar no disco (lotes muito grandes e pouca RAM).
+    """
+    v = os.environ.get("GARIMPEIRO_ANALISE_SEM_DISCO_LOCAL", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _garimpo_limpar_fontes_xml_memoria_sessao():
+    _session_state_pop_garimpo(SESSION_KEY_FONTES_XML_MEMORIA)
+
+
+def _garimpo_nome_chave_upload(indice: int, nome_original: str) -> str:
+    base = os.path.basename(str(nome_original or "ficheiro"))
+    safe = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in base).strip() or "ficheiro"
+    return f"{int(indice):05d}_{safe}"[:220]
+
+
+def _lista_nomes_fontes_xml_garimpo():
+    """
+    Nomes-chave de todas as fontes do lote. Com lote em memória, inclui também ficheiros em
+    temp_garimpo_uploads (ex.: «Incluir mais» gravado em disco por fallback) — antes só a
+    memória era lida e esses XML eram ignorados no «Processar Dados».
+    """
+    disk = _lista_ficheiros_pasta_uploads()
+    if _garimpo_analise_sem_pasta_local_projeto():
+        mem = _session_state_get_garimpo(SESSION_KEY_FONTES_XML_MEMORIA)
+        if isinstance(mem, dict) and mem:
+            return sorted(set(mem.keys()) | set(disk))
+    return sorted(disk)
+
+
+def _garimpo_existem_fontes_xml_lote():
+    return bool(_lista_nomes_fontes_xml_garimpo())
+
+
+@contextmanager
+def _abrir_fonte_xml_garimpo_stream(f_name: str):
+    """Abre um ficheiro do lote: da memória da sessão ou de TEMP_UPLOADS_DIR."""
+    mem = _session_state_get_garimpo(SESSION_KEY_FONTES_XML_MEMORIA)
+    if (
+        _garimpo_analise_sem_pasta_local_projeto()
+        and isinstance(mem, dict)
+        and f_name in mem
+    ):
+        bio = io.BytesIO(mem[f_name])
+        try:
+            yield bio
+        finally:
+            bio.close()
+    else:
+        f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
+        with open(f_path, "rb") as f:
+            yield f
+
+
+def _garimpo_absorver_uploads_extra_no_lote(extra_files) -> int:
+    """
+    Incorpora ficheiros do «Incluir mais» ao lote (memória ou pasta temp), deduplicando por SHA-256
+    do conteúdo. Assim os XML entram no lote logo após a escolha (cada rerun) e não dependem só
+    do retorno do widget no mesmo instante do clique em «Processar Dados».
+    """
+    if not extra_files:
+        return 0
+    files = list(extra_files) if isinstance(extra_files, (list, tuple)) else [extra_files]
+    try:
+        seen = st.session_state.get(SESSION_KEY_EXTRA_DIGESTS)
+        if not isinstance(seen, set):
+            seen = set()
+        n_new = 0
+        if _garimpo_analise_sem_pasta_local_projeto():
+            mem = _session_state_get_garimpo(SESSION_KEY_FONTES_XML_MEMORIA)
+            if not isinstance(mem, dict):
+                mem = {}
+            for f in files:
+                try:
+                    raw = f.getvalue()
+                except Exception:
+                    continue
+                d = hashlib.sha256(raw).hexdigest()
+                if d in seen:
+                    continue
+                seen.add(d)
+                key = _garimpo_nome_chave_upload(len(mem), getattr(f, "name", None) or "extra")
+                mem[key] = raw
+                n_new += 1
+            if n_new:
+                st.session_state[SESSION_KEY_FONTES_XML_MEMORIA] = mem
+        else:
+            os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
+            start_i = len(_lista_ficheiros_pasta_uploads())
+            for f in files:
+                try:
+                    raw = f.getvalue()
+                except Exception:
+                    continue
+                d = hashlib.sha256(raw).hexdigest()
+                if d in seen:
+                    continue
+                seen.add(d)
+                key = _garimpo_nome_chave_upload(start_i + n_new, getattr(f, "name", None) or "extra")
+                caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, key)
+                with open(caminho_salvo, "wb") as out_f:
+                    out_f.write(raw)
+                n_new += 1
+        st.session_state[SESSION_KEY_EXTRA_DIGESTS] = seen
+        return n_new
+    except Exception:
+        return 0
+
+
+def _streamlit_likely_community_cloud() -> bool:
+    """Heurística para Streamlit Community Cloud / ambiente de deploy sem disco persistente."""
+    exe = (sys.executable or "").lower()
+    return "/mount/src/" in exe or "/home/adminuser/" in exe
+
+
+def _mariana_zip_default_dir() -> Path:
+    """Pasta por omissão dos ZIP do pacote apuração (junto a app2.py)."""
+    return Path(__file__).resolve().parent
+
+
+def _mariana_destino_zip_para_gravar():
+    """
+    Resolve o caminho em session_state['mariana_zip_save_dir'].
+    Pasta em branco → erro (não usa pasta por omissão).
+    Devolve (Path, None) em caso de sucesso ou (None, mensagem de erro).
+    """
+    raw = st.session_state.get("mariana_zip_save_dir")
+    s = (str(raw).strip().strip('"').strip("'") if raw is not None else "")
+    if not s:
+        return (
+            None,
+            "Indique a **pasta completa** onde gravar (o campo não pode ficar em branco).",
+        )
+    try:
+        p = Path(s).expanduser().resolve()
+    except (OSError, ValueError):
+        return None, "Caminho inválido. Use um caminho completo (ex.: D:\\Exportacoes\\Contabilidade)."
+    if p.exists() and not p.is_dir():
+        return (
+            None,
+            "Esse caminho já existe e não é uma pasta (é um ficheiro). Escolha outra pasta.",
+        )
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return None, f"Não foi possível criar ou aceder à pasta: {e}"
+    return p, None
+
+
+def _v2_destino_zip_etapa3_para_gravar():
+    """
+    Pasta para ZIP «com pastas» / «XML soltos» (Gerar sua empresa / terceiros).
+    Em branco → erro (sem pasta por omissão). Devolve (Path, None) ou (None, mensagem).
+    """
+    raw = st.session_state.get("v2_etapa3_zip_save_dir")
+    s = (str(raw).strip().strip('"').strip("'") if raw is not None else "")
+    if not s:
+        return (
+            None,
+            "Indique a **pasta completa** para os ZIP (o campo não pode ficar em branco).",
+        )
+    try:
+        p = Path(s).expanduser().resolve()
+    except (OSError, ValueError):
+        return None, "Caminho inválido para ZIP (Etapa 3). Use um caminho completo (ex.: D:\\Exportacoes\\Garimpeiro)."
+    if p.exists() and not p.is_dir():
+        return (
+            None,
+            "Esse caminho já existe e não é uma pasta (é um ficheiro). Escolha outra pasta para os ZIP.",
+        )
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return None, f"Não foi possível criar ou aceder à pasta dos ZIP: {e}"
+    return p, None
+
+
+def _v2_sanitize_nome_export(s, max_len=72):
+    """Trecho seguro para nome de ficheiro (sem caminhos nem caracteres proibidos no Windows)."""
+    if s is None:
+        return ""
+    t = str(s).strip().strip('"').strip("'")
+    if not t:
+        return ""
+    proib = '\\/:*?"<>|'
+    out = []
+    for c in t:
+        if c in proib:
+            continue
+        if c.isspace():
+            out.append("_")
+        elif c.isalnum() or c in "._-":
+            out.append(c)
+    r = "".join(out).strip("._-")
+    while "__" in r:
+        r = r.replace("__", "_")
+    if not r:
+        return ""
+    return r[:max_len]
+
+
+def _v2_stems_zip_nome_ficheiro_etapa3(nome_raw: str, zip_tag):
+    """
+    Nomes dos ZIP no disco. Sem nome → z_org_propria_pt1… Com nome → Nome_org_propria_pt1…
+    zip_tag: «propria», «terceiros» ou None (lote completo → sufixo final).
+    """
+    org_def = "z_org_final" if not zip_tag else f"z_org_{zip_tag}"
+    todos_def = "z_todos_final" if not zip_tag else f"z_todos_{zip_tag}"
+    u = _v2_sanitize_nome_export(nome_raw, max_len=64)
+    if not u:
+        return org_def, todos_def
+    t = zip_tag if zip_tag else "final"
+    return f"{u}_org_{t}", f"{u}_todos_{t}"
+
+
+_PACOTE_CONTAB_NOME_EXCEL_RAIZ = "relatorio_garimpeiro_completo.xlsx"
+# Pasta “mãe” dentro de cada ZIP de contabilidade; dentro dela vêm Lote_001, Lote_002, … (até MAX_XML_PER_ZIP XML por pasta).
+PACOTE_CONTAB_PASTA_MAE_XML = "XML"
+
+
+def _nome_excel_pacote_contab_dentro_zip(slug: str) -> str:
+    """
+    Nome do .xlsx **dentro** de cada ZIP do pacote contabilidade — inclui série / mês / grupo (o mesmo critério do nome do .zip),
+    para extrair vários ZIPs para a mesma pasta sem o Excel ser sempre substituído por «relatorio_garimpeiro_completo.xlsx».
+    """
+    tail = _v2_sanitize_nome_export(slug, max_len=150) or "lote"
+    base = _v2_sanitize_nome_export(f"relatorio_garimpeiro_{tail}", max_len=200) or f"relatorio_garimpeiro_{tail}"
+    if not str(base).lower().endswith(".xlsx"):
+        base = f"{base}.xlsx"
+    return base
+
+_LEIAME_ESTRUTURA_CONTABILIDADE = """Pacote Garimpeiro — contabilidade / matriz
+========================================
+
+Na **pasta que escolheu** para guardar o pacote:
+  • **Um Excel solto** — ex.: «nome_do_pacote_relatorio_garimpeiro_completo.xlsx» (Geral, Buracos, status, Terceiros, Dashboard, etc.; **sem** folha Painel Fiscal).
+  • Vários **ficheiros .zip** (grupos Emitidas / Terceiros).
+
+Cada ficheiro ZIP contém:
+  • **Pasta XML** — dentro dela, subpastas **Lote_001**, **Lote_002**, … com até 10 000 XML cada. O nome do .xml costuma ser a chave de 44 dígitos (ou `…_cancelamento.xml` / `…_denegada.xml` / `…_rejeitada.xml` quando for evento distinto da mesma chave), ou INUT_….
+  • **relatorio_garimpeiro_…xlsx** — na **raiz** do ZIP (nome inclui série/mês/grupo como o .zip; sem folha Painel Fiscal).
+
+Nome do ficheiro .zip no disco (quando há notas no relatório): inclui **nota inicial e nota final** daquele grupo, ex.: …_Emitidas_Autorizadas_Serie_1_notas_1500_96842.zip
+
+Vários ZIP (só são criados se existir XML naquele grupo):
+  • **Emitidas** (sua empresa), por série **e mês de emissão** — ex.: Emitidas_Autorizadas_Serie_1_Mes_2024_03, …
+    (evita misturar no mesmo ZIP notas de meses diferentes). Dentro: pasta XML/Lote_001… (10 000 XML por pasta).
+  • **Terceiros**, por modelo e status (sem separação por mês) — ex.: Terceiros_NFe_Autorizadas, …
+
+O Excel em cada ZIP é o **mesmo conteúdo** (todo o lote lido), mas o **nome do ficheiro** muda por grupo para não se sobrepor ao extrair.
+"""
+
+
+def _leiame_contab_zipfile(zf):
+    if zf is None:
+        return
+    zf.writestr(
+        "LEIAME_pacote_contabilidade.txt",
+        _LEIAME_ESTRUTURA_CONTABILIDADE.encode("utf-8"),
+    )
+
+
+def _origem_row_e_propria(origem) -> bool:
+    """True = emissão própria (cliente é emitente), a partir da coluna Origem do relatório."""
+    o = str(origem or "").upper()
+    if "TERCEIROS" in o:
+        return False
+    return "PRÓPRIA" in o or "PROPRIA" in o
+
+
+def _pacote_contab_status_curto(status_text) -> str:
+    """Nome curto de status para o stem do ZIP (Autorizadas, Canceladas, …)."""
+    st = str(status_text or "").strip().upper()
+    if st in ("NORMAIS", "AUTORIZADA", "AUTORIZADAS"):
+        return "Autorizadas"
+    if st in ("CANCELADOS", "CANCELADA", "CANCELADAS"):
+        return "Canceladas"
+    if st in ("INUTILIZADOS", "INUTILIZADA", "INUTILIZADAS"):
+        return "Inutilizadas"
+    if st in ("DENEGADOS", "DENEGADA", "DENEGADAS"):
+        return "Denegadas"
+    if st in ("REJEITADOS", "REJEITADA", "REJEITADAS"):
+        return "Rejeitadas"
+    return _v2_sanitize_nome_export(st, max_len=24) or "Outros_status"
+
+
+def _pacote_contab_tipo_zip_terceiros(modelo) -> str:
+    """Grupo do nome do ZIP para terceiros (um par modelo×status por ficheiro)."""
+    m = str(modelo or "").strip()
+    return {
+        "NF-e": "NFe",
+        "NFC-e": "NFCe",
+        "CT-e": "CTe",
+        "MDF-e": "MDFe",
+        "NFS-e": "NFSe",
+        "CT-e OS": "CTeOS",
+    }.get(m, "Outros")
+
+
+def _pacote_contab_slug_zip(is_propria: bool, status_text, serie, modelo) -> str:
+    """
+    Stem base do ficheiro ZIP: Emitidas por série + status; terceiros por modelo (NFe, CTe, …) + status.
+    Nas emitidas o sufixo de mês é acrescentado à parte (ver _pacote_contab_slug_emitidas_com_mes).
+    status_text: «Status Final» ou res['Status']; modelo: «Modelo» no DF ou res['Tipo'].
+    """
+    st_short = _pacote_contab_status_curto(status_text)
+    if is_propria:
+        ser_raw = str(serie if serie is not None else "").strip() or "0"
+        ser = _v2_sanitize_nome_export(ser_raw, max_len=16) or "0"
+        return f"Emitidas_{st_short}_Serie_{ser}"
+    g = _pacote_contab_tipo_zip_terceiros(modelo)
+    return f"Terceiros_{g}_{st_short}"
+
+
+def _pacote_contab_sufixo_mes_emissao_emitidas(ano, mes) -> str:
+    """Sufixo para ZIPs de emissão própria: _Mes_AAAA_MM (separa ficheiros de meses diferentes no pacote)."""
+    try:
+        a = int(ano)
+        m = int(mes)
+        if a <= 0 or m < 1 or m > 12:
+            return "_Mes_desconhecido"
+        return f"_Mes_{a:04d}_{m:02d}"
+    except (TypeError, ValueError):
+        return "_Mes_desconhecido"
+
+
+def _pacote_contab_slug_emitidas_com_mes(is_propria: bool, status_text, serie, modelo, ano, mes) -> str:
+    base = _pacote_contab_slug_zip(is_propria, status_text, serie, modelo)
+    if not is_propria:
+        return base
+    return base + _pacote_contab_sufixo_mes_emissao_emitidas(ano, mes)
+
+
+def _montar_mapa_chave_slug_contab(df: pd.DataFrame, chaves_permitidas: set) -> dict:
+    """Chave normalizada → slug do lote (só chaves que entram no pacote). Emitidas: um ZIP por mês de emissão."""
+    out = {}
+    if df is None or df.empty or "Chave" not in df.columns or not chaves_permitidas:
+        return out
+    for _, row in df.iterrows():
+        k = _chave_para_conjunto_export(row.get("Chave"))
+        if not k or k not in chaves_permitidas:
+            continue
+        is_pr = _origem_row_e_propria(row.get("Origem", ""))
+        mod = row.get("Modelo", "") or row.get("Tipo", "")
+        ano = row["Ano"] if "Ano" in row.index else None
+        mes = row["Mes"] if "Mes" in row.index else None
+        slug = _pacote_contab_slug_emitidas_com_mes(
+            is_pr,
+            row.get("Status Final", ""),
+            row.get("Série", "0"),
+            mod,
+            ano,
+            mes,
+        )
+        out[k] = slug
+    return out
+
+
+def _nota_int_de_linha_relatorio(row):
+    """Número da nota a partir de uma linha do relatório geral (Número, Num_Faltante ou posições 25–33 da chave 44)."""
+    if row is None:
+        return None
+    for col in ("Número", "Num_Faltante"):
+        if col not in row.index:
+            continue
+        n = row[col]
+        if pd.isna(n):
+            continue
+        try:
+            return int(float(n))
+        except (TypeError, ValueError):
+            continue
+    if "Chave" not in row.index:
+        return None
+    ch = _chave_para_conjunto_export(row["Chave"])
+    if len(ch) == 44 and ch.isdigit():
+        try:
+            return int(ch[25:34])
+        except ValueError:
+            pass
+    return None
+
+
+def _pacote_contab_notas_min_max_por_slug(df_ref, mapa_slug: dict, filtro_chaves: set) -> dict:
+    """slug → (n_min, n_max) com base no DataFrame de referência (para sufixo _notas_ no nome do .zip)."""
+    mm = defaultdict(lambda: [None, None])
+    if df_ref is None or getattr(df_ref, "empty", True) or not filtro_chaves:
+        return {}
+    if "Chave" not in df_ref.columns:
+        return {}
+    for _, row in df_ref.iterrows():
+        k = _chave_para_conjunto_export(row["Chave"] if "Chave" in row.index else None)
+        if not k or k not in filtro_chaves:
+            continue
+        slug = mapa_slug.get(k)
+        if not slug:
+            continue
+        n = _nota_int_de_linha_relatorio(row)
+        if n is None:
+            continue
+        lo, hi = mm[slug]
+        mm[slug][0] = n if lo is None else min(lo, n)
+        mm[slug][1] = n if hi is None else max(hi, n)
+    return {s: (lo, hi) for s, (lo, hi) in mm.items() if lo is not None and hi is not None}
+
+
+def _v2_export_pacote_contab_por_dimensoes(
+    out_dir: Path,
+    stem_org: str,
+    filtro_chaves: set,
+    cnpj_limpo: str,
+    xb_completo,
+    excel_fn_completo: str,
+    df_ref: pd.DataFrame,
+):
+    """
+    ZIP por emitida (status × série × **mês**) ou por terceiros (modelo × status).
+    Dentro de cada ZIP: pasta XML/Lote_001, Lote_002, … (até MAX_XML_PER_ZIP XML por pasta)
+    + Excel na raiz com nome único por grupo (`relatorio_garimpeiro_<slug>.xlsx`). Nome do .zip pode incluir _notas_min_max.
+    Grava também o Excel completo **solto** em out_dir (prefixo = stem_org).
+    Devolve (paths, [], matched, aviso, caminho_excel_solta|None).
+    """
+    mapa_slug = _montar_mapa_chave_slug_contab(df_ref, filtro_chaves)
+    slug_ranges = _pacote_contab_notas_min_max_por_slug(df_ref, mapa_slug, filtro_chaves)
+    zips_abertos = {}
+    paths_ordered = {}
+    slug_lote_idx = {}
+    slug_in_lote = {}
+
+    def _ensure_zip(slug: str):
+        if slug not in zips_abertos:
+            lo_hi = slug_ranges.get(slug)
+            suf = ""
+            if lo_hi and lo_hi[0] is not None and lo_hi[1] is not None:
+                suf = f"_notas_{int(lo_hi[0])}_{int(lo_hi[1])}"
+            combo = _v2_sanitize_nome_export(f"{stem_org}__{slug}{suf}", max_len=200) or "pacote"
+            path = out_dir / f"{combo}.zip"
+            zf = _zipfile_open_write_export(path)
+            zips_abertos[slug] = zf
+            paths_ordered[slug] = str(path)
+            _leiame_contab_zipfile(zf)
+        return zips_abertos[slug]
+
+    def _prefixo_lote_xml(slug: str) -> str:
+        if slug not in slug_lote_idx:
+            slug_lote_idx[slug] = 1
+            slug_in_lote[slug] = 0
+        if slug_in_lote[slug] >= MAX_XML_PER_ZIP:
+            slug_lote_idx[slug] += 1
+            slug_in_lote[slug] = 0
+        li = slug_lote_idx[slug]
+        slug_in_lote[slug] += 1
+        return f"{PACOTE_CONTAB_PASTA_MAE_XML}/Lote_{li:03d}"
+
+    xml_matched = 0
+    chaves_ja_gravadas_pacote = set()
+    for f_name in _lista_nomes_fontes_xml_garimpo():
+        with _abrir_fonte_xml_garimpo_stream(f_name) as f_temp:
+            for name, xml_data in extrair_recursivo(f_temp, f_name):
+                res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
+                ck = _chave_para_conjunto_export(res["Chave"]) if res else None
+                if res and ck and ck in filtro_chaves:
+                    td = _tupla_dedupe_export_xml(res, ck)
+                    if td is None or td in chaves_ja_gravadas_pacote:
+                        del xml_data
+                        continue
+                    chaves_ja_gravadas_pacote.add(td)
+                    xml_matched += 1
+                    slug = mapa_slug.get(ck) or _pacote_contab_slug_emitidas_com_mes(
+                        is_p,
+                        str(res.get("Status") or "NORMAIS"),
+                        res.get("Série", "0"),
+                        res.get("Tipo", "Outros"),
+                        res.get("Ano"),
+                        res.get("Mes"),
+                    )
+                    zf = _ensure_zip(slug)
+                    _pfx = _prefixo_lote_xml(slug)
+                    _inner = f"{_pfx}/{_nome_arquivo_xml_contabilidade(res, name)}"
+                    zf.writestr(_inner, xml_data)
+                del xml_data
+
+    for slug, zf in zips_abertos.items():
+        try:
+            if xb_completo:
+                zf.writestr(_nome_excel_pacote_contab_dentro_zip(slug), xb_completo)
+        except OSError:
+            pass
+        try:
+            zf.close()
+        except OSError:
+            pass
+
+    excel_solta_path = None
+    if xb_completo:
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            stem_safe = _v2_sanitize_nome_export(stem_org, max_len=80) or "pacote_apuracao"
+            nome_xlsx = _v2_sanitize_nome_export(
+                f"{stem_safe}_{_PACOTE_CONTAB_NOME_EXCEL_RAIZ}", max_len=200
+            ) or _PACOTE_CONTAB_NOME_EXCEL_RAIZ
+            if not str(nome_xlsx).lower().endswith(".xlsx"):
+                nome_xlsx = f"{nome_xlsx}.xlsx"
+            p_x = out_dir / nome_xlsx
+            _raw = (
+                xb_completo
+                if isinstance(xb_completo, (bytes, bytearray))
+                else bytes(xb_completo)
+            )
+            with open(p_x, "wb") as xf:
+                xf.write(_raw)
+            excel_solta_path = str(p_x.resolve())
+        except OSError:
+            excel_solta_path = None
+
+    aviso = None
+    if xml_matched == 0:
+        aviso = (
+            "Nenhum XML em disco correspondeu às chaves. "
+            "Causas frequentes: pasta do garimpo apagada, ou chaves na tabela que não batem com os ficheiros."
+        )
+    _paths_list = sorted(paths_ordered.values(), key=lambda p: os.path.basename(p).lower())
+    return _paths_list, [], xml_matched, aviso, excel_solta_path
+
+
+def _tupla_dedupe_export_xml(res: dict | None, ck) -> tuple | None:
+    """
+    Uma entrada por (chave lógica, «tipo» de XML) dentro do mesmo ZIP.
+    Permite **dois** ficheiros com a mesma chave 44 quando um é a NF (ou doc «normal»)
+    e outro é cancelamento / denegação / rejeição (evento ou proc distinto).
+    Duplicar **o mesmo** tipo (ex.: dois proc autorizados) continua a ser ignorado.
+    """
+    if ck is None:
+        return None
+    if not res:
+        return (ck, "UNK")
+    if str(ck).startswith("INUT_"):
+        return (ck, "INUT")
+    st = str(res.get("Status") or "").strip().upper()
+    if st == "CANCELADOS":
+        return (ck, "CANCELADOS")
+    if st == "DENEGADOS":
+        return (ck, "DENEGADOS")
+    if st == "REJEITADOS":
+        return (ck, "REJEITADOS")
+    return (ck, "DOC")
+
+
+def _nome_arquivo_xml_contabilidade(res: dict, nome_original: str) -> str:
+    ch = str(res.get("Chave") or "").strip()
+    st = str(res.get("Status") or "").strip().upper()
+    if len(ch) == 44 and ch.isdigit():
+        if st == "CANCELADOS":
+            return f"{ch}_cancelamento.xml"
+        if st == "DENEGADOS":
+            return f"{ch}_denegada.xml"
+        if st == "REJEITADOS":
+            return f"{ch}_rejeitada.xml"
+        return f"{ch}.xml"
+    if ch.startswith("INUT_"):
+        safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in ch)
+        return f"{safe}.xml"
+    base = os.path.basename(nome_original)
+    if not base.lower().endswith(".xml"):
+        base = f"{base}.xml"
+    return base
+
+
+def _caminho_xml_pacote_contab_raiz(res: dict, nome_xml: str) -> str:
+    """Nome base do .xml (chave 44 ou INUT_…); no pacote contabilidade completo o caminho inclui XML/Lote_NNN/."""
+    return _nome_arquivo_xml_contabilidade(res, nome_xml)
+
+
+def _is_mariana_pc_bundle() -> bool:
+    """
+    Mostra o bloco «Pacote para contabilidade / matriz» (todo o lote lido, sem filtros da Etapa 3).
+    • Local (streamlit run): ligado por omissão.
+    • Streamlit Cloud: desligado por omissão (ligar com GARIMPEIRO_MARIANA_PC=1 no deploy).
+    • Desligar em qualquer sítio: GARIMPEIRO_MARIANA_PC=0
+    """
+    env = os.environ.get("GARIMPEIRO_MARIANA_PC", "").strip().lower()
+    if env in ("0", "false", "no"):
+        return False
+    if env in ("1", "true", "yes"):
+        return True
+    if (Path(__file__).resolve().parent / ".mariana_pc").is_file():
+        return True
+    s = str(Path(__file__).resolve().parent).lower()
+    if "servidor pc" in s or "garimpeiro servidor pc" in s:
+        return True
+    try:
+        if Path(r"N:\MARIANA").is_dir():
+            return True
+    except OSError:
+        pass
+    if _streamlit_likely_community_cloud():
+        return False
+    return True
+
+
 # Se dois números emitidos consecutivos (ordenados) diferem mais que isto, tratamos como outra faixa.
 # Assim evitamos milhões de "buracos" falsos (ex.: uma chave/XML errado com nº gigante ou duas séries distantes misturadas).
 MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS = 25000
@@ -645,6 +1402,18 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
                     
             resumo["Chave"] = f"INUT_{resumo['Série']}_{ini}"
 
+            # Inutilização: o emitente está em infInut / inutNFe, não em <emit> — sem isto CNPJ_Emit fica vazio
+            # e is_p fica sempre falso (pacote/ZIP aparece como «terceiros» mesmo sendo o mesmo CNPJ).
+            if not resumo["CNPJ_Emit"]:
+                for _pat in (
+                    r"<[^>]*infinut[^>]*>[\s\S]{0,12000}?<cnpj>(\d{11,14})</cnpj>",
+                    r"<inutnfe[^>]*>[\s\S]{0,12000}?<cnpj>(\d{11,14})</cnpj>",
+                ):
+                    _mc = re.search(_pat, tag_l, re.I)
+                    if _mc:
+                        resumo["CNPJ_Emit"] = _mc.group(1)
+                        break
+
         else:
             match_ch = re.search(r'<(?:chnfe|chcte|chmdfe)>(\d{44})</', tag_l)
             if not match_ch:
@@ -665,26 +1434,46 @@ def identify_xml_info(content_bytes, client_cnpj, file_name):
                 if not resumo["Data_Emissao"]: 
                     resumo["Data_Emissao"] = f"{resumo['Ano']}-{resumo['Mes']}-01"
 
+            # Modelo: 1) dígitos 21–22 da chave de acesso (44) = código Sefaz; 2) <mod> / raiz XML;
+            # 3) heurística NFS-e por último — evita CT-e (57) com <servico> no XML ser lido como NFS-e.
             tipo = "NF-e"
-            if re.search(r'<[^>]*nfse', tag_l) or "<nfse" in tag_l or ("servico" in tag_l and "nfse" in tag_l):
-                tipo = "NFS-e"
-            elif '<mod>65</mod>' in tag_l: 
-                tipo = "NFC-e"
-            elif '<mod>57</mod>' in tag_l or '<infcte' in tag_l: 
-                tipo = "CT-e"
-            elif '<mod>67</mod>' in tag_l or "<dadcte" in tag_l or "dacte" in tag_l:
-                tipo = "DACT-e"
-            elif '<mod>58</mod>' in tag_l or '<infmdfe' in tag_l: 
-                tipo = "MDF-e"
+            _ch44 = resumo.get("Chave") or ""
+            if len(_ch44) == 44 and _ch44.isdigit():
+                _mk = _ch44[20:22]
+                if _mk == "57":
+                    tipo = "CT-e"
+                elif _mk == "58":
+                    tipo = "MDF-e"
+                elif _mk == "65":
+                    tipo = "NFC-e"
+                elif _mk == "67":
+                    tipo = "CT-e OS"
+                elif _mk == "55":
+                    tipo = "NF-e"
+            if tipo == "NF-e" and not (len(_ch44) == 44 and _ch44.isdigit() and _ch44[20:22] in ("55", "57", "58", "65", "67")):
+                if '<mod>57</mod>' in tag_l or '<infcte' in tag_l:
+                    tipo = "CT-e"
+                elif '<mod>58</mod>' in tag_l or '<infmdfe' in tag_l:
+                    tipo = "MDF-e"
+                elif '<mod>65</mod>' in tag_l:
+                    tipo = "NFC-e"
+                elif '<mod>67</mod>' in tag_l or "<dadcte" in tag_l or "dacte" in tag_l or "<cteos" in tag_l or "cte-os" in tag_l:
+                    tipo = "CT-e OS"
+                elif '<mod>55</mod>' in tag_l:
+                    tipo = "NF-e"
+                elif re.search(r'<[^>]*nfse', tag_l) or "<nfse" in tag_l or ("servico" in tag_l and "nfse" in tag_l):
+                    tipo = "NFS-e"
             
             status = "NORMAIS"
             if '110111' in tag_l or '<cstat>101</cstat>' in tag_l: 
                 status = "CANCELADOS"
             elif '110110' in tag_l: 
                 status = "CARTA_CORRECAO"
-            elif re.search(r'<cstat>110</cstat>', tag_l) or "deneg" in tag_l:
-                status = "REJEITADOS"
-            elif re.search(r'<cstat>30[1-9]</cstat>', tag_l) or re.search(r'<cstat>3[1-4]\d</cstat>', tag_l):
+            elif re.search(r"<cstat>110</cstat>", tag_l) or "deneg" in tag_l:
+                status = "DENEGADOS"
+            elif re.search(r"<cstat>30[1-9]</cstat>", tag_l) or re.search(
+                r"<cstat>3[1-4]\d</cstat>", tag_l
+            ):
                 status = "REJEITADOS"
                 
             resumo["Tipo"] = tipo
@@ -740,54 +1529,78 @@ def _incluir_em_resumo_por_serie(res, is_p, client_cnpj_clean: str) -> bool:
 
 # --- FUNÇÃO RECURSIVA OTIMIZADA PARA DISCO ---
 def extrair_recursivo(conteudo_ou_file, nome_arquivo):
-    if not os.path.exists(TEMP_EXTRACT_DIR): 
+    """
+    Abre .zip e devolve (nome_base, bytes) para cada .xml (incluindo dentro de ZIPs «matriosca»).
+    ZIP dentro de ZIP: lê para memória (BytesIO) em vez de extract para disco — evita falhas no Windows
+    (caminho longo, antivírus, pastas aninhadas no nome da entrada).
+    """
+    if not os.path.exists(TEMP_EXTRACT_DIR):
         os.makedirs(TEMP_EXTRACT_DIR)
-        
-    if nome_arquivo.lower().endswith('.zip'):
+
+    if nome_arquivo.lower().endswith(".zip"):
         try:
-            if hasattr(conteudo_ou_file, 'read'):
+            if hasattr(conteudo_ou_file, "read"):
                 file_obj = conteudo_ou_file
+                if hasattr(file_obj, "seek"):
+                    try:
+                        file_obj.seek(0)
+                    except (OSError, io.UnsupportedOperation):
+                        pass
             else:
                 file_obj = io.BytesIO(conteudo_ou_file)
-                
+
             with zipfile.ZipFile(file_obj) as z:
                 for sub_nome in z.namelist():
-                    if sub_nome.startswith('__MACOSX') or os.path.basename(sub_nome).startswith('.'): 
+                    if sub_nome.startswith("__MACOSX") or os.path.basename(sub_nome).startswith("."):
                         continue
-                        
-                    if sub_nome.lower().endswith('.zip'):
-                        temp_path = z.extract(sub_nome, path=TEMP_EXTRACT_DIR)
-                        with open(temp_path, 'rb') as f_temp:
-                            yield from extrair_recursivo(f_temp, sub_nome)
-                        try: 
-                            os.remove(temp_path)
-                        except: 
-                            pass
-                    elif sub_nome.lower().endswith('.xml'):
-                        yield (os.path.basename(sub_nome), z.read(sub_nome))
-        except: 
+                    if sub_nome.endswith("/") or sub_nome.endswith("\\"):
+                        continue
+                    base_sub = os.path.basename(sub_nome)
+                    if not base_sub:
+                        continue
+                    if sub_nome.lower().endswith(".zip"):
+                        try:
+                            _zip_inner = z.read(sub_nome)
+                        except (zipfile.BadZipFile, OSError, RuntimeError):
+                            continue
+                        if not _zip_inner:
+                            continue
+                        yield from extrair_recursivo(
+                            io.BytesIO(_zip_inner),
+                            base_sub,
+                        )
+                    elif sub_nome.lower().endswith(".xml"):
+                        try:
+                            yield (base_sub, z.read(sub_nome))
+                        except (OSError, KeyError, RuntimeError):
+                            continue
+        except (zipfile.BadZipFile, OSError, RuntimeError):
             pass
-            
-    elif nome_arquivo.lower().endswith('.xml'):
-        if hasattr(conteudo_ou_file, 'read'): 
+
+    elif nome_arquivo.lower().endswith(".xml"):
+        if hasattr(conteudo_ou_file, "read"):
             yield (os.path.basename(nome_arquivo), conteudo_ou_file.read())
-        else: 
+        else:
             yield (os.path.basename(nome_arquivo), conteudo_ou_file)
 
 # --- LIMPEZA DE PASTAS TEMPORÁRIAS ---
 def limpar_arquivos_temp():
+    """
+    Só limpa subpastas dedicadas da app — **nunca** apaga ficheiros na pasta de trabalho (cwd),
+    para não remover ZIP que o utilizador descarregou para a mesma pasta onde corre o Streamlit.
+    """
     try:
-        for f in os.listdir('.'):
-            if f.endswith('.zip') and ('z_org_final' in f or 'z_todos_final' in f or 'faltantes_dominio_final' in f):
-                try: os.remove(f)
-                except: pass
-            
-        if os.path.exists(TEMP_EXTRACT_DIR): 
+        if os.path.exists(TEMP_EXTRACT_DIR):
             shutil.rmtree(TEMP_EXTRACT_DIR, ignore_errors=True)
-            
-        if os.path.exists(TEMP_UPLOADS_DIR): 
+
+        if os.path.exists(TEMP_UPLOADS_DIR):
             shutil.rmtree(TEMP_UPLOADS_DIR, ignore_errors=True)
-    except: 
+        _garimpo_limpar_fontes_xml_memoria_sessao()
+        try:
+            st.session_state.pop(SESSION_KEY_EXTRA_DIGESTS, None)
+        except Exception:
+            pass
+    except Exception:
         pass
 
 # --- DIVISOR DE LOTES HTML (Para deixar botões organizados) ---
@@ -820,14 +1633,29 @@ def compactar_dataframe_memoria(df):
 
 
 def dataframe_para_excel_bytes(df, sheet_name="Dados"):
-    """Excel com as mesmas colunas do DataFrame (para download alinhado à tabela na tela)."""
+    """
+    Excel com as mesmas colunas do DataFrame (para download alinhado à tabela na tela).
+    Em disco/temp cheio (errno 28) tenta openpyxl; em falha total devolve None.
+    """
     if df is None or df.empty:
         return None
-    buf = io.BytesIO()
     sn = (sheet_name or "Dados")[:31]
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.reset_index(drop=True).to_excel(writer, sheet_name=sn, index=False)
-    return buf.getvalue()
+    dfx = df.reset_index(drop=True)
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            dfx.to_excel(writer, sheet_name=sn, index=False)
+        return buf.getvalue()
+    except Exception as exc:
+        if not _erro_sem_espaco_disco(exc):
+            raise
+    try:
+        buf2 = io.BytesIO()
+        with pd.ExcelWriter(buf2, engine="openpyxl") as writer:
+            dfx.to_excel(writer, sheet_name=sn, index=False)
+        return buf2.getvalue()
+    except Exception:
+        return None
 
 
 # Limites de linhas por tabela no PDF do dashboard (evita ficheiros gigantes).
@@ -962,6 +1790,8 @@ def coletar_kpis_dashboard():
         ("Itens no lote (relatório bruto)", len(rel)),
         ("Autorizadas (emissão própria)", int(sc.get("AUTORIZADAS", 0) or 0)),
         ("Canceladas (emissão própria)", int(sc.get("CANCELADOS", 0) or 0)),
+        ("Denegadas (emissão própria)", int(sc.get("DENEGADOS", 0) or 0)),
+        ("Rejeitadas (emissão própria)", int(sc.get("REJEITADOS", 0) or 0)),
         ("Inutilizadas (emissão própria)", int(sc.get("INUTILIZADOS", 0) or 0)),
         ("Buracos na sequência", n_bur),
         ("XML emissão própria (itens)", n_proprios),
@@ -973,6 +1803,11 @@ def coletar_kpis_dashboard():
     df_inu = st.session_state.get("df_inutilizadas")
     df_can = st.session_state.get("df_canceladas")
     df_aut = st.session_state.get("df_autorizadas")
+    df_den = st.session_state.get("df_denegadas")
+    df_rej = st.session_state.get("df_rejeitadas")
+    df_g_pdf_geral = df_g
+    if df_g is not None and not df_g.empty and "Origem" in df_g.columns:
+        df_g_pdf_geral = df_g.loc[_mask_emissao_propria_df(df_g)].reset_index(drop=True)
     pdf_previews = {
         "resumo": _preview_df_para_pdf(
             df_r,
@@ -1000,11 +1835,21 @@ def coletar_kpis_dashboard():
             _DASH_PDF_MAX["tabela"],
             msg_se_vazio="Nenhuma autorizada listada neste detalhe.",
         ),
+        "denegadas": _preview_df_para_pdf(
+            df_den,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Nenhuma denegada listada neste detalhe.",
+        ),
+        "rejeitadas": _preview_df_para_pdf(
+            df_rej,
+            _DASH_PDF_MAX["tabela"],
+            msg_se_vazio="Nenhuma rejeitada listada neste detalhe.",
+        ),
         "geral": _preview_df_para_pdf(
-            df_g,
+            df_g_pdf_geral,
             _DASH_PDF_MAX["geral"],
             _DASH_PDF_GERAL_COLS,
-            msg_se_vazio="Relatório geral vazio.",
+            msg_se_vazio="Relatório geral vazio (emissão própria).",
         ),
     }
     return {
@@ -1119,6 +1964,8 @@ def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
     aut = int(sc.get("AUTORIZADAS", 0) or 0)
     can = int(sc.get("CANCELADOS", 0) or 0)
     inu = int(sc.get("INUTILIZADOS", 0) or 0)
+    den = int(sc.get("DENEGADOS", 0) or 0)
+    rej = int(sc.get("REJEITADOS", 0) or 0)
     valor = float(kpi.get("valor") or 0)
     n_bur = int(kpi.get("n_bur") or 0)
     terc_cnt = kpi.get("terc_cnt") or {}
@@ -1287,7 +2134,8 @@ def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
         4,
         7,
         6,
-        f"Canceladas: {_excel_fmt_milhar_pt(can)}\nInutilizadas: {_excel_fmt_milhar_pt(inu)}",
+        f"Canceladas: {_excel_fmt_milhar_pt(can)}\nInutilizadas: {_excel_fmt_milhar_pt(inu)}\n"
+        f"Denegadas: {_excel_fmt_milhar_pt(den)}\nRejeitadas: {_excel_fmt_milhar_pt(rej)}",
         fmt_rodape_card,
     )
 
@@ -1312,8 +2160,12 @@ def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
     ws.write_number(r0 + 2, hid_c + 1, max(0, can))
     ws.write(r0 + 3, hid_c, "Inutilizadas")
     ws.write_number(r0 + 3, hid_c + 1, max(0, inu))
+    ws.write(r0 + 4, hid_c, "Denegadas")
+    ws.write_number(r0 + 4, hid_c + 1, max(0, den))
+    ws.write(r0 + 5, hid_c, "Rejeitadas")
+    ws.write_number(r0 + 5, hid_c + 1, max(0, rej))
 
-    r1 = r0 + 5
+    r1 = r0 + 8
     terc_items = sorted(terc_cnt.items(), key=lambda x: -x[1])[:8]
     if not terc_items:
         ws.write(r1, hid_c, "—")
@@ -1338,8 +2190,8 @@ def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
     ch1.add_series(
         {
             "name": "Emissão própria",
-            "categories": [sn, r0 + 1, hid_c, r0 + 3, hid_c],
-            "values": [sn, r0 + 1, hid_c + 1, r0 + 3, hid_c + 1],
+            "categories": [sn, r0 + 1, hid_c, r0 + 5, hid_c],
+            "values": [sn, r0 + 1, hid_c + 1, r0 + 5, hid_c + 1],
         }
     )
     ch1.set_title({"name": f"STATUS DE EMISSÃO PRÓPRIA ({mes_ref})"})
@@ -1467,26 +2319,127 @@ def _excel_escrever_painel_fiscal(wb, kpi, usados_nomes):
     ws.set_column(14, 15, 20)
 
 
-def excel_relatorio_geral_com_dashboard_bytes(df_geral):
+def _excel_relatorio_geral_openpyxl_fallback_bytes(
+    df_g,
+    df_bur,
+    df_inu,
+    df_can,
+    df_aut,
+    df_den,
+    df_rej,
+    df_cte,
+    df_terc_rows,
+    *,
+    omit_bur_inu: bool,
+    kpi: dict,
+    incluir_painel_fiscal: bool,
+):
+    """
+    Mesmas folhas de dados que o livro principal, sem layout xlsxwriter (dashboard formatado / painel fiscal).
+    Usado quando xlsxwriter falha por disco ou temp cheio (errno 28).
+    """
+    buf = io.BytesIO()
+    usados = set()
+    try:
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            _excel_escrever_folha_df(writer, df_g, "Geral", usados)
+            if not omit_bur_inu:
+                _excel_escrever_folha_df(writer, df_bur, "Buracos", usados)
+                _excel_escrever_folha_df(writer, df_inu, "Inutilizadas", usados)
+            _excel_escrever_folha_df(writer, df_can, "Canceladas", usados)
+            _excel_escrever_folha_df(writer, df_aut, "Autorizadas", usados)
+            _excel_escrever_folha_df(writer, df_den, "Denegadas", usados)
+            _excel_escrever_folha_df(writer, df_rej, "Rejeitadas", usados)
+            _excel_escrever_folha_df(writer, df_cte, "CT-e e CT-e OS", usados)
+            _excel_escrever_folha_df(writer, df_terc_rows, "Terceiros lidas", usados)
+            par = kpi.get("pares") or []
+            if par:
+                df_d = pd.DataFrame(list(par), columns=["Indicador", "Valor"])
+            else:
+                df_d = pd.DataFrame(
+                    {
+                        "Aviso": [
+                            "Export alternativo (sem espaço para xlsxwriter em disco/Temp). "
+                            "Liberte espaço em C: ou defina TEMP/TMP noutro disco."
+                        ]
+                    }
+                )
+            _excel_escrever_folha_df(writer, df_d, "Dashboard", usados)
+            df_r = st.session_state.get("df_resumo")
+            if df_r is not None and isinstance(df_r, pd.DataFrame) and not df_r.empty:
+                _excel_escrever_folha_df(writer, df_r, "Resumo por série", usados)
+            tc = kpi.get("terc_cnt") or {}
+            if tc:
+                df_tc = pd.DataFrame(
+                    [
+                        {"Modelo": m, "Quantidade": int(q)}
+                        for m, q in sorted(tc.items(), key=lambda x: str(x[0]))
+                    ]
+                )
+                _excel_escrever_folha_df(writer, df_tc, "Terceiros qtd", usados)
+            if incluir_painel_fiscal:
+                df_pf = pd.DataFrame(
+                    {
+                        "Nota": [
+                            "Painel fiscal: só no export completo (xlsxwriter). "
+                            "Liberte espaço em C: (Temp) e exporte de novo."
+                        ]
+                    }
+                )
+                _excel_escrever_folha_df(writer, df_pf, "Painel fiscal", usados)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def excel_relatorio_geral_com_dashboard_bytes(
+    df_geral, *, incluir_painel_fiscal: bool = True, folhas_detalhe: dict | None = None
+):
     """
     Excel com várias folhas alinhadas às abas da página da app:
-    Geral, Buracos, Inutilizadas, Canceladas, Autorizadas, CT-e lidas, Terceiros lidas, Dashboard, Painel Fiscal.
+    Geral, Buracos, Inutilizadas, Canceladas, Autorizadas, Denegadas, Rejeitadas, CT-e e CT-e OS, Terceiros lidas, Dashboard;
+    opcionalmente Painel Fiscal (incluir_painel_fiscal=False para pacote contabilidade).
+    Se ``folhas_detalhe`` for um dict com chaves df_bur, df_inu, df_can, df_aut, df_den, df_rej,
+    usa esses DataFrames em vez dos da sessão (ex.: livro só «terceiros»). Se df_bur e df_inu
+    vierem vazios (caso típico terceiros), as folhas Buracos e Inutilizadas não são criadas.
     """
     if df_geral is None or df_geral.empty:
         return None
     kpi = coletar_kpis_dashboard()
-    buf = io.BytesIO()
     usados_nomes = set()
 
-    df_bur = st.session_state.get("df_faltantes")
-    df_inu = st.session_state.get("df_inutilizadas")
-    df_can = st.session_state.get("df_canceladas")
-    df_aut = st.session_state.get("df_autorizadas")
+    if folhas_detalhe is None:
+        df_bur = st.session_state.get("df_faltantes")
+        df_inu = st.session_state.get("df_inutilizadas")
+        df_can = st.session_state.get("df_canceladas")
+        df_aut = st.session_state.get("df_autorizadas")
+        df_den = st.session_state.get("df_denegadas")
+        df_rej = st.session_state.get("df_rejeitadas")
+    else:
+        df_bur = folhas_detalhe.get("df_bur")
+        df_inu = folhas_detalhe.get("df_inu")
+        df_can = folhas_detalhe.get("df_can")
+        df_aut = folhas_detalhe.get("df_aut")
+        df_den = folhas_detalhe.get("df_den")
+        df_rej = folhas_detalhe.get("df_rej")
+        if df_bur is None or not isinstance(df_bur, pd.DataFrame):
+            df_bur = pd.DataFrame()
+        if df_inu is None or not isinstance(df_inu, pd.DataFrame):
+            df_inu = pd.DataFrame()
+        if df_can is None or not isinstance(df_can, pd.DataFrame):
+            df_can = pd.DataFrame()
+        if df_aut is None or not isinstance(df_aut, pd.DataFrame):
+            df_aut = pd.DataFrame()
+        if df_den is None or not isinstance(df_den, pd.DataFrame):
+            df_den = pd.DataFrame()
+        if df_rej is None or not isinstance(df_rej, pd.DataFrame):
+            df_rej = pd.DataFrame()
 
     df_g = df_geral.reset_index(drop=True)
     df_g = _df_com_data_emissao_dd_mm_yyyy(df_g)
     if "Modelo" in df_g.columns:
-        df_cte = df_g[df_g["Modelo"].astype(str).str.strip().eq("CT-e")].copy()
+        _m = df_g["Modelo"].astype(str).str.strip()
+        df_cte = df_g[_m.isin(("CT-e", "CT-e OS"))].copy()
     else:
         df_cte = pd.DataFrame()
     if "Origem" in df_g.columns:
@@ -1500,80 +2453,112 @@ def excel_relatorio_geral_com_dashboard_bytes(df_geral):
     df_inu = _df_com_data_emissao_dd_mm_yyyy(df_inu)
     df_can = _df_com_data_emissao_dd_mm_yyyy(df_can)
     df_aut = _df_com_data_emissao_dd_mm_yyyy(df_aut)
+    df_den = _df_com_data_emissao_dd_mm_yyyy(df_den)
+    df_rej = _df_com_data_emissao_dd_mm_yyyy(df_rej)
 
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        _excel_escrever_folha_df(writer, df_g, "Geral", usados_nomes)
-        _excel_escrever_folha_df(writer, df_bur, "Buracos", usados_nomes)
-        _excel_escrever_folha_df(writer, df_inu, "Inutilizadas", usados_nomes)
-        _excel_escrever_folha_df(writer, df_can, "Canceladas", usados_nomes)
-        _excel_escrever_folha_df(writer, df_aut, "Autorizadas", usados_nomes)
-        _excel_escrever_folha_df(writer, df_cte, "CT-e lidas", usados_nomes)
-        _excel_escrever_folha_df(writer, df_terc_rows, "Terceiros lidas", usados_nomes)
+    # Livro só terceiros: buracos/inutilizadas não existem — não criar folhas vazias.
+    _omit_bur_inu = (
+        folhas_detalhe is not None
+        and df_bur.empty
+        and df_inu.empty
+    )
 
-        wb = writer.book
-        dash_sn = _excel_nome_folha_seguro("Dashboard", usados_nomes)
-        ws = wb.add_worksheet(dash_sn)
-        title_f = wb.add_format(
-            {"bold": True, "font_size": 16, "font_color": "#AD1457", "valign": "vcenter"}
-        )
-        hdr_f = wb.add_format(
-            {"bold": True, "bg_color": "#F8BBD0", "border": 1, "valign": "vcenter"}
-        )
-        cell_f = wb.add_format({"border": 1, "valign": "vcenter"})
-        sub_f = wb.add_format({"bold": True, "font_size": 11, "bg_color": "#FCE4EC", "border": 1})
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            _excel_escrever_folha_df(writer, df_g, "Geral", usados_nomes)
+            if not _omit_bur_inu:
+                _excel_escrever_folha_df(writer, df_bur, "Buracos", usados_nomes)
+                _excel_escrever_folha_df(writer, df_inu, "Inutilizadas", usados_nomes)
+            _excel_escrever_folha_df(writer, df_can, "Canceladas", usados_nomes)
+            _excel_escrever_folha_df(writer, df_aut, "Autorizadas", usados_nomes)
+            _excel_escrever_folha_df(writer, df_den, "Denegadas", usados_nomes)
+            _excel_escrever_folha_df(writer, df_rej, "Rejeitadas", usados_nomes)
+            _excel_escrever_folha_df(writer, df_cte, "CT-e e CT-e OS", usados_nomes)
+            _excel_escrever_folha_df(writer, df_terc_rows, "Terceiros lidas", usados_nomes)
 
-        ws.merge_range(0, 0, 0, 3, "Garimpeiro — Dashboard", title_f)
-        ws.set_row(0, 26)
-        row = 2
-        ws.write(row, 0, "Indicador", hdr_f)
-        ws.write(row, 1, "Valor", hdr_f)
-        row += 1
-        for lab, val in kpi["pares"]:
-            ws.write(row, 0, lab, cell_f)
-            ws.write(row, 1, val, cell_f)
-            row += 1
-        row += 1
-
-        df_r = st.session_state.get("df_resumo")
-        if df_r is not None and not df_r.empty:
-            last_c = max(5, len(df_r.columns) - 1)
-            ws.merge_range(
-                row,
-                0,
-                row,
-                last_c,
-                "Resumo por série (NF-e / NFC-e / NFS-e, emitente = CNPJ da barra lateral)",
-                sub_f,
+            wb = writer.book
+            dash_sn = _excel_nome_folha_seguro("Dashboard", usados_nomes)
+            ws = wb.add_worksheet(dash_sn)
+            title_f = wb.add_format(
+                {"bold": True, "font_size": 16, "font_color": "#AD1457", "valign": "vcenter"}
             )
+            hdr_f = wb.add_format(
+                {"bold": True, "bg_color": "#F8BBD0", "border": 1, "valign": "vcenter"}
+            )
+            cell_f = wb.add_format({"border": 1, "valign": "vcenter"})
+            sub_f = wb.add_format({"bold": True, "font_size": 11, "bg_color": "#FCE4EC", "border": 1})
+
+            ws.merge_range(0, 0, 0, 3, "Garimpeiro — Dashboard", title_f)
+            ws.set_row(0, 26)
+            row = 2
+            ws.write(row, 0, "Indicador", hdr_f)
+            ws.write(row, 1, "Valor", hdr_f)
             row += 1
-            for c, colname in enumerate(df_r.columns):
-                ws.write(row, c, str(colname), hdr_f)
+            for lab, val in kpi["pares"]:
+                ws.write(row, 0, lab, cell_f)
+                ws.write(row, 1, val, cell_f)
+                row += 1
             row += 1
-            for _, rr in df_r.iterrows():
+
+            df_r = st.session_state.get("df_resumo")
+            if df_r is not None and not df_r.empty:
+                last_c = max(5, len(df_r.columns) - 1)
+                ws.merge_range(
+                    row,
+                    0,
+                    row,
+                    last_c,
+                    "Resumo por série (NF-e / NFC-e / NFS-e, emitente = CNPJ da barra lateral)",
+                    sub_f,
+                )
+                row += 1
                 for c, colname in enumerate(df_r.columns):
-                    v = rr[colname]
-                    ws.write(row, c, v, cell_f)
+                    ws.write(row, c, str(colname), hdr_f)
                 row += 1
-            row += 1
-
-        tc = kpi.get("terc_cnt") or {}
-        if tc:
-            ws.merge_range(row, 0, row, 2, "Terceiros — quantidade por modelo", sub_f)
-            row += 1
-            ws.write(row, 0, "Modelo", hdr_f)
-            ws.write(row, 1, "Quantidade", hdr_f)
-            row += 1
-            for mod, q in sorted(tc.items(), key=lambda x: x[0]):
-                ws.write(row, 0, mod, cell_f)
-                ws.write(row, 1, int(q), cell_f)
+                for _, rr in df_r.iterrows():
+                    for c, colname in enumerate(df_r.columns):
+                        v = rr[colname]
+                        ws.write(row, c, v, cell_f)
+                    row += 1
                 row += 1
 
-        ws.set_column(0, 0, 42)
-        ws.set_column(1, 1, 22)
+            tc = kpi.get("terc_cnt") or {}
+            if tc:
+                ws.merge_range(row, 0, row, 2, "Terceiros — quantidade por modelo", sub_f)
+                row += 1
+                ws.write(row, 0, "Modelo", hdr_f)
+                ws.write(row, 1, "Quantidade", hdr_f)
+                row += 1
+                for mod, q in sorted(tc.items(), key=lambda x: x[0]):
+                    ws.write(row, 0, mod, cell_f)
+                    ws.write(row, 1, int(q), cell_f)
+                    row += 1
 
-        _excel_escrever_painel_fiscal(wb, kpi, usados_nomes)
+            ws.set_column(0, 0, 42)
+            ws.set_column(1, 1, 22)
 
-    return buf.getvalue()
+            if incluir_painel_fiscal:
+                _excel_escrever_painel_fiscal(wb, kpi, usados_nomes)
+
+        return buf.getvalue()
+    except Exception as exc:
+        if not _erro_sem_espaco_disco(exc):
+            raise
+    return _excel_relatorio_geral_openpyxl_fallback_bytes(
+        df_g,
+        df_bur,
+        df_inu,
+        df_can,
+        df_aut,
+        df_den,
+        df_rej,
+        df_cte,
+        df_terc_rows,
+        omit_bur_inu=_omit_bur_inu,
+        kpi=kpi,
+        incluir_painel_fiscal=incluir_painel_fiscal,
+    )
 
 
 def _pdf_ascii_seguro(txt):
@@ -2173,7 +3158,7 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
             "Terceiros · por status (como na emissão própria)",
             [(str(k), str(int(v))) for k, v in pares_st],
             use_dejavu,
-            subtitulo="Situação das linhas de terceiros no relatório geral: normal, cancelada, inutilizada, etc.",
+            subtitulo="Situação das linhas de terceiros no relatório geral: normal, cancelada, denegada, rejeitada, etc. (sem buracos nem inutilizadas.)",
         )
 
     _pdf_extras_lote_lista_rosa(pdf, kpi, use_dejavu)
@@ -2192,7 +3177,7 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
         pdf,
         3.8,
         "As secções abaixo repetem a mesma ordem e o mesmo significado que na página do Garimpeiro "
-        "(resumo por série, terceiros e cada aba do relatório da leitura). Cada bloco inclui uma "
+        "(resumo por série, terceiros e o relatório da leitura em **dois blocos recolhíveis** — emissão própria e, abaixo, terceiros). Cada bloco inclui uma "
         "nota curta sobre o que a tabela representa.",
         use_dejavu,
     )
@@ -2214,7 +3199,7 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
         ),
         "bur": (
             "Corresponde à aba «Buracos» (mesma base do resumo por série): faltas de numeração para NF-e, NFC-e e NFS-e "
-            "da sua empresa (emitente = CNPJ da barra lateral). Se guardou «último nº por série» na lateral, a lista respeita esse mês de referência e o último número."
+            "da sua empresa (emitente = CNPJ da barra lateral). Se guardou «último nº por série» na lateral, só essas séries entram na lista de buracos, a partir desse mês e desse último número."
         ),
         "inut": (
             "Corresponde à aba «Inutilizadas»: notas inutilizadas na Sefaz, incluindo as que declarou "
@@ -2226,9 +3211,15 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
         "aut": (
             "Corresponde à aba «Autorizadas»: notas com situação normal/autorizada na emissão própria, neste lote."
         ),
+        "deneg": (
+            "Corresponde à aba «Denegadas» (emissão própria): uso denegado de numeração / situação tratada como denegação nos XML."
+        ),
+        "rej": (
+            "Corresponde à aba «Rejeitadas» (emissão própria): rejeição Sefaz (códigos agregados como rejeitadas na app)."
+        ),
         "geral": (
-            "Corresponde à aba «Relatório geral», com as colunas principais. A chave de acesso aparece "
-            "abreviada neste PDF; use «Baixar Excel» na app para todas as linhas e colunas completas."
+            "Corresponde à aba «Relatório geral» do painel emissão própria, com as colunas principais. A chave de acesso aparece "
+            "abreviada neste PDF; use «Baixar Excel» na app para todas as linhas e colunas completas. O painel **Terceiros** na página tem abas para canceladas, autorizadas, denegadas, rejeitadas e relatório geral (XML recebidos)."
         ),
     }
 
@@ -2254,6 +3245,14 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
     _pdf_secao_resumo_folha(pdf, "Autorizadas", use_dejavu, _ex["aut"])
     _pdf_tabela_preview(pdf, pv.get("autorizadas") or {}, use_dejavu, estilo_moderno=True)
 
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Denegadas", use_dejavu, _ex["deneg"])
+    _pdf_tabela_preview(pdf, pv.get("denegadas") or {}, use_dejavu, estilo_moderno=True)
+
+    _folha_se_cheio()
+    _pdf_secao_resumo_folha(pdf, "Rejeitadas", use_dejavu, _ex["rej"])
+    _pdf_tabela_preview(pdf, pv.get("rejeitadas") or {}, use_dejavu, estilo_moderno=True)
+
     _folha_se_cheio(220)
     _pdf_secao_resumo_folha(pdf, "Relatório geral (colunas principais)", use_dejavu, _ex["geral"])
     _pdf_tabela_preview(pdf, pv.get("geral") or {}, use_dejavu, estilo_moderno=True)
@@ -2268,14 +3267,10 @@ def pdf_dashboard_garimpeiro_bytes(kpi, cnpj_fmt="", df_resumo=None):
         use_dejavu,
     )
 
-    raw = pdf.output(dest="S")
-    if raw is None:
-        return None
-    if isinstance(raw, bytes):
-        return raw
-    if isinstance(raw, bytearray):
-        return bytes(raw)
-    return str(raw).encode("latin-1", "replace")
+    _pdf_out = io.BytesIO()
+    pdf.output(_pdf_out)
+    raw = _pdf_out.getvalue()
+    return raw if raw else None
 
 
 def aplicar_compactacao_dfs_sessao():
@@ -2287,6 +3282,8 @@ def aplicar_compactacao_dfs_sessao():
         "df_canceladas",
         "df_inutilizadas",
         "df_autorizadas",
+        "df_denegadas",
+        "df_rejeitadas",
         "df_divergencias",
     ):
         v = st.session_state.get(k)
@@ -2326,7 +3323,9 @@ def _ym_lt(ano_a, mes_a, ano_b, mes_b):
 def buraco_ctx_sessao():
     """
     Só activa regras especiais de buracos quando existe **pelo menos um** último nº guardado
-    (Guardar referência com linhas válidas). Sem isso, buracos usam toda a numeração lida — como antes.
+    (Guardar referência com linhas válidas). Nesse caso **só** as séries que estão na grelha da lateral
+    entram na detecção de buracos (a partir do último nº e do mês indicados). Sem referência guardada,
+    buracos usam toda a numeração lida em emissão própria — como antes.
     """
     try:
         rmap = st.session_state.get("seq_ref_ultimos")
@@ -2344,26 +3343,43 @@ def buraco_ctx_sessao():
 
 def incluir_numero_no_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u):
     """
-    Com referência activa: séries **com** último informado usam mês/âncora; séries **sem** linha na
-    referência comportam-se como leitura total só nos buracos (não cortam meses anteriores).
+    Sem referência guardada na lateral (ref_ar/ref_mr ausentes): toda a numeração lida pode gerar buraco.
+    Com referência activa: **só** séries com linha na grelha (último nº definido); as restantes ignoram-se
+    na análise de buracos. Numa série referenciada: mês anterior ao de referência ignorado; no mês de
+    referência só entram notas com nº **maior** que o último informado; meses seguintes seguem a sequência.
     """
     if ref_ar is None or ref_mr is None:
         return True
     if ultimo_u is None:
-        return True
+        return False
     return numero_entra_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u)
 
 
 def ultimo_ref_lookup(ref_map, tipo, serie):
+    """
+    Último nº guardado na lateral para modelo|série.
+    Aceita o mesmo par com série «4» ou «004» (chave na grelha vs chave na NF-e) para não excluir notas de nums_buraco por engano.
+    """
     if not ref_map:
         return None
-    return ref_map.get(f"{tipo}|{str(serie).strip()}")
+    t = str(tipo).strip()
+    s_raw = str(serie).strip()
+    candidates = [f"{t}|{s_raw}"]
+    if s_raw.isdigit():
+        n = int(s_raw)
+        candidates.append(f"{t}|{n}")
+        candidates.append(f"{t}|{str(n).zfill(3)}")
+    for k in dict.fromkeys(candidates):
+        if k in ref_map:
+            return ref_map[k]
+    return None
 
 
 def numero_entra_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u):
     """
-    Se há mês de referência: ignora competências anteriores; no próprio mês só conta n > último informado.
-    Sem referência na sessão: conta tudo (comportamento antigo).
+    Com mês de referência na sessão: ignora competências anteriores; no próprio mês só conta n > último informado;
+    meses posteriores contam. Sem ref_ar/ref_mr na chamada: o chamador trata (incluir_numero… devolve True antes).
+    Se ref está activo mas falta último nº da série, não contar.
     """
     if ref_ar is None or ref_mr is None:
         return True
@@ -2372,7 +3388,7 @@ def numero_entra_conjunto_buraco(ano, mes, n, ref_ar, ref_mr, ultimo_u):
     if _ym_lt(ano, mes, ref_ar, ref_mr):
         return False
     if ultimo_u is None:
-        return True
+        return False
     if _ym_eq(ano, mes, ref_ar, ref_mr):
         try:
             return int(n) > int(ultimo_u)
@@ -2576,11 +3592,30 @@ def _cancel_sem_xml_manual(res):
     return res.get("Arquivo") == "REGISTRO_MANUAL_CANCELADO" and res.get("Status") == "CANCELADOS"
 
 
-def _registro_manual_buraco_existe(relatorio, tipo, serie_str, nota_int):
-    """Já existe inutil. ou cancel. manual para o mesmo modelo/série/número."""
+def _registro_manual_inutil_duplicada(relatorio, tipo, serie_str, nota_int):
+    """Já existe **inutilização** manual (sem XML) para o mesmo modelo/série/nota — não misturar com canceladas."""
     ser = str(serie_str).strip()
     for r in relatorio or []:
-        if not (_inutil_sem_xml_manual(r) or _cancel_sem_xml_manual(r)):
+        if not _inutil_sem_xml_manual(r):
+            continue
+        if str(r.get("Tipo") or "").strip() != str(tipo).strip():
+            continue
+        if str(r.get("Série") or "").strip() != ser:
+            continue
+        try:
+            if int(r.get("Número") or 0) != int(nota_int):
+                continue
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
+
+
+def _registro_manual_cancel_duplicada(relatorio, tipo, serie_str, nota_int):
+    """Já existe **cancelamento** manual (sem XML) para o mesmo modelo/série/nota — independente das inutilizadas."""
+    ser = str(serie_str).strip()
+    for r in relatorio or []:
+        if not _cancel_sem_xml_manual(r):
             continue
         if str(r.get("Tipo") or "").strip() != str(tipo).strip():
             continue
@@ -2626,7 +3661,7 @@ def triplas_inutil_de_dataframe(df):
     if not cm or not cs or not cn:
         return (
             None,
-            "Faltam colunas reconhecíveis. Use **Modelo** (código Sefaz **55**, **65**, **57**, **58** ou NF-e…), "
+            "Faltam colunas reconhecíveis. Use **Modelo** (código Sefaz **55**, **65**, **57**, **67**, **58** ou NF-e…), "
             "**Série** e **Nota** (ou Número / Num_Faltante).",
         )
     out = []
@@ -2694,6 +3729,122 @@ def dataframe_de_upload_inutil(uploaded_file, max_linhas=50000):
     return df, None
 
 
+def _computar_df_divergencias_autenticidade(df_geral: pd.DataFrame, triplas_sefaz: list):
+    """
+    Compara (Modelo, Série, Nota) do relatório Sefaz com NF **autorizadas** (Status NORMAIS)
+    de **emissão própria** no relatório geral do XML.
+    """
+    if df_geral is None or df_geral.empty or not triplas_sefaz:
+        return pd.DataFrame()
+    need = {"Modelo", "Série", "Nota", "Status Final", "Origem", "Chave"}
+    if not need.issubset(set(df_geral.columns)):
+        return pd.DataFrame()
+    mp = _mask_emissao_propria_df(df_geral)
+    st_col = df_geral["Status Final"].astype(str).str.upper()
+    m_aut = mp & st_col.eq("NORMAIS")
+    dfp = df_geral.loc[m_aut]
+    xml_set = set()
+    chave_por_tripla = {}
+    for _, row in dfp.iterrows():
+        mod = _normaliza_modelo_filtro(row.get("Modelo"))
+        ser = _normaliza_serie_filtro(row.get("Série"))
+        ni = _nota_int_linha(row)
+        if not mod or ser == "" or ni is None:
+            continue
+        t = (mod, ser, ni)
+        xml_set.add(t)
+        ck = str(row.get("Chave") or "").strip()
+        if ck and t not in chave_por_tripla:
+            chave_por_tripla[t] = ck
+    sefaz_set = set()
+    for mod, ser, n in triplas_sefaz:
+        try:
+            mn = _normaliza_modelo_filtro(mod)
+            sn = _normaliza_serie_filtro(ser)
+            if not mn or sn == "":
+                continue
+            sefaz_set.add((mn, sn, int(n)))
+        except (TypeError, ValueError):
+            continue
+    only_sefaz = sefaz_set - xml_set
+    only_xml = xml_set - sefaz_set
+    out_rows = []
+    for t in sorted(only_sefaz, key=lambda x: (x[0], x[1], x[2])):
+        out_rows.append(
+            {
+                "Tipo divergência": "Na Sefaz / relatório, ausente no XML do lote",
+                "Modelo": t[0],
+                "Série": t[1],
+                "Nota": t[2],
+                "Chave (XML)": "",
+            }
+        )
+    for t in sorted(only_xml, key=lambda x: (x[0], x[1], x[2])):
+        out_rows.append(
+            {
+                "Tipo divergência": "No XML do lote, ausente na Sefaz / relatório",
+                "Modelo": t[0],
+                "Série": t[1],
+                "Nota": t[2],
+                "Chave (XML)": chave_por_tripla.get(t, ""),
+            }
+        )
+    return pd.DataFrame(out_rows)
+
+
+def _tem_upload_autenticidade(up) -> bool:
+    """True se há pelo menos um ficheiro no uploader (lista vazia ou None → False)."""
+    if up is None:
+        return False
+    if isinstance(up, (list, tuple)):
+        return len(up) > 0
+    return True
+
+
+def _aplicar_comparacao_autenticidade(upload_files) -> tuple:
+    """Lê uma ou várias planilhas Sefaz, agrega linhas e cruza com df_geral. Devolve (ok, mensagem)."""
+    st.session_state.pop("df_divergencias", None)
+    st.session_state["validation_done"] = False
+    if upload_files is None:
+        return True, ""
+    files = list(upload_files) if isinstance(upload_files, (list, tuple)) else [upload_files]
+    files = [f for f in files if f is not None]
+    if not files:
+        return True, ""
+    dfs_valid = []
+    for f in files:
+        nome = getattr(f, "name", "") or "sem_nome"
+        df, err = dataframe_de_upload_inutil(f)
+        if err:
+            return False, f"**Autenticidade** (`{nome}`): {err}"
+        if df is not None and not df.empty:
+            dfs_valid.append(df)
+    if not dfs_valid:
+        return False, "**Autenticidade:** nenhum ficheiro tinha linhas de dados (planilhas vazias?)."
+    merged = pd.concat(dfs_valid, ignore_index=True) if len(dfs_valid) > 1 else dfs_valid[0]
+    triplas, err2 = triplas_inutil_de_dataframe(merged)
+    if err2:
+        return False, f"**Autenticidade** ({len(files)} ficheiro(s) combinados): {err2}"
+    df_g = st.session_state.get("df_geral")
+    if df_g is None or (isinstance(df_g, pd.DataFrame) and df_g.empty):
+        return False, "**Autenticidade:** relatório geral vazio — faça o garimpo primeiro."
+    df_div = _computar_df_divergencias_autenticidade(df_g, triplas)
+    if df_div is not None and not df_div.empty:
+        st.session_state["df_divergencias"] = df_div
+    else:
+        st.session_state.pop("df_divergencias", None)
+    st.session_state["validation_done"] = True
+    n_lin = len(triplas)
+    n_div = len(df_div) if df_div is not None else 0
+    n_f = len(files)
+    suf = f"{n_f} ficheiro(s), " if n_f > 1 else ""
+    return (
+        True,
+        f"**Autenticidade:** {suf}**{n_lin}** linha(s) na planilha Sefaz (agregadas); **{n_div}** divergência(s) "
+        f"(autorizadas próprias NORMAIS no XML vs relatório).",
+    )
+
+
 def conjunto_triplas_buracos(df_faltantes):
     """{(Tipo, série_str, Num_Faltante)} a partir da tabela de buracos do garimpeiro."""
     if df_faltantes is None or df_faltantes.empty:
@@ -2726,33 +3877,46 @@ def _dataframe_modelo_planilha_inutil_sem_xml():
             {"Modelo": 55, "Série": 1, "Nota": 1521},
             {"Modelo": 65, "Série": 2, "Nota": 100},
             {"Modelo": 57, "Série": 1, "Nota": 500},
+            {"Modelo": 67, "Série": 1, "Nota": 10},
         ]
     )
 
 
-def bytes_modelo_planilha_inutil_sem_xml_xlsx():
+def _bytes_modelo_planilha_exemplo_xlsx(sheet_name: str):
+    """
+    Gera bytes do .xlsx modelo (exemplo Modelo/Série/Nota).
+    Se xlsxwriter falhar por disco/temp cheio, tenta openpyxl; em falha total devolve None.
+    """
     df = _dataframe_modelo_planilha_inutil_sem_xml()
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name="Inutil_sem_XML", index=False)
-        ws = writer.sheets["Inutil_sem_XML"]
-        ws.set_column(0, 0, 14)
-        ws.set_column(1, 1, 10)
-        ws.set_column(2, 2, 12)
-    return buf.getvalue()
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            ws = writer.sheets[sheet_name]
+            ws.set_column(0, 0, 14)
+            ws.set_column(1, 1, 10)
+            ws.set_column(2, 2, 12)
+        return buf.getvalue()
+    except Exception as exc:
+        if not _erro_sem_espaco_disco(exc):
+            raise
+    try:
+        buf2 = io.BytesIO()
+        with pd.ExcelWriter(buf2, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        return buf2.getvalue()
+    except Exception:
+        return None
+
+
+def bytes_modelo_planilha_inutil_sem_xml_xlsx():
+    """Bytes do modelo ou None se não houver espaço para gerar o .xlsx."""
+    return _bytes_modelo_planilha_exemplo_xlsx("Inutil_sem_XML")
 
 
 def bytes_modelo_planilha_cancel_sem_xml_xlsx():
     """Mesmo layout que inutilizadas (Modelo, Série, Nota) — só canceladas declaradas manualmente."""
-    df = _dataframe_modelo_planilha_inutil_sem_xml()
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name="Cancel_sem_XML", index=False)
-        ws = writer.sheets["Cancel_sem_XML"]
-        ws.set_column(0, 0, 14)
-        ws.set_column(1, 1, 10)
-        ws.set_column(2, 2, 12)
-    return buf.getvalue()
+    return _bytes_modelo_planilha_exemplo_xlsx("Cancel_sem_XML")
 
 
 def _item_inutil_manual_sem_xml(res):
@@ -2771,7 +3935,12 @@ def _lote_recalc_de_relatorio(relatorio_list):
         key = item["Chave"]
         is_p = "EMITIDOS_CLIENTE" in item["Pasta"]
         if key in lote:
-            if item["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
+            if item["Status"] in [
+                "CANCELADOS",
+                "INUTILIZADOS",
+                "DENEGADOS",
+                "REJEITADOS",
+            ]:
                 lote[key] = (item, is_p)
         else:
             lote[key] = (item, is_p)
@@ -2856,6 +4025,8 @@ def reconstruir_dataframes_relatorio_simples():
     canc_list = []
     inut_list = []
     aut_list = []
+    deneg_list = []
+    rej_list = []
     geral_list = []
 
     for k, (res, is_p) in lote_full.items():
@@ -2911,11 +4082,16 @@ def reconstruir_dataframes_relatorio_simples():
                             audit_map[sk]["nums_buraco"].add(n)
         else:
             geral_list.append(registro_detalhado)
-            if is_p and res["Número"] > 0:
-                if res["Status"] == "CANCELADOS":
-                    canc_list.append(registro_detalhado)
-                elif res["Status"] == "NORMAIS":
-                    aut_list.append(registro_detalhado)
+            if is_p:
+                if res["Status"] == "DENEGADOS":
+                    deneg_list.append(registro_detalhado)
+                elif res["Status"] == "REJEITADOS":
+                    rej_list.append(registro_detalhado)
+                elif res["Número"] > 0:
+                    if res["Status"] == "CANCELADOS":
+                        canc_list.append(registro_detalhado)
+                    elif res["Status"] == "NORMAIS":
+                        aut_list.append(registro_detalhado)
             if _incluir_em_resumo_por_serie(res, is_p, _cnpj_cli) and res["Número"] > 0:
                 sk = (res["Tipo"], res["Série"])
                 if sk not in audit_map:
@@ -2965,52 +4141,65 @@ def reconstruir_dataframes_relatorio_simples():
             "df_canceladas": pd.DataFrame(canc_list),
             "df_inutilizadas": pd.DataFrame(inut_list),
             "df_autorizadas": pd.DataFrame(aut_list),
+            "df_denegadas": pd.DataFrame(deneg_list),
+            "df_rejeitadas": pd.DataFrame(rej_list),
             "df_geral": pd.DataFrame(geral_list),
             "st_counts": {
                 "CANCELADOS": len(canc_list),
                 "INUTILIZADOS": len(inut_list),
                 "AUTORIZADAS": len(aut_list),
+                "DENEGADOS": len(deneg_list),
+                "REJEITADOS": len(rej_list),
             },
         }
     )
+    try:
+        st.session_state.pop("_v2_cascade_cache_v1", None)
+    except Exception:
+        pass
     aplicar_compactacao_dfs_sessao()
 
 
 def reprocessar_garimpeiro_a_partir_do_disco(cnpj_limpo: str):
     """
-    Relê todos os XML/ZIP em TEMP_UPLOADS_DIR (mesmas regras de fusão por chave do 1.º garimpo),
+    Relê todos os XML/ZIP do lote (memória da sessão ou TEMP_UPLOADS_DIR), mesmas regras de fusão por chave,
     mantém registos manuais de inutilização e de cancelamento «sem XML» e recalcula os dataframes.
     """
     cnpj = "".join(c for c in str(cnpj_limpo or "") if c.isdigit())[:14]
     if len(cnpj) != 14:
         return False, "CNPJ inválido — confira a barra lateral."
 
-    if not os.path.isdir(TEMP_UPLOADS_DIR):
+    if not _garimpo_existem_fontes_xml_lote():
+        if _garimpo_analise_sem_pasta_local_projeto():
+            return (
+                False,
+                "Não há ficheiros do lote em memória. Faça **Iniciar grande garimpo** ou **Incluir mais XML**.",
+            )
         return False, "Pasta de uploads não existe."
 
-    nomes = [
-        f
-        for f in os.listdir(TEMP_UPLOADS_DIR)
-        if os.path.isfile(os.path.join(TEMP_UPLOADS_DIR, f))
-    ]
+    nomes = _lista_nomes_fontes_xml_garimpo()
     if not nomes:
         return (
             False,
-            "Nenhum ficheiro na pasta de uploads. Use «Incluir mais XML / ZIP» ou inicie um novo garimpo.",
+            "Nenhum ficheiro no lote. Use «Incluir mais XML / ZIP» ou inicie um novo garimpo.",
         )
 
     lote_dict = {}
     for f_name in nomes:
-        caminho_leitura = os.path.join(TEMP_UPLOADS_DIR, f_name)
         try:
-            with open(caminho_leitura, "rb") as file_obj:
+            with _abrir_fonte_xml_garimpo_stream(f_name) as file_obj:
                 todos_xmls = extrair_recursivo(file_obj, f_name)
                 for name, xml_data in todos_xmls:
                     res, is_p = identify_xml_info(xml_data, cnpj, name)
                     if res:
                         key = res["Chave"]
                         if key in lote_dict:
-                            if res["Status"] in ["CANCELADOS", "INUTILIZADOS"]:
+                            if res["Status"] in [
+                                "CANCELADOS",
+                                "INUTILIZADOS",
+                                "DENEGADOS",
+                                "REJEITADOS",
+                            ]:
                                 lote_dict[key] = (res, is_p)
                         else:
                             lote_dict[key] = (res, is_p)
@@ -3035,7 +4224,21 @@ def reprocessar_garimpeiro_a_partir_do_disco(cnpj_limpo: str):
         st.session_state["validation_done"] = False
     st.session_state.pop("df_divergencias", None)
     st.session_state.pop("_xlsx_mem_geral_workbook", None)
-    for _pfx in ("rep_bur", "rep_inu", "rep_canc", "rep_aut", "rep_ger"):
+    st.session_state.pop("_xlsx_mem_geral_workbook_terc", None)
+    for _pfx in (
+        "rep_bur",
+        "rep_inu",
+        "rep_canc",
+        "rep_aut",
+        "rep_den",
+        "rep_rej",
+        "rep_ger",
+        "rep_canc_t",
+        "rep_aut_t",
+        "rep_den_t",
+        "rep_rej_t",
+        "rep_ger_t",
+    ):
         st.session_state.pop(f"{_pfx}_zip_parts_ready", None)
         st.session_state.pop(f"{_pfx}_zip_src_sig", None)
 
@@ -3048,16 +4251,6 @@ def reprocessar_garimpeiro_a_partir_do_disco(cnpj_limpo: str):
         f"Concluído: {len(nomes)} ficheiro(s) lidos, {len(rel_disk)} documento(s) únicos; "
         f"{len(manuais)} registo(s) manual(is) mantido(s) ({_n_inm} inutil., {_n_cam} cancel.).",
     )
-
-
-def _lista_ficheiros_pasta_uploads():
-    if not os.path.isdir(TEMP_UPLOADS_DIR):
-        return []
-    return [
-        f
-        for f in os.listdir(TEMP_UPLOADS_DIR)
-        if os.path.isfile(os.path.join(TEMP_UPLOADS_DIR, f))
-    ]
 
 
 def _relatorio_ja_tem_chave(chave: str) -> bool:
@@ -3083,23 +4276,25 @@ def processar_painel_lateral_direito(
     sf_canc_f=None,
     n0_canc_f=None,
     n1_canc_f=None,
+    up_autent_sefaz=None,
 ):
     """
     Um único passo: grava XML/ZIP extra em disco, aplica inutilizações e canceladas manuais
-    (buracos / planilha / faixa, mesmas regras) e recalcula a partir do disco (ou só reconstrói).
+    (buracos / planilha / faixa, mesmas regras), recalcula a partir do disco (ou só reconstrói)
+    e, se anexar planilha(s), compara autenticidade Sefaz × XML (vários Excel/CSV são agregados).
     """
     cnpj = "".join(c for c in str(cnpj_limpo or "") if c.isdigit())[:14]
     linhas = []
     n_extra = 0
     if extra_files:
-        os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
-        for f in extra_files:
-            caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
-            with open(caminho_salvo, "wb") as out_f:
-                out_f.write(f.getvalue())
-            n_extra += 1
+        n_extra = _garimpo_absorver_uploads_extra_no_lote(extra_files)
         if n_extra:
-            linhas.append(f"**{n_extra}** ficheiro(s) extra gravados na pasta de uploads.")
+            _lbl = (
+                "**em memória** (e/ou pasta temp, conforme configuração)"
+                if _garimpo_analise_sem_pasta_local_projeto()
+                else "**na pasta de uploads**"
+            )
+            linhas.append(f"**{n_extra}** ficheiro(s) extra incorporado(s) ao lote {_lbl}.")
 
     n_b = 0
     if pick_bur_inut:
@@ -3111,7 +4306,7 @@ def processar_painel_lateral_direito(
             )
         for _nb in pick_bur_inut:
             _it = item_registro_manual_inutilizado(cnpj_limpo, mb_bur, sb_bur, _nb)
-            if not _relatorio_ja_tem_chave(_it["Chave"]) and not _registro_manual_buraco_existe(
+            if not _relatorio_ja_tem_chave(_it["Chave"]) and not _registro_manual_inutil_duplicada(
                 st.session_state["relatorio"], mb_bur, sb_bur, _nb
             ):
                 st.session_state["relatorio"].append(_it)
@@ -3153,7 +4348,7 @@ def processar_painel_lateral_direito(
                         n_p = 0
                         for _mod, _ser, _nota in _aplic_rows:
                             _itp = item_registro_manual_inutilizado(cnpj_limpo, _mod, _ser, _nota)
-                            if not _relatorio_ja_tem_chave(_itp["Chave"]) and not _registro_manual_buraco_existe(
+                            if not _relatorio_ja_tem_chave(_itp["Chave"]) and not _registro_manual_inutil_duplicada(
                                 st.session_state["relatorio"], _mod, _ser, _nota
                             ):
                                 st.session_state["relatorio"].append(_itp)
@@ -3197,7 +4392,7 @@ def processar_painel_lateral_direito(
                 _itf = item_registro_manual_inutilizado(
                     cnpj_limpo, mf_faixa, str(sf_faixa).strip(), _nn
                 )
-                if not _relatorio_ja_tem_chave(_itf["Chave"]) and not _registro_manual_buraco_existe(
+                if not _relatorio_ja_tem_chave(_itf["Chave"]) and not _registro_manual_inutil_duplicada(
                     st.session_state["relatorio"], mf_faixa, str(sf_faixa).strip(), _nn
                 ):
                     st.session_state["relatorio"].append(_itf)
@@ -3216,7 +4411,7 @@ def processar_painel_lateral_direito(
             )
         for _nb in pick_bc:
             _itc = item_registro_manual_cancelado(cnpj_limpo, mb_canc, sb_canc, _nb)
-            if not _relatorio_ja_tem_chave(_itc["Chave"]) and not _registro_manual_buraco_existe(
+            if not _relatorio_ja_tem_chave(_itc["Chave"]) and not _registro_manual_cancel_duplicada(
                 st.session_state["relatorio"], mb_canc, sb_canc, _nb
             ):
                 st.session_state["relatorio"].append(_itc)
@@ -3257,7 +4452,7 @@ def processar_painel_lateral_direito(
                     else:
                         for _mod, _ser, _nota in _aplic_c:
                             _itpc = item_registro_manual_cancelado(cnpj_limpo, _mod, _ser, _nota)
-                            if not _relatorio_ja_tem_chave(_itpc["Chave"]) and not _registro_manual_buraco_existe(
+                            if not _relatorio_ja_tem_chave(_itpc["Chave"]) and not _registro_manual_cancel_duplicada(
                                 st.session_state["relatorio"], _mod, _ser, _nota
                             ):
                                 st.session_state["relatorio"].append(_itpc)
@@ -3302,7 +4497,7 @@ def processar_painel_lateral_direito(
         if _aplic_fc:
             for _nn in _aplic_fc:
                 _itfc = item_registro_manual_cancelado(cnpj_limpo, _mfc, str(_sfc).strip(), _nn)
-                if not _relatorio_ja_tem_chave(_itfc["Chave"]) and not _registro_manual_buraco_existe(
+                if not _relatorio_ja_tem_chave(_itfc["Chave"]) and not _registro_manual_cancel_duplicada(
                     st.session_state["relatorio"], _mfc, str(_sfc).strip(), _nn
                 ):
                     st.session_state["relatorio"].append(_itfc)
@@ -3310,7 +4505,7 @@ def processar_painel_lateral_direito(
             if n_f_c:
                 linhas.append(f"**{n_f_c}** nota(s) da faixa de **canceladas** (buracos).")
 
-    tem_ficheiros = bool(_lista_ficheiros_pasta_uploads())
+    tem_ficheiros = _garimpo_existem_fontes_xml_lote()
     fez_algo = (
         n_extra > 0
         or n_b > 0
@@ -3320,12 +4515,13 @@ def processar_painel_lateral_direito(
         or n_p_c > 0
         or n_f_c > 0
     )
+    quer_compare_autent = _tem_upload_autenticidade(up_autent_sefaz)
 
     if err_p:
         return False, err_p, linhas
     if err_p_c:
         return False, err_p_c, linhas
-    if (err_f or err_f_c) and not fez_algo and not tem_ficheiros:
+    if (err_f or err_f_c) and not fez_algo and not tem_ficheiros and not quer_compare_autent:
         _msg_ff = err_f or err_f_c
         return False, _msg_ff, linhas
     if err_f:
@@ -3333,12 +4529,17 @@ def processar_painel_lateral_direito(
     if err_f_c:
         linhas.append(f"Aviso (faixa cancel.): {err_f_c}")
 
-    if not fez_algo and not tem_ficheiros:
+    if not fez_algo and not tem_ficheiros and not quer_compare_autent:
         return (
             False,
-            "Nada a processar: inclua XML/ZIP, inutilizações / canceladas manuais ou faça primeiro o garimpo para haver ficheiros em disco.",
+            "Nada a processar: inclua XML/ZIP, inutilizações / canceladas manuais, "
+            "o **relatório de autenticidade** (Sefaz) ou faça o garimpo para haver ficheiros em disco.",
             linhas,
         )
+
+    if not quer_compare_autent and (fez_algo or tem_ficheiros):
+        st.session_state.pop("df_divergencias", None)
+        st.session_state["validation_done"] = False
 
     st.session_state["export_ready"] = False
     st.session_state["excel_buffer"] = None
@@ -3350,12 +4551,22 @@ def processar_painel_lateral_direito(
         if not ok:
             return False, msg_rep, linhas
         linhas.append(msg_rep)
+        if quer_compare_autent:
+            ok_a, msg_a = _aplicar_comparacao_autenticidade(up_autent_sefaz)
+            if not ok_a:
+                return False, msg_a, linhas
+            linhas.append(msg_a)
         return True, "\n\n".join(linhas), linhas
 
     reconstruir_dataframes_relatorio_simples()
     linhas.append(
         "Relatório recalculado (sem ficheiros na pasta de uploads — só registos manuais de inutil. / cancel.)."
     )
+    if quer_compare_autent:
+        ok_a, msg_a = _aplicar_comparacao_autenticidade(up_autent_sefaz)
+        if not ok_a:
+            return False, msg_a, linhas
+        linhas.append(msg_a)
     return True, "\n\n".join(linhas), linhas
 
 
@@ -3363,6 +4574,7 @@ _V2_STATUS_UI_PARA_DF = {
     "Autorizadas": ["NORMAIS"],
     "Canceladas": ["CANCELADOS"],
     "Inutilizadas": ["INUTILIZADOS", "INUTILIZADA"],
+    "Denegadas": ["DENEGADOS"],
     "Rejeitadas": ["REJEITADOS"],
 }
 _V2_OP_UI_PARA_INTERNO = {"Entrada": "ENTRADA", "Saída": "SAIDA"}
@@ -3576,15 +4788,46 @@ def _df_apenas_terceiros(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[mt].reset_index(drop=True)
 
 
-def _v2_limpar_zips_gerados_etapa3_no_cwd():
-    """Apaga ZIPs gerados pela Etapa 3 no diretório atual (nomes z_org_*_ptN / z_todos_*_ptN)."""
-    rx = re.compile(r"^z_(org|todos)_.+_pt\d+\.zip$", re.I)
-    for fn in os.listdir("."):
-        if rx.match(fn):
-            try:
-                os.remove(fn)
-            except OSError:
-                pass
+def _folhas_detalhe_terceiros_do_subset(df: pd.DataFrame) -> dict:
+    """
+    Folhas do livro Excel alinhadas ao painel «terceiros»: canceladas, autorizadas,
+    denegadas e rejeitadas a partir de linhas TERCEIROS. Buracos e inutilizadas
+    não se aplicam a XML recebido de terceiros — df_bur e df_inu ficam sempre vazios.
+    """
+    empty = pd.DataFrame()
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return {
+            "df_bur": empty,
+            "df_inu": empty,
+            "df_can": empty,
+            "df_aut": empty,
+            "df_den": empty,
+            "df_rej": empty,
+        }
+    df_t = df.loc[_mask_terceiros_df(df)].copy()
+    if df_t.empty or "Status Final" not in df_t.columns:
+        return {
+            "df_bur": empty,
+            "df_inu": empty,
+            "df_can": empty,
+            "df_aut": empty,
+            "df_den": empty,
+            "df_rej": empty,
+        }
+    stu = df_t["Status Final"].astype(str).str.upper()
+    return {
+        "df_bur": empty,
+        "df_inu": empty,
+        "df_can": df_t.loc[stu.eq("CANCELADOS")].reset_index(drop=True),
+        "df_aut": df_t.loc[stu.eq("NORMAIS")].reset_index(drop=True),
+        "df_den": df_t.loc[stu.eq("DENEGADOS")].reset_index(drop=True),
+        "df_rej": df_t.loc[stu.eq("REJEITADOS")].reset_index(drop=True),
+    }
+
+
+def _v2_limpar_zips_gerados_etapa3(output_dir=None):
+    """Política: não apagar ZIP já gravados no disco — só gravar novos por cima se o nome repetir."""
+    return
 
 
 def _v2_excel_bytes_filtrado_etapa3(df: pd.DataFrame):
@@ -3627,6 +4870,60 @@ def excel_bytes_relatorio_bloco(df_filtrado: pd.DataFrame, chaves_bloco: set):
     return buf.getvalue()
 
 
+def _excel_bytes_pacote_contabilidade(
+    df_todas_lidas: pd.DataFrame, df_xml_pacote: pd.DataFrame
+):
+    """
+    Excel para envio à contabilidade: folha «Todas_lidas» + resumo; se df_xml_pacote for outro
+    DataFrame (não o mesmo objeto que df_todas_lidas), acrescenta XML_neste_pacote e resumo.
+    Folhas com datas em dd/mm/aaaa.
+    Devolve bytes ou None se falhar por disco/temp cheio (errno 28).
+    """
+    has_t = df_todas_lidas is not None and not df_todas_lidas.empty
+    has_x = df_xml_pacote is not None and not df_xml_pacote.empty
+    mesmo_lote = has_t and has_x and (df_xml_pacote is df_todas_lidas)
+    if not has_t and not has_x:
+        try:
+            buf0 = io.BytesIO()
+            with pd.ExcelWriter(buf0, engine="xlsxwriter") as w0:
+                pd.DataFrame({"Info": ["Sem linhas para exportar no Excel do pacote."]}).to_excel(
+                    w0, sheet_name="Aviso", index=False
+                )
+            return buf0.getvalue()
+        except Exception as e:
+            if _erro_sem_espaco_disco(e):
+                return None
+            raise
+    try:
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+            if has_t:
+                d1 = _df_com_data_emissao_dd_mm_yyyy(df_todas_lidas.reset_index(drop=True))
+                d1.to_excel(writer, sheet_name="Todas_lidas", index=False)
+                if "Status Final" in d1.columns:
+                    rs = (
+                        d1.groupby("Status Final", dropna=False)
+                        .size()
+                        .reset_index(name="Quantidade")
+                    )
+                    rs.to_excel(writer, sheet_name="Resumo_todas", index=False)
+            if has_x and not mesmo_lote:
+                d2 = _df_com_data_emissao_dd_mm_yyyy(df_xml_pacote.reset_index(drop=True))
+                d2.to_excel(writer, sheet_name="XML_neste_pacote", index=False)
+                if "Status Final" in d2.columns:
+                    r2 = (
+                        d2.groupby("Status Final", dropna=False)
+                        .size()
+                        .reset_index(name="Quantidade")
+                    )
+                    r2.to_excel(writer, sheet_name="Resumo_XML_pacote", index=False)
+        return buf.getvalue()
+    except Exception as e:
+        if _erro_sem_espaco_disco(e):
+            return None
+        raise
+
+
 def _excel_bytes_geral_e_resumo_status(df: pd.DataFrame) -> bytes:
     """Um .xlsx com folhas Geral e Resumo_status (datas em dd/mm/aaaa)."""
     buf = io.BytesIO()
@@ -3653,20 +4950,44 @@ def _v2_export_zip_etapa3(
     v2_zip_plano: bool,
     cnpj_limpo: str,
     zip_tag=None,
+    zip_output_dir=None,
+    zip_nome_ficheiro="",
+    pacote_pastas_garimpo: bool = False,
+    pacote_pastas_contabilidade: bool = False,
+    df_excel_todas_notas=None,
 ):
     """
-    Escreve ZIP(s) em disco (org / plano). Devolve (org_parts, todos_parts, xml_matched, aviso_sem_xml|None).
+    Escreve ZIP(s) em disco (org / plano).
+    Devolve (org_parts, todos_parts, xml_matched, aviso_sem_xml|None, excel_pacote_matriz_solta|None).
     xml_respeita_filtro=False → todos os XML cujo resumo está em df_g_base.
     excel_um_só_completo=True → em cada parte, o mesmo Excel com df_excel_completo (relatório inteiro).
     zip_tag: ex. «propria» / «terceiros» para nomes z_org_propria_pt1.zip (dois lotes independentes).
+    zip_output_dir: pasta onde gravar os .zip (None = diretório de trabalho atual).
+    zip_nome_ficheiro: opcional — base do nome (ex.: GarimpoMarco → GarimpoMarco_org_propria_pt1.zip).
+    pacote_pastas_garimpo=True → um ZIP só «com pastas»; stem = zip_nome_ficheiro ou pacote_apuracao_ptN.zip.
+    pacote_pastas_contabilidade=True → ZIP Emitidas_*_Serie_*_*Mes_AAAA_MM* ou Terceiros_*; XML em XML/Lote_001…;
+    Excel na raiz do ZIP;
+    Excel em cada ZIP: mesmo conteúdo (todo o lido), nome `relatorio_garimpeiro_<grupo>.xlsx` (sem Painel Fiscal).
+    df_excel_todas_notas: DataFrame do relatório geral (df_geral) para a folha «Todas_lidas».
     """
-    stem_org = "z_org_final" if not zip_tag else f"z_org_{zip_tag}"
-    stem_todos = "z_todos_final" if not zip_tag else f"z_todos_{zip_tag}"
+    out_dir = (
+        Path(zip_output_dir).resolve()
+        if zip_output_dir is not None
+        else Path(".").resolve()
+    )
+    if pacote_pastas_garimpo:
+        u = _v2_sanitize_nome_export(zip_nome_ficheiro or "", max_len=80)
+        stem_org = u if u else "pacote_apuracao"
+        stem_todos = "z_todos_unused"
+    else:
+        stem_org, stem_todos = _v2_stems_zip_nome_ficheiro_etapa3(
+            zip_nome_ficheiro or "", zip_tag
+        )
     if df_g_base is None or df_g_base.empty or "Chave" not in df_g_base.columns:
-        return [], [], 0, "ERR:Relatório geral vazio ou sem coluna Chave."
+        return [], [], 0, "ERR:Relatório geral vazio ou sem coluna Chave.", None
     if xml_respeita_filtro:
         if df_filtrado_para_excel_bloco is None or df_filtrado_para_excel_bloco.empty:
-            return [], [], 0, "ERR:Resultado filtrado: 0 linhas. Ajuste os filtros."
+            return [], [], 0, "ERR:Resultado filtrado: 0 linhas. Ajuste os filtros.", None
         _df_ch = df_filtrado_para_excel_bloco
     else:
         _df_ch = df_g_base
@@ -3676,11 +4997,58 @@ def _v2_export_zip_etapa3(
         if k
     }
     if not filtro_chaves:
-        return [], [], 0, "ERR:Nenhuma chave válida para exportar XML."
+        return [], [], 0, "ERR:Nenhuma chave válida para exportar XML.", None
+
+    excel_fn_completo = (
+        _PACOTE_CONTAB_NOME_EXCEL_RAIZ
+        if pacote_pastas_contabilidade and excel_um_só_completo
+        else "RELATORIO_GARIMPEIRO/relatorio_geral_completo.xlsx"
+    )
 
     xb_completo = None
+    aviso_sem_espaco_excel = None
     if excel_um_só_completo:
-        xb_completo = _excel_bytes_geral_e_resumo_status(df_excel_completo)
+        if pacote_pastas_contabilidade:
+            df_xml_plan = (
+                df_filtrado_para_excel_bloco
+                if xml_respeita_filtro
+                else df_g_base
+            )
+            df_todas = df_excel_todas_notas
+            if df_todas is None or getattr(df_todas, "empty", True):
+                df_todas = df_g_base
+            try:
+                xb_completo = excel_relatorio_geral_com_dashboard_bytes(
+                    df_todas, incluir_painel_fiscal=False
+                )
+            except Exception as ex_dash:
+                if _erro_sem_espaco_disco(ex_dash):
+                    aviso_sem_espaco_excel = _msg_sem_espaco_disco_garimpeiro()
+                xb_completo = None
+            if not xb_completo:
+                xb_completo = _excel_bytes_pacote_contabilidade(df_todas, df_xml_plan)
+                if xb_completo is None and not aviso_sem_espaco_excel:
+                    aviso_sem_espaco_excel = _msg_sem_espaco_disco_garimpeiro()
+        else:
+            xb_completo = _excel_bytes_geral_e_resumo_status(df_excel_completo)
+
+    if pacote_pastas_contabilidade and v2_zip_org and not v2_zip_plano:
+        paths, empty, xm, av, xls = _v2_export_pacote_contab_por_dimensoes(
+            out_dir,
+            stem_org,
+            filtro_chaves,
+            cnpj_limpo,
+            xb_completo,
+            excel_fn_completo,
+            _df_ch,
+        )
+        if aviso_sem_espaco_excel:
+            av = (
+                f"{aviso_sem_espaco_excel} {av}"
+                if av
+                else aviso_sem_espaco_excel
+            )
+        return paths, empty, xm, av, xls
 
     Z = {
         "z_org": None,
@@ -3698,7 +5066,7 @@ def _v2_export_zip_etapa3(
 
     def _fechar_bloco_zip():
         if excel_um_só_completo:
-            excel_fn = "RELATORIO_GARIMPEIRO/relatorio_geral_completo.xlsx"
+            excel_fn = excel_fn_completo
             xb = xb_completo
         else:
             excel_fn = f"RELATORIO_GARIMPEIRO/relatorio_filtrado_pt{Z['seq_bloco']:03d}.xlsx"
@@ -3722,8 +5090,8 @@ def _v2_export_zip_etapa3(
             except OSError:
                 pass
             Z["curr_org_part"] += 1
-            oname = f"{stem_org}_pt{Z['curr_org_part']}.zip"
-            Z["z_org"] = zipfile.ZipFile(oname, "w", zipfile.ZIP_DEFLATED)
+            oname = str(out_dir / f"{stem_org}_pt{Z['curr_org_part']}.zip")
+            Z["z_org"] = _zipfile_open_write_export(oname)
             Z["org_parts"].append(oname)
             Z["org_count"] = 0
         if (
@@ -3736,36 +5104,60 @@ def _v2_export_zip_etapa3(
             except OSError:
                 pass
             Z["curr_todos_part"] += 1
-            tname = f"{stem_todos}_pt{Z['curr_todos_part']}.zip"
-            Z["z_todos"] = zipfile.ZipFile(tname, "w", zipfile.ZIP_DEFLATED)
+            tname = str(out_dir / f"{stem_todos}_pt{Z['curr_todos_part']}.zip")
+            Z["z_todos"] = _zipfile_open_write_export(tname)
             Z["todos_parts"].append(tname)
             Z["todos_count"] = 0
 
     if v2_zip_org:
-        org_name = f"{stem_org}_pt{Z['curr_org_part']}.zip"
-        Z["z_org"] = zipfile.ZipFile(org_name, "w", zipfile.ZIP_DEFLATED)
+        org_name = str(out_dir / f"{stem_org}_pt{Z['curr_org_part']}.zip")
+        Z["z_org"] = _zipfile_open_write_export(org_name)
         Z["org_parts"].append(org_name)
     if v2_zip_plano:
-        todos_name = f"{stem_todos}_pt{Z['curr_todos_part']}.zip"
-        Z["z_todos"] = zipfile.ZipFile(todos_name, "w", zipfile.ZIP_DEFLATED)
+        todos_name = str(out_dir / f"{stem_todos}_pt{Z['curr_todos_part']}.zip")
+        Z["z_todos"] = _zipfile_open_write_export(todos_name)
         Z["todos_parts"].append(todos_name)
 
-    if os.path.exists(TEMP_UPLOADS_DIR) and (v2_zip_org or v2_zip_plano):
-        for f_name in os.listdir(TEMP_UPLOADS_DIR):
-            f_path = os.path.join(TEMP_UPLOADS_DIR, f_name)
-            with open(f_path, "rb") as f_temp:
+    if v2_zip_org or v2_zip_plano:
+        chaves_ja_org = set()
+        chaves_ja_todos = set()
+        for f_name in _lista_nomes_fontes_xml_garimpo():
+            with _abrir_fonte_xml_garimpo_stream(f_name) as f_temp:
                 for name, xml_data in extrair_recursivo(f_temp, f_name):
-                    res, _ = identify_xml_info(xml_data, cnpj_limpo, name)
+                    res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                     ck = _chave_para_conjunto_export(res["Chave"]) if res else None
                     if res and ck and ck in filtro_chaves:
-                        Z["xml_matched"] += 1
-                        Z["chaves_bloco"].add(ck)
-                        if v2_zip_org and Z["z_org"] is not None:
-                            Z["z_org"].writestr(f"{res['Pasta']}/{name}", xml_data)
+                        td = _tupla_dedupe_export_xml(res, ck)
+                        if td is None:
+                            del xml_data
+                            continue
+                        org_ok = (
+                            v2_zip_org
+                            and Z["z_org"] is not None
+                            and td not in chaves_ja_org
+                        )
+                        todos_ok = (
+                            v2_zip_plano
+                            and Z["z_todos"] is not None
+                            and td not in chaves_ja_todos
+                        )
+                        if not org_ok and not todos_ok:
+                            del xml_data
+                            continue
+                        if org_ok:
+                            chaves_ja_org.add(td)
+                            if pacote_pastas_contabilidade:
+                                inner = _caminho_xml_pacote_contab_raiz(res, name)
+                            else:
+                                inner = f"{res['Pasta']}/{name}"
+                            Z["z_org"].writestr(inner, xml_data)
                             Z["org_count"] += 1
-                        if v2_zip_plano and Z["z_todos"] is not None:
+                        if todos_ok:
+                            chaves_ja_todos.add(td)
                             Z["z_todos"].writestr(name, xml_data)
                             Z["todos_count"] += 1
+                        Z["xml_matched"] += int(org_ok) + int(todos_ok)
+                        Z["chaves_bloco"].add(ck)
                         limite = (
                             v2_zip_org and Z["org_count"] >= MAX_XML_PER_ZIP
                         ) or (v2_zip_plano and Z["todos_count"] >= MAX_XML_PER_ZIP)
@@ -3777,7 +5169,7 @@ def _v2_export_zip_etapa3(
         (v2_zip_org and Z["org_count"] > 0) or (v2_zip_plano and Z["todos_count"] > 0)
     ):
         excel_fn_last = (
-            "RELATORIO_GARIMPEIRO/relatorio_geral_completo.xlsx"
+            excel_fn_completo
             if excel_um_só_completo
             else f"RELATORIO_GARIMPEIRO/relatorio_filtrado_pt{Z['seq_bloco']:03d}.xlsx"
         )
@@ -3807,16 +5199,8 @@ def _v2_export_zip_etapa3(
     org_parts = Z["org_parts"]
     todos_parts = Z["todos_parts"]
     if v2_zip_org and Z["org_count"] == 0 and org_parts:
-        try:
-            os.remove(org_parts[-1])
-        except OSError:
-            pass
         org_parts = []
     if v2_zip_plano and Z["todos_count"] == 0 and todos_parts:
-        try:
-            os.remove(todos_parts[-1])
-        except OSError:
-            pass
         todos_parts = []
 
     aviso = None
@@ -3825,7 +5209,39 @@ def _v2_export_zip_etapa3(
             "Nenhum XML em disco correspondeu às chaves. "
             "Causas frequentes: pasta do garimpo apagada, ou chaves na tabela que não batem com os ficheiros."
         )
-    return org_parts, todos_parts, Z["xml_matched"], aviso
+    return org_parts, todos_parts, Z["xml_matched"], aviso, None
+
+
+def _v2_export_zip_mariana(
+    df_geral: pd.DataFrame,
+    cnpj_limpo: str,
+    *,
+    zip_output_dir: Path,
+    zip_file_stem=None,
+):
+    """
+    Pacote contabilidade/matriz: **todo** o lote lido no garimpo (df_geral), **sem** filtros da Etapa 3.
+    ZIPs: **Emitidas** por série, status e mês (`…_Mes_AAAA_MM`), **Terceiros** por modelo×status;
+    sufixo _notas_min_max quando aplicável; dentro: XML/Lote_001… (10k/pasta) + Excel na raiz.
+    """
+    nome = str(zip_file_stem or "").strip()
+    o, _t, xm, av, xls = _v2_export_zip_etapa3(
+        df_geral,
+        xml_respeita_filtro=False,
+        df_filtrado_para_excel_bloco=df_geral,
+        excel_um_só_completo=True,
+        df_excel_completo=df_geral,
+        v2_zip_org=True,
+        v2_zip_plano=False,
+        cnpj_limpo=cnpj_limpo,
+        zip_tag=None,
+        zip_output_dir=zip_output_dir,
+        zip_nome_ficheiro=nome,
+        pacote_pastas_garimpo=True,
+        pacote_pastas_contabilidade=True,
+        df_excel_todas_notas=df_geral,
+    )
+    return o, xm, av, xls
 
 
 def _v2_uniq_sorted_str_series_vals(s: pd.Series) -> list:
@@ -3950,18 +5366,18 @@ def v2_sanear_selecoes_contra_opcoes(series_opts: list, ufs_opts: list) -> None:
 
 
 def _v2_remover_zips_em_disco_listados():
-    for key in ("org_zip_parts", "todos_zip_parts"):
-        for p in st.session_state.get(key) or []:
-            try:
-                if p and os.path.isfile(p):
-                    os.remove(p)
-            except OSError:
-                pass
+    """Política: nunca apagar ficheiros exportados que o utilizador guardou em pasta."""
+    return
 
 
-def _v2_limpar_estado_exportacao_etapa3():
-    """Remove ficheiros ZIP gerados e reinicia sessão de downloads da Etapa 3."""
-    _v2_remover_zips_em_disco_listados()
+def _v2_limpar_estado_exportacao_etapa3(remover_zip_do_disco=True):
+    """
+    Reinicia sessão de downloads da Etapa 3.
+    Os ZIP no disco do utilizador **não são apagados** (política: só gravar).
+    remover_zip_do_disco mantido por compatibilidade; a remoção em disco está desativada.
+    """
+    if remover_zip_do_disco:
+        _v2_remover_zips_em_disco_listados()
     st.session_state["export_ready"] = False
     st.session_state["org_zip_parts"] = []
     st.session_state["todos_zip_parts"] = []
@@ -3974,6 +5390,11 @@ def _v2_limpar_estado_exportacao_etapa3():
     st.session_state.pop("v2_export_sem_xml", None)
     st.session_state["v2_etapa3_dual_export"] = False
     st.session_state.pop("v2_export_lados", None)
+    st.session_state.pop("mariana_zip_parts", None)
+    st.session_state["mariana_export_ready"] = False
+    st.session_state.pop("mariana_export_sig", None)
+    st.session_state.pop("mariana_sem_xml_msg", None)
+    st.session_state.pop("mariana_excel_completo_path", None)
 
 
 def v2_assinatura_exportacao_sessao():
@@ -4005,6 +5426,19 @@ def v2_assinatura_exportacao_sessao():
         str(st.session_state.get("v2_t_data_d2", "")),
         bool(st.session_state.get("v2_confirm_full", True)),
         str(st.session_state.get("v2_export_format", "zip_tudo_pastas")),
+    )
+
+
+def v2_assinatura_pacote_matriz_sessao(df_geral):
+    """
+    Pacote contabilidade / matriz: **não** inclui filtros da Etapa 3.
+    Invalida ao mudar o relatório geral (novo garimpo), pasta/nome do ZIP ou CNPJ na sessão.
+    """
+    return (
+        id(df_geral) if df_geral is not None else 0,
+        str(st.session_state.get("mariana_zip_save_dir") or ""),
+        str(st.session_state.get("mariana_zip_basename") or ""),
+        str(st.session_state.get("cnpj_widget") or ""),
     )
 
 
@@ -4040,10 +5474,15 @@ def v2_callback_repor_filtros():
 
 
 def rotulo_download_zip_parte(caminho_ficheiro):
-    m = re.search(r"pt(\d+)\.zip$", caminho_ficheiro, re.I)
+    base = os.path.basename(caminho_ficheiro)
+    m = re.search(r"pt(\d+)\.zip$", base, re.I)
     if m:
         return f"ZIP — parte {m.group(1)}"
-    return "ZIP"
+    if "__" in base and base.lower().endswith(".zip"):
+        return base[:-4].split("__", 1)[-1]
+    if base.lower().endswith(".zip"):
+        return base[:-4]
+    return base
 
 
 def enumerar_buracos_por_segmento(nums_sorted, tipo_doc, serie_str, gap_max=MAX_SALTO_ENTRE_NOTAS_CONSECUTIVAS):
@@ -4325,7 +5764,10 @@ def _excel_bytes_memo(prefix, df_work, sheet_name):
         else df_work.copy()
     )
     b = dataframe_para_excel_bytes(df_ex, sheet_name)
-    st.session_state[sk] = (sig, b)
+    if b is not None:
+        st.session_state[sk] = (sig, b)
+    else:
+        st.session_state.pop(sk, None)
     return b
 
 
@@ -4347,14 +5789,26 @@ def _relatorio_leitura_tabela_aggrid(df_raw: pd.DataFrame, grid_key: str, height
         )
         st.dataframe(
             _df_relatorio_leitura_abas_para_exibicao_sem_sep_milhar(df_raw),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=height,
         )
         return df_raw
 
     df_base = df_raw.reset_index(drop=True).copy()
-    df_grid = _df_relatorio_leitura_abas_para_exibicao_sem_sep_milhar(df_base.copy())
+    df_show = _df_relatorio_leitura_abas_para_exibicao_sem_sep_milhar(df_base.copy())
+    # Tabela nativa sempre visível (nºs de nota, série, etc.) — o AgGrid por vezes não desenha com Streamlit novo.
+    st.markdown("**Lista com numeração** — ordenação nas colunas; deslize para ver todas as linhas.")
+    st.dataframe(
+        df_show,
+        width="stretch",
+        hide_index=True,
+        height=min(max(260, height), 520),
+        key=f"tbl_num_{grid_key}",
+    )
+    st.caption("**Grelha com filtros** (tipo Excel) na secção abaixo — o Excel/ZIP usam as linhas visíveis na grelha.")
+
+    df_grid = df_show.copy()
     df_grid.insert(0, "__garim_idx", range(len(df_grid)))
 
     gb = GridOptionsBuilder.from_dataframe(
@@ -4415,7 +5869,20 @@ def _relatorio_leitura_tabela_aggrid(df_raw: pd.DataFrame, grid_key: str, height
         return df_base
     if not idx:
         return df_base.iloc[0:0].copy()
-    return df_base.iloc[idx].reset_index(drop=True)
+    _n = len(df_base)
+    idx_ok = []
+    _seen = set()
+    for _i in idx:
+        try:
+            _j = int(_i)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= _j < _n and _j not in _seen:
+            _seen.add(_j)
+            idx_ok.append(_j)
+    if not idx_ok:
+        return df_base.iloc[0:0].copy()
+    return df_base.iloc[idx_ok].reset_index(drop=True)
 
 
 def _painel_zip_xml_filtrado(prefix, df_filtrado, cnpj_limpo, df_geral_full):
@@ -4435,16 +5902,16 @@ def _painel_zip_xml_filtrado(prefix, df_filtrado, cnpj_limpo, df_geral_full):
     if st.button(
         "Gerar ZIP com XML (linhas filtradas)",
         key=f"{prefix}_btn_zip",
-        use_container_width=True,
+        width="stretch",
     ):
-        with st.spinner("A montar ZIP a partir dos ficheiros em disco…"):
+        with st.spinner("A montar ZIP a partir do lote (memória ou pasta)…"):
             parts, tot = escrever_zip_dominio_por_chaves(
                 cnpj_limpo, chaves, df_geral_full
             )
         st.session_state[kzip] = parts
         if tot == 0:
             st.warning(
-                "Nenhum XML em disco correspondeu a estas chaves (pasta de upload limpa ou chaves externas ao lote)."
+                "Nenhum XML do lote correspondeu a estas chaves (lote vazio ou chaves externas ao lote)."
             )
         else:
             st.success(
@@ -4458,7 +5925,7 @@ def _painel_zip_xml_filtrado(prefix, df_filtrado, cnpj_limpo, df_geral_full):
                     fp.read(),
                     file_name=os.path.basename(part),
                     key=f"{prefix}_dlz_{idx}_{hashlib.md5(part.encode()).hexdigest()[:8]}",
-                    use_container_width=True,
+                    width="stretch",
                 )
 
 
@@ -4530,7 +5997,7 @@ def _zip_anexar_excel_lista_especifica(zf, df_geral, chaves_ordem, idx_parte):
 
 def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista, df_geral=None):
     """Gera um ou mais ZIPs (máx. MAX_XML_PER_ZIP XMLs cada); XMLs na raiz; Excel do lote em RELATORIO_GARIMPEIRO/. Retorna (lista_caminhos, total_xml)."""
-    if not chaves_lista or not os.path.exists(TEMP_UPLOADS_DIR):
+    if not chaves_lista or not _garimpo_existem_fontes_xml_lote():
         return [], 0
     ch_set = set()
     for c in chaves_lista:
@@ -4539,35 +6006,30 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista, df_geral=None):
             ch_set.add(k)
     if not ch_set:
         return [], 0
-    try:
-        for f in os.listdir("."):
-            if f.endswith(".zip") and "faltantes_dominio_final" in f:
-                try:
-                    os.remove(f)
-                except Exception:
-                    pass
-    except Exception:
-        pass
 
     parts = []
     part_idx = 1
     count_xml = 0
     no_lote = 0
     nome = f"faltantes_dominio_final_pt{part_idx}.zip"
-    zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+    zf = _zipfile_open_write_export(nome)
     parts.append(nome)
     usados_nomes_parte = set()
     chaves_excel_ordem = []
     vistos_chave_excel = set()
+    ch44_ja_gravado = set()
 
     try:
-        for fn in os.listdir(TEMP_UPLOADS_DIR):
-            f_path = os.path.join(TEMP_UPLOADS_DIR, fn)
-            with open(f_path, "rb") as ft:
+        for fn in _lista_nomes_fontes_xml_garimpo():
+            with _abrir_fonte_xml_garimpo_stream(fn) as ft:
                 for name, data in extrair_recursivo(ft, fn):
                     res, _ = identify_xml_info(data, cnpj_limpo, name)
                     ch44 = _chave44_digitos(res.get("Chave")) if res else None
                     if res and ch44 and ch44 in ch_set:
+                        td = _tupla_dedupe_export_xml(res, ch44)
+                        if td is None or td in ch44_ja_gravado:
+                            continue
+                        ch44_ja_gravado.add(td)
                         if no_lote >= MAX_XML_PER_ZIP:
                             _zip_anexar_excel_lista_especifica(
                                 zf, df_geral, chaves_excel_ordem, part_idx
@@ -4575,7 +6037,7 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista, df_geral=None):
                             zf.close()
                             part_idx += 1
                             nome = f"faltantes_dominio_final_pt{part_idx}.zip"
-                            zf = zipfile.ZipFile(nome, "w", zipfile.ZIP_DEFLATED)
+                            zf = _zipfile_open_write_export(nome)
                             parts.append(nome)
                             no_lote = 0
                             usados_nomes_parte = set()
@@ -4599,14 +6061,107 @@ def escrever_zip_dominio_por_chaves(cnpj_limpo, chaves_lista, df_geral=None):
             pass
 
     if count_xml == 0:
-        for p in parts:
-            try:
-                os.remove(p)
-            except Exception:
-                pass
         return [], 0
 
     return parts, count_xml
+
+
+def _zip_bytes_from_arc_pairs(pairs: list) -> bytes:
+    """Um único .zip em memória a partir de [(nome_interno, bytes), …]."""
+    if not pairs:
+        return b""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(
+        buf,
+        "w",
+        zipfile.ZIP_DEFLATED,
+        compresslevel=ZIP_EXPORT_COMPRESSLEVEL,
+    ) as zf:
+        for arc, raw in pairs:
+            zf.writestr(arc, raw if isinstance(raw, (bytes, bytearray)) else bytes(raw))
+    return buf.getvalue()
+
+
+def _split_arc_pairs_into_zips_max_bytes(pairs: list, max_bytes: int) -> list:
+    """
+    Divide a lista de (arcname, xml_bytes) em vários ZIPs, cada um ≤ max_bytes.
+    Recursão por metades se um ZIP ainda exceder o limite (ficheiro único enorme fica num ZIP só).
+    """
+    if not pairs:
+        return []
+    blob = _zip_bytes_from_arc_pairs(pairs)
+    if len(blob) <= max_bytes or len(pairs) == 1:
+        return [blob]
+    mid = max(1, len(pairs) // 2)
+    return _split_arc_pairs_into_zips_max_bytes(
+        pairs[:mid], max_bytes
+    ) + _split_arc_pairs_into_zips_max_bytes(pairs[mid:], max_bytes)
+
+
+def _coletar_xml_serie4_emitidas_propria(cnpj_limpo: str) -> list:
+    """
+    NF-e / NFC-e, emissão própria, status NORMAIS, série 4. Deduplicação igual à exportação ZIP.
+    Ordem estável por nome interno.
+    """
+    out = []
+    seen = set()
+    cnpj = "".join(c for c in str(cnpj_limpo or "") if c.isdigit())[:14]
+    if len(cnpj) != 14:
+        return []
+    for f_name in _lista_nomes_fontes_xml_garimpo():
+        with _abrir_fonte_xml_garimpo_stream(f_name) as f_temp:
+            for name, xml_data in extrair_recursivo(f_temp, f_name):
+                res, is_p = identify_xml_info(xml_data, cnpj, name)
+                if not res or not is_p:
+                    del xml_data
+                    continue
+                if str(res.get("Status") or "").strip().upper() != "NORMAIS":
+                    del xml_data
+                    continue
+                tp = str(res.get("Tipo") or "").strip()
+                if tp not in ("NF-e", "NFC-e"):
+                    del xml_data
+                    continue
+                ser = _normaliza_serie_filtro(res.get("Série"))
+                if ser != "4":
+                    del xml_data
+                    continue
+                ck = _chave_para_conjunto_export(res.get("Chave"))
+                td = _tupla_dedupe_export_xml(res, ck)
+                if td is None or td in seen:
+                    del xml_data
+                    continue
+                seen.add(td)
+                arc = _nome_arquivo_xml_contabilidade(res, name)
+                out.append((arc, bytes(xml_data)))
+                del xml_data
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def _gerar_lista_zips_serie4_emitidas_50mb(cnpj_limpo: str) -> tuple:
+    """
+    Devolve (lista de (nome_ficheiro, bytes_zip), mensagem_erro_ou_None).
+    Só para CNPJ_CLIENTE_EXPORT_SERIE4_ZIP50MB.
+    """
+    cnpj = "".join(c for c in str(cnpj_limpo or "") if c.isdigit())[:14]
+    if cnpj != CNPJ_CLIENTE_EXPORT_SERIE4_ZIP50MB:
+        return [], "Esta ferramenta não está disponível para este CNPJ."
+    if not _garimpo_existem_fontes_xml_lote():
+        return [], "Sem ficheiros no lote — faça o garimpo ou **Incluir mais XML** primeiro."
+    pairs = _coletar_xml_serie4_emitidas_propria(cnpj)
+    if not pairs:
+        return (
+            [],
+            "Nenhum XML encontrado: **série 4**, **NF-e / NFC-e**, **autorizadas** (NORMAIS), **emissão própria**.",
+        )
+    blobs = _split_arc_pairs_into_zips_max_bytes(pairs, ZIP50_SERIE4_MAX_BYTES)
+    nomes = []
+    for i, blob in enumerate(blobs, start=1):
+        nomes.append(
+            (f"Garim_serie4_emitidas_pt{i:03d}.zip", blob)
+        )
+    return nomes, None
 
 
 def _intervalo_mes_relatorio(ano, mes):
@@ -4731,6 +6286,7 @@ _MODELO_SEFAZ_PARA_RELATORIO = {
     "65": "NFC-e",
     "57": "CT-e",
     "58": "MDF-e",
+    "67": "CT-e OS",
 }
 
 
@@ -4858,7 +6414,7 @@ Ficheiros e descargas que pode obter:
 2. Envie ZIP ou XML soltos (grandes volumes são suportados).
 3. Iniciar grande garimpo e aguardar o processamento.
 4. Depois do primeiro resultado, pode acrescentar mais XML/ZIP no topo da página sem reiniciar o garimpo.
-5. (Opcional) Lateral “Último nº por série”: afeta só o cálculo de buracos (âncora por último nº e mês). O garimpo e o resumo por série continuam totais. Sem Guardar referência válida, buracos usam todo o intervalo lido.
+5. (Opcional) Lateral “Último nº por série”: afeta só o cálculo de buracos — **só as séries que preencher e guardar**; âncora por último nº e mês. O garimpo e o resumo por série continuam totais. Sem Guardar referência válida, buracos usam todo o intervalo lido em emissão própria.
 6. Inutilizadas: a partir dos buracos, por planilha (Excel/CSV) ou faixa — só números que já forem buraco listado (não alarga intervalos).
 7. Painel à direita: **Processar Dados** grava XML/ZIP extra, aplica inutilizações «sem XML» (se configurou) e recalcula a partir da pasta de uploads.
 8. Etapa 3: filtros em cascata (emissão própria e terceiros em colunas separadas). Escolha um dos seis modos: ZIP tudo (raiz ou pastas), ZIP filtrado (pastas ou tudo na raiz), Excel só lote completo, Excel só filtrado — e gere as partes quando aplicável.
@@ -4867,12 +6423,12 @@ Ficheiros e descargas que pode obter:
 === DICAS ===
 • Resetar sistema: limpa sessão e temporários ao mudar de cliente ou recomeçar.
 • Nos filtros, lista vazia = esse critério não restringe. Opções inválidas após mudar outro filtro são limpas automaticamente.
-• Nomes de modelos na app: NF-e, NFS-e, NFC-e, CT-e, DACT-e, MDF-e, Outros (cartas de correção não são lidas).
+• Nomes de modelos na app: NF-e, NFS-e, NFC-e, CT-e, CT-e OS (mod. 67), MDF-e, Outros (cartas de correção não são lidas).
 """.strip()
 
 
 # --- INTERFACE ---
-st.markdown("<h1>⛏️ Garimpeiro</h1>", unsafe_allow_html=True)
+st.markdown(f"<h1>{_garim_emoji('⛏️')} Garimpeiro</h1>", unsafe_allow_html=True)
 
 with st.container():
     with st.expander(
@@ -4924,7 +6480,7 @@ with st.container():
                 <li style="margin-bottom:8px;"><b>Lote:</b> envie ficheiros <b>ZIP</b> ou <b>XML</b> soltos — volumes grandes são suportados.</li>
                 <li style="margin-bottom:8px;"><b>Garimpo:</b> <b>Iniciar grande garimpo</b> e aguarde até aparecerem os resultados.</li>
                 <li style="margin-bottom:8px;"><b>Mais ficheiros:</b> no <b>topo da área de resultados</b>, pode acrescentar ZIP/XML <b>sem reiniciar</b> o processamento anterior.</li>
-                <li style="margin-bottom:8px;"><b>(Opcional)</b> <b>Último nº por série</b> (lateral): altera apenas o cálculo de <b>buracos</b> (âncora por último número e mês). O garimpo e o resumo por série mantêm-se <b>totais</b>. Sem <b>Guardar referência</b> com linhas válidas, os buracos consideram toda a numeração lida.</li>
+                <li style="margin-bottom:8px;"><b>(Opcional)</b> <b>Último nº por série</b> (lateral): altera apenas o cálculo de <b>buracos</b> — <b>só para as séries que indicar e guardar</b> (âncora por último número e mês). O garimpo e o resumo por série mantêm-se <b>totais</b>. Sem <b>Guardar referência</b> com linhas válidas, os buracos consideram toda a numeração lida em emissão própria.</li>
                 <li style="margin-bottom:8px;"><b>Processar Dados</b> (painel à direita): grava uploads extra, aplica inutilizações configuradas e recalcula o relatório a partir da pasta em disco.</li>
                 <li style="margin-bottom:8px;"><b>Inutilizadas:</b> a partir dos <b>buracos</b>, use <b>planilha</b> (Excel/CSV) ou <b>faixa</b> — só entram números que já forem buraco listado (não alarga intervalos).</li>
                 <li style="margin-bottom:8px;"><b>Etapa 3 — filtros e exportação:</b> refine por emissão própria e/ou terceiros; escolha um dos <b>seis</b> modos (ZIP tudo raiz/pastas, ZIP filtrado pastas/raiz, Excel lote completo, Excel só filtrado) e gere as partes quando a app repartir o lote.</li>
@@ -4938,7 +6494,7 @@ with st.container():
             """
         <div style="font-size:0.88rem;line-height:1.5;color:#555;margin:6px 0 12px 0;padding:10px 12px;background:rgba(255,240,248,0.6);border-radius:10px;border-left:3px solid #FF69B4;">
         <b>Dicas rápidas:</b> <b>Resetar sistema</b> limpa sessão e temporários ao mudar de cliente.
-        Nos filtros, lista vazia = esse critério não aplica. Modelos usados na app incluem NF-e, NFS-e, NFC-e, CT-e, DACT-e, MDF-e e Outros (cartas de correção ignoradas).
+        Nos filtros, lista vazia = esse critério não aplica. Modelos usados na app incluem NF-e, NFS-e, NFC-e, CT-e, CT-e OS, MDF-e e Outros (cartas de correção ignoradas).
         </div>
         """,
             unsafe_allow_html=True,
@@ -4968,7 +6524,9 @@ keys_to_init = [
     'df_faltantes', 
     'df_canceladas', 
     'df_inutilizadas', 
-    'df_autorizadas', 
+    'df_autorizadas',
+    'df_denegadas',
+    'df_rejeitadas',
     'df_geral', 
     'df_divergencias', 
     'st_counts', 
@@ -4987,7 +6545,13 @@ for k in keys_to_init:
         elif k in ['relatorio', 'org_zip_parts', 'todos_zip_parts', 'ch_falt_dom', 'zip_dom_parts']: 
             st.session_state[k] = []
         elif k == 'st_counts': 
-            st.session_state[k] = {"CANCELADOS": 0, "INUTILIZADOS": 0, "AUTORIZADAS": 0}
+            st.session_state[k] = {
+                "CANCELADOS": 0,
+                "INUTILIZADOS": 0,
+                "AUTORIZADAS": 0,
+                "DENEGADOS": 0,
+                "REJEITADOS": 0,
+            }
         else: 
             st.session_state[k] = False
 
@@ -5012,9 +6576,14 @@ if "seq_struct_v" not in st.session_state:
     st.session_state["seq_struct_v"] = 0
 if "cnpj_widget" not in st.session_state:
     st.session_state["cnpj_widget"] = ""
+if SESSION_KEY_SERIE4_ZIP50_PARTS not in st.session_state:
+    st.session_state[SESSION_KEY_SERIE4_ZIP50_PARTS] = None
 
 with st.sidebar:
-    st.markdown("#### 🔍 Configuração")
+    st.markdown(
+        f'<h4>{_garim_emoji("🔍")} Configuração</h4>',
+        unsafe_allow_html=True,
+    )
     # Normalizar máscara *antes* do text_input: depois do widget o Streamlit bloqueia
     # `session_state["cnpj_widget"] = ...` na mesma execução (StreamlitAPIException).
     _cnpj_key = "cnpj_widget"
@@ -5037,9 +6606,49 @@ with st.sidebar:
         if st.button("✅ Liberar operação"): 
             st.session_state['confirmado'] = True
 
+        if cnpj_limpo == CNPJ_CLIENTE_EXPORT_SERIE4_ZIP50MB:
+            with st.expander("📦 ZIP série 4 — emitidas (~50 MB)", expanded=False):
+                st.caption(
+                    "Gera ZIPs só com **NF-e / NFC-e autorizadas** (NORMAIS), **série 4**, **emissão própria**, "
+                    f"a partir do lote atual. Cada ficheiro tem no máximo **~{ZIP50_SERIE4_MAX_BYTES // (1024 * 1024)} MB**."
+                )
+                if not _garimpo_existem_fontes_xml_lote():
+                    st.info("Sem lote XML — carregue ficheiros e processe o garimpo.")
+                else:
+                    if st.button(
+                        "Gerar ZIPs (série 4, ~50 MB cada)",
+                        key="btn_serie4_zip50_gerar",
+                        width="stretch",
+                    ):
+                        _parts, _err = _gerar_lista_zips_serie4_emitidas_50mb(cnpj_limpo)
+                        if _err:
+                            st.session_state[SESSION_KEY_SERIE4_ZIP50_PARTS] = None
+                            st.error(_err)
+                        else:
+                            st.session_state[SESSION_KEY_SERIE4_ZIP50_PARTS] = _parts
+                            st.success(
+                                f"**{len(_parts)}** ZIP(s) gerado(s). Use os botões abaixo para descarregar."
+                            )
+                            st.rerun()
+                    _zp = st.session_state.get(SESSION_KEY_SERIE4_ZIP50_PARTS)
+                    if _zp:
+                        st.caption(f"{len(_zp)} ficheiro(s) na última geração.")
+                        for _zi, (_zfn, _zblob) in enumerate(_zp):
+                            st.download_button(
+                                f"⬇️ {_zfn}",
+                                data=_zblob,
+                                file_name=_zfn,
+                                mime="application/zip",
+                                key=f"dl_serie4zip50_{_zi}_{hashlib.md5(_zblob[: min(4096, len(_zblob))]).hexdigest()[:10]}",
+                                width="stretch",
+                            )
+                        if st.button("Limpar lista de ZIPs", key="btn_serie4_zip50_limpar"):
+                            st.session_state[SESSION_KEY_SERIE4_ZIP50_PARTS] = None
+                            st.rerun()
+
         with st.expander("📌 Últimos nº / séries (mês ref.)", expanded=False):
             st.caption(
-                "Define o **mês de referência** e, por linha, modelo + série + último nº (buracos no dashboard)."
+                "Mês de referência + por linha modelo, série e último nº. **Só essas séries** entram no cálculo de **buracos** (a partir desse último nº); as outras séries do lote ignoram-se nos buracos."
             )
             d = date.today()
             def_ano = d.year - 1 if d.month == 1 else d.year
@@ -5047,7 +6656,7 @@ with st.sidebar:
             a0 = st.session_state["seq_ref_ano"] if st.session_state.get("seq_ref_ano") is not None else def_ano
             m0 = st.session_state["seq_ref_mes"] if st.session_state.get("seq_ref_mes") is not None else def_mes
             if st.session_state.get("garimpo_ok"):
-                if st.button("Puxar séries do resumo", key="seq_btn_puxar", use_container_width=True):
+                if st.button("Puxar séries do resumo", key="seq_btn_puxar", width="stretch"):
                     dfr = st.session_state.get("df_resumo")
                     if dfr is not None and not dfr.empty:
                         novas = []
@@ -5066,7 +6675,7 @@ with st.sidebar:
                     else:
                         st.warning("Resumo por série ainda vazio.")
 
-            _opts = ["NF-e", "NFC-e", "CT-e"]
+            _opts = ["NF-e", "NFC-e", "CT-e", "CT-e OS"]
             _df_base = normalize_seq_ref_editor_df(st.session_state["seq_ref_rows"])
             _recs = (
                 _df_base.to_dict("records")
@@ -5162,7 +6771,7 @@ with st.sidebar:
 
             b1, b2 = st.columns(2)
             with b1:
-                if st.button("➕ Série", key="seq_add_row", use_container_width=True):
+                if st.button("➕ Série", key="seq_add_row", width="stretch"):
                     cur_df = collect_seq_ref_from_widgets(v, n_rows)
                     novo = pd.DataFrame([{"Modelo": "NF-e", "Série": "", "Último número": ""}])
                     st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(
@@ -5171,7 +6780,7 @@ with st.sidebar:
                     st.session_state["seq_struct_v"] = v + 1
                     st.rerun()
             with b2:
-                if n_rows > 1 and st.button("➖ Última", key="seq_rem_row", use_container_width=True):
+                if n_rows > 1 and st.button("➖ Última", key="seq_rem_row", width="stretch"):
                     cur_df = collect_seq_ref_from_widgets(v, n_rows)
                     st.session_state["seq_ref_rows"] = normalize_seq_ref_editor_df(cur_df.iloc[:-1])
                     st.session_state["seq_struct_v"] = v + 1
@@ -5180,7 +6789,7 @@ with st.sidebar:
             if st.button(
                 "Guardar referência",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 key="seq_btn_guardar",
                 help="Grava ano, mês e séries na sessão.",
             ):
@@ -5208,7 +6817,10 @@ with st.sidebar:
 
         if st.session_state.get("garimpo_ok") and st.session_state.get("relatorio"):
             st.markdown("---")
-            st.markdown("##### 📄 PDF do dashboard")
+            st.markdown(
+                f'<h5>{_garim_emoji("📄")} PDF do dashboard</h5>',
+                unsafe_allow_html=True,
+            )
             st.caption(
                 "Resumo do lote em PDF (métricas e amostras). Só descarrega o ficheiro — não altera o que vê nesta página."
             )
@@ -5223,7 +6835,7 @@ with st.sidebar:
                     file_name="dashboard_garimpeiro.pdf",
                     mime="application/pdf",
                     key="dl_dash_pdf_sidebar",
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 st.markdown(_instrucoes_instalar_fpdf2_markdown())
@@ -5251,13 +6863,14 @@ def _garim_etapa3_corpo(cnpj_limpo):
             """
     <div style="background:#fff8fc;border:1px solid #f8bbd9;border-radius:10px;padding:14px 16px;margin-bottom:14px;font-size:0.93rem;line-height:1.55;color:#333;">
     <b>Filtros</b><br/>
-    • <b>Emissão própria (esquerda):</b> só a sua empresa — status, tipo, operação, datas, série, n.º, UF destino, nota por chave ou n.º+série. Vazio = não filtra por estes campos.<br/>
-    • <b>Terceiros (direita):</b> só documentos recebidos — status, tipo, operação, período.<br/><br/>
+    • <b>Emissão própria (esquerda):</b> só a sua empresa — status (inclui <b>Denegadas</b> e <b>Rejeitadas</b> em separado de canceladas/inutilizadas), tipo, operação, datas, série, n.º, UF destino, nota por chave ou n.º+série. Vazio = não filtra por estes campos.<br/>
+    • <b>Terceiros (direita):</b> só documentos recebidos — os mesmos tipos de status quando aplicável, tipo, operação, período.<br/><br/>
     <b>Exportar</b><br/>
     • <b>ZIP todo o lote</b> — ignora filtros para escolher XML; Excel completo dentro de cada ZIP.<br/>
     • <b>ZIP filtrado</b> — só XML que passam nos filtros; Excel coerente com esse conjunto.<br/>
     • <b>Só Excel</b> — sem XML.<br/><br/>
-    <b>Descargas</b> — sempre em <b>dois ficheiros</b> (própria e terceiros). Nos ZIP, o Excel está em <code>RELATORIO_GARIMPEIRO/</code> (até 10 000 XML por parte).
+    <b>Descargas</b> — sempre em <b>dois ficheiros</b> (própria e terceiros). Nos ZIP, o Excel está em <code>RELATORIO_GARIMPEIRO/</code> (até 10 000 XML por parte).<br/><br/>
+    <b>Pacote contabilidade / matriz</b> (se aparecer em baixo) — exporta o lote lido; filtros da Etapa 3 <b>não</b> cortam. Na pasta escolhida: <b>Excel solto</b> (<code>…_relatorio_garimpeiro_completo.xlsx</code>, sem folha Painel Fiscal) + ZIPs. Em cada ZIP: pasta <code>XML/Lote_001</code>, <code>Lote_002</code>, … (até 10&nbsp;000 XML por pasta) + Excel na raiz com nome <code>relatorio_garimpeiro_…</code> (inclui série/mês/grupo, para não se sobrepor ao extrair); o .zip pode incluir <code>_notas_</code> inicial–final. <b>Emitidas</b>: um ZIP por série, status e <b>mês de emissão</b> (<code>Mes_AAAA_MM</code>); <b>Terceiros</b>: por modelo e status (sem mês).
     </div>
             """,
             unsafe_allow_html=True,
@@ -5313,7 +6926,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
         st.session_state["v2_t_data_modo"] = "Qualquer"
     
     df_g_base = st.session_state["df_geral"]
-    _v2_tipos_ui = ["NF-e", "NFS-e", "NFC-e", "CT-e", "DACT-e", "MDF-e", "Outros"]
+    _v2_tipos_ui = ["NF-e", "NFS-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e", "Outros"]
     _v2_stat_ui = list(_V2_STATUS_UI_PARA_DF.keys())
     _v2_op_ui = list(_V2_OP_UI_PARA_INTERNO.keys())
     
@@ -5339,7 +6952,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
     _td1_t = st.session_state.get("v2_t_data_d1")
     _td2_t = st.session_state.get("v2_t_data_d2")
     
-    _v2_c_sig = (id(df_g_base), v2_assinatura_exportacao_sessao()[:-2])
+    _v2_c_sig = (id(df_g_base), v2_assinatura_exportacao_sessao())
     _v2_cc = st.session_state.get("_v2_cascade_cache_v1")
     if _v2_cc and _v2_cc.get("sig") == _v2_c_sig:
         series = _v2_cc["series"]
@@ -5385,8 +6998,17 @@ def _garim_etapa3_corpo(cnpj_limpo):
     if st.session_state.get("export_ready"):
         _sig_now = v2_assinatura_exportacao_sessao()
         if st.session_state.get("v2_export_sig") != _sig_now:
-            _v2_limpar_estado_exportacao_etapa3()
+            _v2_limpar_estado_exportacao_etapa3(remover_zip_do_disco=False)
             st.session_state["v2_show_regen_hint"] = True
+    
+    if st.session_state.get("mariana_export_ready"):
+        _sig_mar = v2_assinatura_pacote_matriz_sessao(df_g_base)
+        if st.session_state.get("mariana_export_sig") != _sig_mar:
+            st.session_state.pop("mariana_zip_parts", None)
+            st.session_state["mariana_export_ready"] = False
+            st.session_state.pop("mariana_export_sig", None)
+            st.session_state.pop("mariana_sem_xml_msg", None)
+            st.session_state.pop("mariana_excel_completo_path", None)
     
     if st.session_state.pop("v2_show_regen_hint", False):
         st.caption(
@@ -5444,7 +7066,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                 "Tipo de documento (vazio = todos)",
                 _v2_tipos_ui,
                 key="v2_f_tip",
-                help="Alinhado à coluna Modelo. NFS-e / DACT-e dependem do conteúdo do XML.",
+                help="Alinhado à coluna Modelo. NFS-e / CT-e OS dependem do conteúdo do XML.",
             )
             filtro_operacao = st.multiselect(
                 "Operação (vazio = entrada e saída)",
@@ -5588,12 +7210,11 @@ def _garim_etapa3_corpo(cnpj_limpo):
                 st.date_input("Data", key="v2_t_data_d1")
     
     with st.container(border=True):
-        st.caption("**Opções** — repor filtros e limpar exportação gerada")
         st.button(
             "Repor filtros e limpar exportação gerada",
             key="v2_pre_clr",
             on_click=v2_callback_repor_filtros,
-            use_container_width=True,
+            width="stretch",
         )
     
     _fmt_labels = {
@@ -5619,7 +7240,22 @@ def _garim_etapa3_corpo(cnpj_limpo):
         key="v2_export_format",
         help="Depois de gerar: use os botões de descarga que aparecem abaixo. Vários ZIP = várias partes; guarde todas.",
     )
-    
+    if "v2_etapa3_nome_ficheiro" not in st.session_state:
+        st.session_state["v2_etapa3_nome_ficheiro"] = str(
+            st.session_state.pop("v2_etapa3_export_prefix", "") or ""
+        )
+    st.text_input(
+        "Nome do ficheiro (opcional, sem extensão)",
+        key="v2_etapa3_nome_ficheiro",
+        placeholder="Ex.: Garimpo_Marco — vazio = nomes automáticos da app",
+        help=(
+            "Escreva só o **nome base** (sem .zip nem .xlsx). "
+            "ZIP: Nome_org_propria_pt1.zip e Nome_todos_propria_pt1.zip (várias partes: _pt2, _pt3…). "
+            "Excel: Nome_todo_propria_data.xlsx, Nome_filt_terceiros_data.xlsx, etc. "
+            "Espaços viram _; caracteres inválidos são removidos."
+        ),
+    )
+
     fmt_e3 = st.session_state.get("v2_export_format", "zip_tudo_pastas")
     export_ignora_filtros = fmt_e3 in (
         "excel_todo_lote",
@@ -5748,9 +7384,18 @@ def _garim_etapa3_corpo(cnpj_limpo):
             "dis_ambos": _dis_ambos,
         }
     
-    st.caption(
-        "Cada botão gera **só** esse lado (menos trabalho e memória). **Os dois lados** gera os dois de uma vez."
-    )
+    _pacote_matriz_btn_dis = df_g_base.empty
+    gen_pacote_matriz = False
+
+    if str(st.session_state.get("v2_export_format", "")).startswith("zip_"):
+        if "v2_etapa3_zip_save_dir" not in st.session_state:
+            st.session_state["v2_etapa3_zip_save_dir"] = ""
+        st.text_input(
+            "Pasta onde guardar os ZIP — sua empresa / terceiros",
+            key="v2_etapa3_zip_save_dir",
+            help="Obrigatório antes de gerar ZIP. Caminho completo (ex.: D:\\Exportacoes). A pasta é criada se não existir.",
+        )
+
     col_g_pr, col_g_tc = st.columns(2, gap="large")
     with col_g_pr:
         gen_pr = st.button(
@@ -5758,7 +7403,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
             type="primary",
             key="v2_btn_export_pr",
             disabled=_dis_pr,
-            use_container_width=True,
+            width="stretch",
         )
     with col_g_tc:
         gen_tc = st.button(
@@ -5766,13 +7411,13 @@ def _garim_etapa3_corpo(cnpj_limpo):
             type="primary",
             key="v2_btn_export_tc",
             disabled=_dis_tc,
-            use_container_width=True,
+            width="stretch",
         )
     gen_ambos = st.button(
         "Gerar os dois lados",
         key="v2_btn_export_ambos",
         disabled=_dis_ambos,
-        use_container_width=True,
+        width="stretch",
     )
     
     _lados_run = None
@@ -5786,7 +7431,11 @@ def _garim_etapa3_corpo(cnpj_limpo):
     if _lados_run:
         _fmt_run = st.session_state.get("v2_export_format", "zip_tudo_pastas")
         _lados_tuple = tuple(sorted(_lados_run))
-    
+        _nome_arq = _v2_sanitize_nome_export(
+            st.session_state.get("v2_etapa3_nome_ficheiro")
+        )
+        _zip_nome_raw = st.session_state.get("v2_etapa3_nome_ficheiro", "")
+
         def _montar_filtrado(sem_origem=False):
             _fo = list(st.session_state.get("v2_f_orig") or [])
             _ftip = list(st.session_state.get("v2_f_tip") or [])
@@ -5836,13 +7485,12 @@ def _garim_etapa3_corpo(cnpj_limpo):
             )
     
         ts = datetime.now().strftime("%Y%m%d_%H%M")
-    
+
         if _fmt_run == "excel_todo_lote":
             if df_g_base.empty:
                 st.warning("Relatório geral vazio.")
             else:
                 with st.spinner("A gerar Excel…"):
-                    _v2_limpar_zips_gerados_etapa3_no_cwd()
                     st.session_state["org_zip_parts"] = []
                     st.session_state["todos_zip_parts"] = []
                     st.session_state["excel_buffer"] = None
@@ -5868,12 +7516,16 @@ def _garim_etapa3_corpo(cnpj_limpo):
                         if _bp:
                             st.session_state["excel_buffer_propria"] = _bp
                             st.session_state["export_excel_name_propria"] = (
-                                f"relatorio_todo_lote_emissao_propria_{ts}.xlsx"
+                                f"{_nome_arq}_todo_propria_{ts}.xlsx"
+                                if _nome_arq
+                                else f"relatorio_todo_lote_emissao_propria_{ts}.xlsx"
                             )
                         if _bt:
                             st.session_state["excel_buffer_terceiros"] = _bt
                             st.session_state["export_excel_name_terceiros"] = (
-                                f"relatorio_todo_lote_terceiros_{ts}.xlsx"
+                                f"{_nome_arq}_todo_terceiros_{ts}.xlsx"
+                                if _nome_arq
+                                else f"relatorio_todo_lote_terceiros_{ts}.xlsx"
                             )
                         st.session_state["export_ready"] = True
                         st.session_state["v2_etapa3_dual_export"] = True
@@ -5891,7 +7543,6 @@ def _garim_etapa3_corpo(cnpj_limpo):
                 st.warning("Resultado filtrado: 0 linhas. Ajuste os filtros.")
             else:
                 with st.spinner("A gerar Excel…"):
-                    _v2_limpar_zips_gerados_etapa3_no_cwd()
                     st.session_state["org_zip_parts"] = []
                     st.session_state["todos_zip_parts"] = []
                     st.session_state["excel_buffer"] = None
@@ -5917,12 +7568,16 @@ def _garim_etapa3_corpo(cnpj_limpo):
                         if _bp:
                             st.session_state["excel_buffer_propria"] = _bp
                             st.session_state["export_excel_name_propria"] = (
-                                f"relatorio_filtrado_emissao_propria_{ts}.xlsx"
+                                f"{_nome_arq}_filt_propria_{ts}.xlsx"
+                                if _nome_arq
+                                else f"relatorio_filtrado_emissao_propria_{ts}.xlsx"
                             )
                         if _bt:
                             st.session_state["excel_buffer_terceiros"] = _bt
                             st.session_state["export_excel_name_terceiros"] = (
-                                f"relatorio_filtrado_terceiros_{ts}.xlsx"
+                                f"{_nome_arq}_filt_terceiros_{ts}.xlsx"
+                                if _nome_arq
+                                else f"relatorio_filtrado_terceiros_{ts}.xlsx"
                             )
                         st.session_state["export_ready"] = True
                         st.session_state["v2_etapa3_dual_export"] = True
@@ -5969,41 +7624,49 @@ def _garim_etapa3_corpo(cnpj_limpo):
                 _pode_zip = not df_g_base.empty and bool(_pares_zip)
     
             if _pode_zip and _pares_zip:
-                with st.spinner("A gerar ZIP…"):
-                    st.session_state["excel_buffer"] = None
-                    st.session_state.pop("excel_buffer_propria", None)
-                    st.session_state.pop("excel_buffer_terceiros", None)
-                    st.session_state.pop("export_excel_name_propria", None)
-                    st.session_state.pop("export_excel_name_terceiros", None)
-                    gc.collect()
-                    st.session_state["export_excel_name"] = (
-                        f"relatorio_completo_{ts}.xlsx"
-                    )
-                    _v2_limpar_zips_gerados_etapa3_no_cwd()
-                    org_all = []
-                    todos_all = []
-                    _err_zip = None
-                    for df_sl, ztag in _pares_zip:
-                        o, t, _xm, av = _v2_export_zip_etapa3(
-                            df_sl,
-                            xml_respeita_filtro=_xml_filt,
-                            df_filtrado_para_excel_bloco=(
-                                df_sl if _xml_filt else None
-                            ),
-                            excel_um_só_completo=_fmt_run.startswith("zip_tudo"),
-                            df_excel_completo=df_sl,
-                            v2_zip_org=_fmt_run.endswith("_pastas"),
-                            v2_zip_plano=_fmt_run.endswith("_raiz"),
-                            cnpj_limpo=cnpj_limpo,
-                            zip_tag=ztag,
+                _path_zip_out, _err_zip_dir = _v2_destino_zip_etapa3_para_gravar()
+                if _err_zip_dir:
+                    st.error(_err_zip_dir)
+                else:
+                    with st.spinner("A gerar ZIP…"):
+                        st.session_state["excel_buffer"] = None
+                        st.session_state.pop("excel_buffer_propria", None)
+                        st.session_state.pop("excel_buffer_terceiros", None)
+                        st.session_state.pop("export_excel_name_propria", None)
+                        st.session_state.pop("export_excel_name_terceiros", None)
+                        gc.collect()
+                        st.session_state["export_excel_name"] = (
+                            f"{_nome_arq}_relatorio_zip_{ts}.xlsx"
+                            if _nome_arq
+                            else f"relatorio_completo_{ts}.xlsx"
                         )
-                        if av and str(av).startswith("ERR:"):
-                            _err_zip = str(av)[4:].strip()
-                            break
-                        org_all.extend(o)
-                        todos_all.extend(t)
+                        org_all = []
+                        todos_all = []
+                        _err_zip = None
+                        for df_sl, ztag in _pares_zip:
+                            o, t, _xm, av, _ = _v2_export_zip_etapa3(
+                                df_sl,
+                                xml_respeita_filtro=_xml_filt,
+                                df_filtrado_para_excel_bloco=(
+                                    df_sl if _xml_filt else None
+                                ),
+                                excel_um_só_completo=_fmt_run.startswith(
+                                    "zip_tudo"
+                                ),
+                                df_excel_completo=df_sl,
+                                v2_zip_org=_fmt_run.endswith("_pastas"),
+                                v2_zip_plano=_fmt_run.endswith("_raiz"),
+                                cnpj_limpo=cnpj_limpo,
+                                zip_tag=ztag,
+                                zip_output_dir=_path_zip_out,
+                                zip_nome_ficheiro=_zip_nome_raw,
+                            )
+                            if av and str(av).startswith("ERR:"):
+                                _err_zip = str(av)[4:].strip()
+                                break
+                            org_all.extend(o)
+                            todos_all.extend(t)
                     if _err_zip:
-                        _v2_limpar_zips_gerados_etapa3_no_cwd()
                         st.warning(_err_zip)
                         st.session_state.pop("v2_export_sem_xml", None)
                         st.session_state["org_zip_parts"] = []
@@ -6073,7 +7736,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                         fp.read(),
                                         file_name=os.path.basename(part),
                                         key=f"v2_dlo_p_{_dl_k_zip[0]}",
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                         for part in _pt_pr_pre:
                             _dl_k_zip[0] += 1
@@ -6084,7 +7747,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                         fp.read(),
                                         file_name=os.path.basename(part),
                                         key=f"v2_dlt_p_{_dl_k_zip[0]}",
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                     elif "propria" in _lados_ger:
                         st.caption("Nada a descarregar deste lado.")
@@ -6098,7 +7761,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                         ),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="v2_dl_xlsx_propria",
-                        use_container_width=True,
+                        width="stretch",
                     )
         with d_dl_tc:
             with st.container(border=True):
@@ -6122,7 +7785,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                         fp.read(),
                                         file_name=os.path.basename(part),
                                         key=f"v2_dlo_t_{_dl_k_zip[0]}",
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                         for part in _pt_tc_pre:
                             _dl_k_zip[0] += 1
@@ -6133,7 +7796,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                         fp.read(),
                                         file_name=os.path.basename(part),
                                         key=f"v2_dlt_t_{_dl_k_zip[0]}",
-                                        use_container_width=True,
+                                        width="stretch",
                                     )
                     elif "terceiros" in _lados_ger:
                         st.caption("Nada a descarregar deste lado.")
@@ -6147,7 +7810,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                         ),
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="v2_dl_xlsx_terceiros",
-                        use_container_width=True,
+                        width="stretch",
                     )
     
     if st.session_state.get("export_ready"):
@@ -6182,7 +7845,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                     fp.read(),
                                     file_name=os.path.basename(part),
                                     key=f"v2_dlo_{_dl_i}",
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
                 if _parts_t:
                     for part in _parts_t:
@@ -6194,7 +7857,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                                     fp.read(),
                                     file_name=os.path.basename(part),
                                     key=f"v2_dlt_{_dl_i}",
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
             elif _xbuf or _xbp or _xbt:
                 st.caption("Ficheiros prontos abaixo.")
@@ -6208,7 +7871,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                     ),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="v2_dl_xlsx",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if _xbp:
                 st.download_button(
@@ -6220,7 +7883,7 @@ def _garim_etapa3_corpo(cnpj_limpo):
                     ),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="v2_dl_xlsx_propria_lo",
-                    use_container_width=True,
+                    width="stretch",
                 )
             if _xbt:
                 st.download_button(
@@ -6232,8 +7895,129 @@ def _garim_etapa3_corpo(cnpj_limpo):
                     ),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="v2_dl_xlsx_terceiros_lo",
-                    use_container_width=True,
+                    width="stretch",
                 )
+
+    if _is_mariana_pc_bundle():
+        st.markdown("---")
+        st.markdown("##### Pacote para **contabilidade / matriz**")
+        if "mariana_zip_save_dir" not in st.session_state:
+            st.session_state["mariana_zip_save_dir"] = ""
+        st.text_input(
+            "Pasta onde guardar o pacote ZIP (caminho completo)",
+            key="mariana_zip_save_dir",
+            help="Obrigatório antes de gerar. Caminho completo — a pasta é criada se não existir.",
+        )
+        st.text_input(
+            "Nome base do ZIP (opcional, sem .zip)",
+            key="mariana_zip_basename",
+            placeholder="Opcional",
+            help="Prefixo do nome dos ficheiros ZIP (opcional).",
+        )
+        gen_pacote_matriz = st.button(
+            "Gerar pacote ZIP (apuração / contabilidade)",
+            key="v2_btn_mariana_zip",
+            disabled=_pacote_matriz_btn_dis,
+            width="stretch",
+        )
+        if gen_pacote_matriz:
+            if df_g_base is None or df_g_base.empty:
+                st.warning("Relatório geral vazio. Conclua o garimpo antes de gerar o pacote.")
+            else:
+                _pacote_matriz_rerun = False
+                try:
+                    with st.spinner("A gerar pacote ZIP…"):
+                        _out_m, _err_m = _mariana_destino_zip_para_gravar()
+                        if _err_m:
+                            st.error(_err_m)
+                        else:
+                            st.session_state.pop("mariana_zip_parts", None)
+                            st.session_state.pop("mariana_excel_completo_path", None)
+                            _mar_bn = str(
+                                st.session_state.get("mariana_zip_basename") or ""
+                            ).strip()
+                            parts_m, _xm_m, av_m, excel_m = _v2_export_zip_mariana(
+                                df_g_base,
+                                cnpj_limpo,
+                                zip_output_dir=_out_m,
+                                zip_file_stem=_mar_bn if _mar_bn else None,
+                            )
+                            if av_m and str(av_m).startswith("ERR:"):
+                                st.warning(str(av_m)[4:].strip())
+                                st.session_state["mariana_export_ready"] = False
+                                st.session_state.pop("mariana_export_sig", None)
+                                st.session_state.pop("mariana_sem_xml_msg", None)
+                                st.session_state.pop("mariana_excel_completo_path", None)
+                            elif not parts_m and not excel_m:
+                                st.warning(av_m or "Nada a exportar.")
+                                st.session_state["mariana_export_ready"] = False
+                                st.session_state.pop("mariana_export_sig", None)
+                                st.session_state.pop("mariana_sem_xml_msg", None)
+                                st.session_state.pop("mariana_excel_completo_path", None)
+                            else:
+                                st.session_state["mariana_zip_parts"] = parts_m or []
+                                if excel_m:
+                                    st.session_state["mariana_excel_completo_path"] = (
+                                        excel_m
+                                    )
+                                else:
+                                    st.session_state.pop(
+                                        "mariana_excel_completo_path", None
+                                    )
+                                st.session_state["mariana_export_ready"] = True
+                                st.session_state["mariana_export_sig"] = (
+                                    v2_assinatura_pacote_matriz_sessao(df_g_base)
+                                )
+                                if av_m:
+                                    st.session_state["mariana_sem_xml_msg"] = av_m
+                                else:
+                                    st.session_state.pop("mariana_sem_xml_msg", None)
+                                _pacote_matriz_rerun = True
+                        gc.collect()
+                except Exception as ex:
+                    if _erro_sem_espaco_disco(ex):
+                        st.error(
+                            "**Sem espaço em disco** ao gerar o Excel do pacote (errno 28). "
+                            "Liberte espaço em **C:** (pasta Temp do utilizador) e no disco onde grava o pacote; "
+                            "ou defina **TEMP** e **TMP** para uma pasta noutro disco (ex.: `D:\\Temp`) e reinicie o Garimpeiro."
+                        )
+                    else:
+                        st.error(f"**Erro ao gerar o pacote:** {ex}")
+                        st.exception(ex)
+                    st.session_state["mariana_export_ready"] = False
+                    st.session_state.pop("mariana_export_sig", None)
+                    st.session_state.pop("mariana_sem_xml_msg", None)
+                    st.session_state.pop("mariana_excel_completo_path", None)
+                if _pacote_matriz_rerun:
+                    st.rerun()
+        if st.session_state.get("mariana_export_ready"):
+            _mmsg = st.session_state.get("mariana_sem_xml_msg")
+            if _mmsg:
+                st.warning(_mmsg)
+            _mxp = st.session_state.get("mariana_excel_completo_path")
+            if _mxp and os.path.isfile(_mxp):
+                with open(_mxp, "rb") as _xfe:
+                    st.download_button(
+                        "Excel completo (sem Painel Fiscal) — mesmo ficheiro da pasta",
+                        _xfe.read(),
+                        file_name=os.path.basename(_mxp),
+                        key="v2_dl_mariana_excel_completo",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        width="stretch",
+                    )
+            st.markdown("**Descarregar pacote (ZIP)**")
+            for _i_m, part_m in enumerate(
+                st.session_state.get("mariana_zip_parts") or []
+            ):
+                if os.path.exists(part_m):
+                    with open(part_m, "rb") as fm:
+                        st.download_button(
+                            f"Contabilidade · {rotulo_download_zip_parte(part_m)}",
+                            fm.read(),
+                            file_name=os.path.basename(part_m),
+                            key=f"v2_dl_mariana_{_i_m}",
+                            width="stretch",
+                        )
 
 
 def _garim_etapa3_fragment_entry():
@@ -6242,51 +8026,77 @@ def _garim_etapa3_fragment_entry():
     _garim_etapa3_corpo(_cx)
 
 
-if st.session_state['confirmado']:
-    if not st.session_state['garimpo_ok']:
-        st.markdown("##### 📎 Documentos XML / ZIP para ler")
+if st.session_state.get("confirmado"):
+    if not st.session_state.get("garimpo_ok"):
+        st.markdown(
+            f'<h5>{_garim_emoji("📎")} Documentos XML / ZIP para ler</h5>',
+            unsafe_allow_html=True,
+        )
         st.caption(
             "Carregue abaixo os ficheiros do lote; depois use **Iniciar grande garimpo** para ler e montar o relatório."
         )
         uploaded_files = st.file_uploader("📂 Escolha os XML e/ou ZIP (suporta grandes volumes):", accept_multiple_files=True)
         if uploaded_files and st.button("🚀 INICIAR GRANDE GARIMPO"):
-            limpar_arquivos_temp() 
-            os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
-            
+            limpar_arquivos_temp()
+            _mem_lote = {}
+            if not _garimpo_analise_sem_pasta_local_projeto():
+                os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
+
             lote_dict = {}
             progresso_bar = st.progress(0)
             status_text = st.empty()
             total_arquivos = len(uploaded_files)
-            
-            with st.status("⛏️ Minerando e salvando fisicamente...", expanded=True) as status_box:
-                
-                # 1. Salva uploads fisicamente no disco para evitar estouro de RAM
+
+            _lbl_status = (
+                "⛏️ A carregar o lote em memória (sem pasta no projeto)…"
+                if _garimpo_analise_sem_pasta_local_projeto()
+                else "⛏️ Minerando e salvando fisicamente…"
+            )
+            with st.status(_lbl_status, expanded=True) as status_box:
+
                 for i, f in enumerate(uploaded_files):
-                    caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, f.name)
-                    with open(caminho_salvo, "wb") as out_f:
-                        out_f.write(f.read())
+                    raw = f.getvalue()
+                    key = _garimpo_nome_chave_upload(i, getattr(f, "name", None))
+                    if _garimpo_analise_sem_pasta_local_projeto():
+                        _mem_lote[key] = raw
+                    else:
+                        caminho_salvo = os.path.join(TEMP_UPLOADS_DIR, key)
+                        with open(caminho_salvo, "wb") as out_f:
+                            out_f.write(raw)
+
+                if _garimpo_analise_sem_pasta_local_projeto() and _mem_lote:
+                    try:
+                        st.session_state[SESSION_KEY_FONTES_XML_MEMORIA] = _mem_lote
+                    except Exception:
+                        os.makedirs(TEMP_UPLOADS_DIR, exist_ok=True)
+                        for _mk, _mraw in _mem_lote.items():
+                            with open(os.path.join(TEMP_UPLOADS_DIR, _mk), "wb") as out_f:
+                                out_f.write(_mraw)
                 
-                # 2. Lê do disco e monta as tabelas em tempo real
-                lista_salvos = os.listdir(TEMP_UPLOADS_DIR)
+                lista_salvos = _lista_nomes_fontes_xml_garimpo()
                 total_salvos = len(lista_salvos)
                 
                 for i, f_name in enumerate(lista_salvos):
                     if i % 50 == 0: 
                         gc.collect()
                         
-                    progresso_bar.progress((i + 1) / total_salvos)
+                    progresso_bar.progress((i + 1) / max(total_salvos, 1))
                     status_text.text(f"⛏️ Lendo conteúdo: {f_name}")
                     
-                    caminho_leitura = os.path.join(TEMP_UPLOADS_DIR, f_name)
                     try:
-                        with open(caminho_leitura, "rb") as file_obj:
+                        with _abrir_fonte_xml_garimpo_stream(f_name) as file_obj:
                             todos_xmls = extrair_recursivo(file_obj, f_name)
                             for name, xml_data in todos_xmls:
                                 res, is_p = identify_xml_info(xml_data, cnpj_limpo, name)
                                 if res:
                                     key = res["Chave"]
                                     if key in lote_dict:
-                                        if res["Status"] in ["CANCELADOS", "INUTILIZADOS"]: 
+                                        if res["Status"] in [
+                                            "CANCELADOS",
+                                            "INUTILIZADOS",
+                                            "DENEGADOS",
+                                            "REJEITADOS",
+                                        ]:
                                             lote_dict[key] = (res, is_p)
                                     else:
                                         lote_dict[key] = (res, is_p)
@@ -6304,6 +8114,8 @@ if st.session_state['confirmado']:
             canc_list = []
             inut_list = []
             aut_list = []
+            deneg_list = []
+            rej_list = []
             geral_list = []
             
             for k, (res, is_p) in lote_dict.items():
@@ -6360,7 +8172,11 @@ if st.session_state['confirmado']:
                                 ):
                                     audit_map[sk]["nums_buraco"].add(n)
                     else:
-                        if res["Número"] > 0:
+                        if res["Status"] == "DENEGADOS":
+                            deneg_list.append(registro_base)
+                        elif res["Status"] == "REJEITADOS":
+                            rej_list.append(registro_base)
+                        elif res["Número"] > 0:
                             if res["Status"] == "CANCELADOS":
                                 canc_list.append(registro_base)
                             elif res["Status"] == "NORMAIS":
@@ -6410,11 +8226,15 @@ if st.session_state['confirmado']:
                 'df_canceladas': pd.DataFrame(canc_list), 
                 'df_inutilizadas': pd.DataFrame(inut_list), 
                 'df_autorizadas': pd.DataFrame(aut_list), 
+                'df_denegadas': pd.DataFrame(deneg_list),
+                'df_rejeitadas': pd.DataFrame(rej_list),
                 'df_geral': pd.DataFrame(geral_list),
                 'st_counts': {
                     "CANCELADOS": len(canc_list), 
                     "INUTILIZADOS": len(inut_list), 
-                    "AUTORIZADAS": len(aut_list)
+                    "AUTORIZADAS": len(aut_list),
+                    "DENEGADOS": len(deneg_list),
+                    "REJEITADOS": len(rej_list),
                 }, 
                 'garimpo_ok': True, 
                 'export_ready': False,
@@ -6427,7 +8247,7 @@ if st.session_state['confirmado']:
         _gcm, _gcr = st.columns([2.95, 1.55], gap="large")
         with _gcm:
             st.markdown(
-                '<h3 class="garim-sec">📤 Emissões próprias — total por tipo</h3>',
+                f'<h3 class="garim-sec">{_garim_emoji("📤")} Emissões próprias — total por tipo</h3>',
                 unsafe_allow_html=True,
             )
             _df_rp = st.session_state.get("df_resumo")
@@ -6440,12 +8260,13 @@ if st.session_state['confirmado']:
             )
             st.dataframe(
                 _df_resumo_para_exibicao_sem_separador_milhar(st.session_state["df_resumo"]),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
             st.markdown(
-                '<h3 class="garim-sec">📥 Terceiros — total por tipo</h3>', unsafe_allow_html=True
+                f'<h3 class="garim-sec">{_garim_emoji("📥")} Terceiros — total por tipo</h3>',
+                unsafe_allow_html=True,
             )
             _rels_terc = [
                 r
@@ -6465,202 +8286,485 @@ if st.session_state['confirmado']:
                 )
                 st.dataframe(
                     _df_terceiros_por_tipo_para_exibicao_sem_separador_milhar(_df_terc),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
             st.markdown("---")
             st.markdown(
-                '<h3 class="garim-sec">📊 Relatório da leitura</h3>', unsafe_allow_html=True
+                f'<h3 class="garim-sec">{_garim_emoji("📊")} Relatório da leitura</h3>',
+                unsafe_allow_html=True,
             )
             df_fal = st.session_state["df_faltantes"]
             df_inu = st.session_state["df_inutilizadas"]
             df_can = st.session_state["df_canceladas"]
             df_aut = st.session_state["df_autorizadas"]
-            df_ger = st.session_state["df_geral"]
-            _n_bur = len(df_fal) if not df_fal.empty else 0
-            _n_inu = len(df_inu) if not df_inu.empty else 0
-            _n_can = len(df_can) if not df_can.empty else 0
-            _n_aut = len(df_aut) if not df_aut.empty else 0
-            _n_ger = len(df_ger) if not df_ger.empty else 0
-            tab_bur, tab_inut, tab_canc, tab_aut, tab_geral = st.tabs(
-                [
-                    f"⚠️ Buracos ({_n_bur})",
-                    f"🚫 Inutilizadas ({_n_inu})",
-                    f"❌ Canceladas ({_n_can})",
-                    f"✅ Autorizadas ({_n_aut})",
-                    f"📋 Relatório geral ({_n_ger})",
-                ]
-            )
+            df_den = st.session_state.get("df_denegadas")
+            if not isinstance(df_den, pd.DataFrame):
+                df_den = pd.DataFrame()
+            df_rej = st.session_state.get("df_rejeitadas")
+            if not isinstance(df_rej, pd.DataFrame):
+                df_rej = pd.DataFrame()
+            df_ger = st.session_state.get("df_geral")
+            if not isinstance(df_ger, pd.DataFrame):
+                df_ger = pd.DataFrame()
+            if df_ger.empty or "Origem" not in df_ger.columns:
+                df_ger_p = df_ger.copy()
+            else:
+                df_ger_p = df_ger.loc[_mask_emissao_propria_df(df_ger)].reset_index(drop=True)
+            df_ger_t = _df_apenas_terceiros(df_ger)
+            _folhas_t = _folhas_detalhe_terceiros_do_subset(df_ger)
 
-            with tab_bur:
-                if not df_fal.empty:
-                    st.caption(
-                        "Filtre e ordene **no cabeçalho de cada coluna** (menu do filtro no título). "
-                        "**Excel** e **ZIP XML** usam só as linhas visíveis na grelha."
-                    )
-                    df_b_f = _relatorio_leitura_tabela_aggrid(df_fal, "aggrid_rep_bur", height=420)
-                    st.caption(f"**{len(df_b_f)}** linha(s) na vista (total na aba: {len(df_fal)}).")
-                    xlsx_b = _excel_bytes_memo("rep_bur", df_b_f, "Buracos")
-                    if xlsx_b:
-                        st.download_button(
-                            "Baixar Excel (vista filtrada)",
-                            data=xlsx_b,
-                            file_name="relatorio_buracos.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_rep_buracos_xlsx",
-                            use_container_width=True,
+            with st.expander(
+                "🏢 Emissão própria — buracos, inutilizadas, canceladas, autorizadas, denegadas, rejeitadas e relatório geral",
+                expanded=True,
+            ):
+                st.caption(
+                    "Só linhas da **sua empresa** (emitente = CNPJ da barra lateral). Use a setinha para recolher este bloco."
+                )
+                _n_bur = len(df_fal) if not df_fal.empty else 0
+                _n_inu = len(df_inu) if not df_inu.empty else 0
+                _n_can = len(df_can) if not df_can.empty else 0
+                _n_aut = len(df_aut) if not df_aut.empty else 0
+                _n_den = len(df_den) if not df_den.empty else 0
+                _n_rej = len(df_rej) if not df_rej.empty else 0
+                _n_ger_p = len(df_ger_p) if not df_ger_p.empty else 0
+                tab_bur, tab_inut, tab_canc, tab_aut, tab_den, tab_rej, tab_geral = st.tabs(
+                    [
+                        f"⚠️ Buracos ({_n_bur})",
+                        f"🚫 Inutilizadas ({_n_inu})",
+                        f"❌ Canceladas ({_n_can})",
+                        f"✅ Autorizadas ({_n_aut})",
+                        f"⛔ Denegadas ({_n_den})",
+                        f"📛 Rejeitadas ({_n_rej})",
+                        f"📋 Relatório geral ({_n_ger_p})",
+                    ]
+                )
+
+                with tab_bur:
+                    if not df_fal.empty:
+                        if {"Tipo", "Série"}.issubset(df_fal.columns):
+                            _df_rb = (
+                                df_fal.groupby(["Tipo", "Série"], dropna=False)
+                                .size()
+                                .reset_index(name="Qtd. buracos")
+                                .sort_values(["Tipo", "Série"], kind="stable")
+                                .reset_index(drop=True)
+                            )
+                            _df_rb["Qtd. buracos"] = _df_rb["Qtd. buracos"].map(
+                                lambda x: str(int(x)) if pd.notna(x) else ""
+                            )
+                            st.markdown("**Resumo nos buracos** — quantidade de números em falta por modelo e série")
+                            st.dataframe(
+                                _df_rb,
+                                width="stretch",
+                                hide_index=True,
+                                height=min(260, 44 + 28 * max(1, len(_df_rb))),
+                            )
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna** (menu do filtro no título). "
+                            "**Excel** e **ZIP XML** usam só as linhas visíveis na grelha."
                         )
-                    _painel_zip_xml_filtrado("rep_bur", df_b_f, cnpj_limpo, df_ger)
-                else:
-                    st.info("✅ Tudo em ordem.")
-                with st.expander(
-                    "Como funcionam os buracos e a referência na lateral (último nº / mês)",
-                    expanded=False,
-                ):
-                    st.caption(
-                        "Só **emissão própria**. O **Resumo por série** e esta lista de **buracos** incluem **NF-e**, **NFC-e** e **NFS-e** em que o emitente é o **CNPJ da barra lateral** (outros modelos não entram nestes quadros). Aqui: **números em falta** na sequência. "
-                        "Com **Guardar referência** na lateral (mês + último nº por série), cada série indicada ignora XMLs de **meses antes** desse mês e "
-                        "lista buracos **a partir do último nº + 1** — evita buraco gigante se aparecer uma nota fora da ordem (ex. janeiro no meio de março). "
-                        "Séries **não** listadas na referência: buracos em **todo** o intervalo dos XMLs. **Sem** referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme). "
-                        "Na **Etapa 3** escolhe o que exportar."
-                    )
-
-            with tab_inut:
-                if not df_inu.empty:
-                    st.caption(
-                        "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
-                    )
-                    df_i_f = _relatorio_leitura_tabela_aggrid(df_inu, "aggrid_rep_inu", height=420)
-                    st.caption(f"**{len(df_i_f)}** linha(s) na vista (total: {len(df_inu)}).")
-                    xlsx_i = _excel_bytes_memo("rep_inu", df_i_f, "Inutilizadas")
-                    if xlsx_i:
-                        st.download_button(
-                            "Baixar Excel (vista filtrada)",
-                            data=xlsx_i,
-                            file_name="relatorio_inutilizadas.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_rep_inut_xlsx",
-                            use_container_width=True,
-                        )
-                    _painel_zip_xml_filtrado("rep_inu", df_i_f, cnpj_limpo, df_ger)
-                else:
-                    st.info("ℹ️ Nenhuma nota.")
-
-            with tab_canc:
-                if not df_can.empty:
-                    st.caption(
-                        "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
-                    )
-                    df_c_f = _relatorio_leitura_tabela_aggrid(df_can, "aggrid_rep_canc", height=420)
-                    st.caption(f"**{len(df_c_f)}** linha(s) na vista (total: {len(df_can)}).")
-                    xlsx_c = _excel_bytes_memo("rep_canc", df_c_f, "Canceladas")
-                    if xlsx_c:
-                        st.download_button(
-                            "Baixar Excel (vista filtrada)",
-                            data=xlsx_c,
-                            file_name="relatorio_canceladas.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_rep_canc_xlsx",
-                            use_container_width=True,
-                        )
-                    _painel_zip_xml_filtrado("rep_canc", df_c_f, cnpj_limpo, df_ger)
-                else:
-                    st.info("ℹ️ Nenhuma nota.")
-
-            with tab_aut:
-                if not df_aut.empty:
-                    st.caption(
-                        "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
-                    )
-                    df_a_f = _relatorio_leitura_tabela_aggrid(df_aut, "aggrid_rep_aut", height=420)
-                    st.caption(f"**{len(df_a_f)}** linha(s) na vista (total: {len(df_aut)}).")
-                    xlsx_a = _excel_bytes_memo("rep_aut", df_a_f, "Autorizadas")
-                    if xlsx_a:
-                        st.download_button(
-                            "Baixar Excel (vista filtrada)",
-                            data=xlsx_a,
-                            file_name="relatorio_autorizadas.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_rep_aut_xlsx",
-                            use_container_width=True,
-                        )
-                    _painel_zip_xml_filtrado("rep_aut", df_a_f, cnpj_limpo, df_ger)
-                else:
-                    st.info("ℹ️ Nenhuma nota autorizada na amostra.")
-
-            with tab_geral:
-                if not df_ger.empty:
-                    st.caption(
-                        "Filtre e ordene **no cabeçalho de cada coluna**. Com **todas** as linhas visíveis, o **Excel** pode trazer o livro completo + dashboard; "
-                        "com filtro na grelha, só a folha **Filtrado**."
-                    )
-                    df_g_f = _relatorio_leitura_tabela_aggrid(df_ger, "aggrid_rep_ger", height=480)
-                    _sig_f = _df_sig_hash_memo(df_g_f)
-                    _sig_full = _df_sig_hash_memo(df_ger)
-                    _full_vista = _sig_f == _sig_full and len(df_g_f) == len(df_ger)
-                    st.caption(f"**{len(df_g_f)}** linha(s) na vista (total: {len(df_ger)}).")
-                    if _full_vista:
-                        sk_wb = "_xlsx_mem_geral_workbook"
-                        prev_wb = st.session_state.get(sk_wb)
-                        if isinstance(prev_wb, tuple) and prev_wb[0] == _sig_full:
-                            xlsx_g = prev_wb[1]
-                        else:
-                            xlsx_g = excel_relatorio_geral_com_dashboard_bytes(df_ger)
-                            if xlsx_g:
-                                st.session_state[sk_wb] = (_sig_full, xlsx_g)
+                        df_b_f = _relatorio_leitura_tabela_aggrid(df_fal, "aggrid_rep_bur", height=420)
+                        st.caption(f"**{len(df_b_f)}** linha(s) na vista (total na aba: {len(df_fal)}).")
+                        xlsx_b = _excel_bytes_memo("rep_bur", df_b_f, "Buracos")
+                        if xlsx_b:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_b,
+                                file_name="relatorio_buracos.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_buracos_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_bur", df_b_f, cnpj_limpo, df_ger)
                     else:
-                        xlsx_g = _excel_bytes_memo("rep_ger_filt", df_g_f, "Filtrado")
-                    if xlsx_g:
-                        st.download_button(
-                            "Baixar Excel (completo + dashboard)" if _full_vista else "Baixar Excel (só filtrado)",
-                            data=xlsx_g,
-                            file_name="relatorio_geral.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_rep_geral_xlsx",
-                            use_container_width=True,
+                        st.info("✅ Tudo em ordem.")
+                    # <details> em vez de st.expander: o Streamlit não permite expander dentro de expander.
+                    st.markdown(
+                        """
+<details class="garim-detalhe-ajuda">
+<summary><strong>Como funcionam os buracos e a referência na lateral (último nº / mês)</strong></summary>
+<div style="font-size:0.9rem;line-height:1.55;color:#444;padding:0.45rem 0 0.15rem 0;">
+<p style="margin:0;">Só <b>emissão própria</b>. O <b>Resumo por série</b> e esta lista de <b>buracos</b> incluem <b>NF-e</b>, <b>NFC-e</b> e <b>NFS-e</b> em que o emitente é o <b>CNPJ da barra lateral</b> (outros modelos não entram nestes quadros). Aqui: <b>números em falta</b> na sequência.
+Com <b>Guardar referência</b> na lateral (mês + último nº por série), cada série indicada ignora XMLs de <b>meses antes</b> desse mês e
+lista buracos <b>a partir do último nº + 1</b> — evita buraco gigante se aparecer uma nota fora da ordem (ex. janeiro no meio de março).
+Séries <b>não</b> listadas na referência: buracos em <b>todo</b> o intervalo dos XMLs. <b>Sem</b> referência guardada: mesmo comportamento antigo (intervalo completo; pode ser enorme).
+Na <b>Etapa 3</b> escolhe o que exportar.</p>
+</div>
+</details>
+""",
+                        unsafe_allow_html=True,
+                    )
+
+                with tab_inut:
+                    if not df_inu.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
                         )
-                    _painel_zip_xml_filtrado("rep_ger", df_g_f, cnpj_limpo, df_ger)
-                else:
-                    st.info("Relatório geral vazio.")
+                        df_i_f = _relatorio_leitura_tabela_aggrid(df_inu, "aggrid_rep_inu", height=420)
+                        st.caption(f"**{len(df_i_f)}** linha(s) na vista (total: {len(df_inu)}).")
+                        xlsx_i = _excel_bytes_memo("rep_inu", df_i_f, "Inutilizadas")
+                        if xlsx_i:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_i,
+                                file_name="relatorio_inutilizadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_inut_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_inu", df_i_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma nota.")
+
+                with tab_canc:
+                    if not df_can.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_c_f = _relatorio_leitura_tabela_aggrid(df_can, "aggrid_rep_canc", height=420)
+                        st.caption(f"**{len(df_c_f)}** linha(s) na vista (total: {len(df_can)}).")
+                        xlsx_c = _excel_bytes_memo("rep_canc", df_c_f, "Canceladas")
+                        if xlsx_c:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_c,
+                                file_name="relatorio_canceladas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_canc_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_canc", df_c_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma nota.")
+
+                with tab_aut:
+                    if not df_aut.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_a_f = _relatorio_leitura_tabela_aggrid(df_aut, "aggrid_rep_aut", height=420)
+                        st.caption(f"**{len(df_a_f)}** linha(s) na vista (total: {len(df_aut)}).")
+                        xlsx_a = _excel_bytes_memo("rep_aut", df_a_f, "Autorizadas")
+                        if xlsx_a:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_a,
+                                file_name="relatorio_autorizadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_aut_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_aut", df_a_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma nota autorizada na amostra.")
+
+                with tab_den:
+                    if not df_den.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_d_f = _relatorio_leitura_tabela_aggrid(df_den, "aggrid_rep_den", height=420)
+                        st.caption(f"**{len(df_d_f)}** linha(s) na vista (total: {len(df_den)}).")
+                        xlsx_d = _excel_bytes_memo("rep_den", df_d_f, "Denegadas")
+                        if xlsx_d:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_d,
+                                file_name="relatorio_denegadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_den_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_den", df_d_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma denegada neste lote.")
+
+                with tab_rej:
+                    if not df_rej.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_r_f = _relatorio_leitura_tabela_aggrid(df_rej, "aggrid_rep_rej", height=420)
+                        st.caption(f"**{len(df_r_f)}** linha(s) na vista (total: {len(df_rej)}).")
+                        xlsx_r = _excel_bytes_memo("rep_rej", df_r_f, "Rejeitadas")
+                        if xlsx_r:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_r,
+                                file_name="relatorio_rejeitadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_rej_xlsx",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_rej", df_r_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma rejeitada neste lote.")
+
+                with tab_geral:
+                    if not df_ger_p.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. Com **todas** as linhas visíveis, o **Excel** pode trazer o livro completo + dashboard "
+                            "(folhas alinhadas a estas abas, **só emissão própria** no «Geral»); com filtro na grelha, só a folha **Filtrado**."
+                        )
+                        df_g_f = _relatorio_leitura_tabela_aggrid(df_ger_p, "aggrid_rep_ger", height=480)
+                        _sig_f = _df_sig_hash_memo(df_g_f)
+                        _sig_full = _df_sig_hash_memo(df_ger_p)
+                        _full_vista = _sig_f == _sig_full and len(df_g_f) == len(df_ger_p)
+                        st.caption(f"**{len(df_g_f)}** linha(s) na vista (total: {len(df_ger_p)}).")
+                        if _full_vista:
+                            sk_wb = "_xlsx_mem_geral_workbook"
+                            prev_wb = st.session_state.get(sk_wb)
+                            if isinstance(prev_wb, tuple) and prev_wb[0] == _sig_full:
+                                xlsx_g = prev_wb[1]
+                            else:
+                                xlsx_g = excel_relatorio_geral_com_dashboard_bytes(df_ger_p)
+                                if xlsx_g:
+                                    st.session_state[sk_wb] = (_sig_full, xlsx_g)
+                        else:
+                            xlsx_g = _excel_bytes_memo("rep_ger_filt", df_g_f, "Filtrado")
+                        if xlsx_g:
+                            st.download_button(
+                                "Baixar Excel (completo + dashboard)" if _full_vista else "Baixar Excel (só filtrado)",
+                                data=xlsx_g,
+                                file_name="relatorio_geral.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_geral_xlsx",
+                                width="stretch",
+                            )
+                        elif _full_vista:
+                            st.warning(_msg_sem_espaco_disco_garimpeiro())
+                        _painel_zip_xml_filtrado("rep_ger", df_g_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("Sem linhas de emissão própria no relatório geral.")
+
+            with st.expander(
+                "🤝 Terceiros — XML recebidos (canceladas, autorizadas, denegadas, rejeitadas e relatório geral)",
+                expanded=True,
+            ):
+                st.caption(
+                    "Só linhas **recebidas de terceiros**. Buracos e inutilizadas não se aplicam aqui (só **emissão própria**, no bloco acima). Use a setinha para recolher."
+                )
+                _tca = _folhas_t["df_can"]
+                _tau = _folhas_t["df_aut"]
+                _tde = _folhas_t["df_den"]
+                _tre = _folhas_t["df_rej"]
+                _n_ger_t = len(df_ger_t) if not df_ger_t.empty else 0
+                tab_canc_t, tab_aut_t, tab_den_t, tab_rej_t, tab_ger_t = st.tabs(
+                    [
+                        f"❌ Canceladas ({len(_tca) if not _tca.empty else 0})",
+                        f"✅ Autorizadas ({len(_tau) if not _tau.empty else 0})",
+                        f"⛔ Denegadas ({len(_tde) if not _tde.empty else 0})",
+                        f"📛 Rejeitadas ({len(_tre) if not _tre.empty else 0})",
+                        f"📋 Relatório geral ({_n_ger_t})",
+                    ]
+                )
+
+                with tab_canc_t:
+                    if not _tca.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_c_ft = _relatorio_leitura_tabela_aggrid(_tca, "aggrid_rep_canc_t", height=420)
+                        st.caption(f"**{len(df_c_ft)}** linha(s) na vista (total: {len(_tca)}).")
+                        xlsx_ct = _excel_bytes_memo("rep_canc_t", df_c_ft, "Canceladas")
+                        if xlsx_ct:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_ct,
+                                file_name="relatorio_terceiros_canceladas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_canc_xlsx_t",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_canc_t", df_c_ft, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma cancelada de terceiros.")
+
+                with tab_aut_t:
+                    if not _tau.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_a_ft = _relatorio_leitura_tabela_aggrid(_tau, "aggrid_rep_aut_t", height=420)
+                        st.caption(f"**{len(df_a_ft)}** linha(s) na vista (total: {len(_tau)}).")
+                        xlsx_at = _excel_bytes_memo("rep_aut_t", df_a_ft, "Autorizadas")
+                        if xlsx_at:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_at,
+                                file_name="relatorio_terceiros_autorizadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_aut_xlsx_t",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_aut_t", df_a_ft, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma autorizada (normal) de terceiros na amostra.")
+
+                with tab_den_t:
+                    if not _tde.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_d_ft = _relatorio_leitura_tabela_aggrid(_tde, "aggrid_rep_den_t", height=420)
+                        st.caption(f"**{len(df_d_ft)}** linha(s) na vista (total: {len(_tde)}).")
+                        xlsx_dt = _excel_bytes_memo("rep_den_t", df_d_ft, "Denegadas")
+                        if xlsx_dt:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_dt,
+                                file_name="relatorio_terceiros_denegadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_den_xlsx_t",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_den_t", df_d_ft, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma denegada de terceiros.")
+
+                with tab_rej_t:
+                    if not _tre.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. **Excel** e **ZIP XML** — só linhas visíveis."
+                        )
+                        df_r_ft = _relatorio_leitura_tabela_aggrid(_tre, "aggrid_rep_rej_t", height=420)
+                        st.caption(f"**{len(df_r_ft)}** linha(s) na vista (total: {len(_tre)}).")
+                        xlsx_rt = _excel_bytes_memo("rep_rej_t", df_r_ft, "Rejeitadas")
+                        if xlsx_rt:
+                            st.download_button(
+                                "Baixar Excel (vista filtrada)",
+                                data=xlsx_rt,
+                                file_name="relatorio_terceiros_rejeitadas.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_rej_xlsx_t",
+                                width="stretch",
+                            )
+                        _painel_zip_xml_filtrado("rep_rej_t", df_r_ft, cnpj_limpo, df_ger)
+                    else:
+                        st.info("ℹ️ Nenhuma rejeitada de terceiros.")
+
+                with tab_ger_t:
+                    if not df_ger_t.empty:
+                        st.caption(
+                            "Filtre e ordene **no cabeçalho de cada coluna**. Com **todas** as linhas visíveis, o **Excel** traz livro + dashboard com folhas **só terceiros**; "
+                            "com filtro na grelha, só a folha **Filtrado**."
+                        )
+                        df_gt_f = _relatorio_leitura_tabela_aggrid(df_ger_t, "aggrid_rep_ger_t", height=480)
+                        _sig_ft = _df_sig_hash_memo(df_gt_f)
+                        _sig_full_t = _df_sig_hash_memo(df_ger_t)
+                        _full_vista_t = _sig_ft == _sig_full_t and len(df_gt_f) == len(df_ger_t)
+                        st.caption(f"**{len(df_gt_f)}** linha(s) na vista (total: {len(df_ger_t)}).")
+                        if _full_vista_t:
+                            sk_wb_t = "_xlsx_mem_geral_workbook_terc"
+                            prev_wb_t = st.session_state.get(sk_wb_t)
+                            _fd_t = _folhas_detalhe_terceiros_do_subset(df_ger)
+                            if isinstance(prev_wb_t, tuple) and prev_wb_t[0] == _sig_full_t:
+                                xlsx_gt = prev_wb_t[1]
+                            else:
+                                xlsx_gt = excel_relatorio_geral_com_dashboard_bytes(
+                                    df_ger_t, folhas_detalhe=_fd_t
+                                )
+                                if xlsx_gt:
+                                    st.session_state[sk_wb_t] = (_sig_full_t, xlsx_gt)
+                        else:
+                            xlsx_gt = _excel_bytes_memo("rep_ger_filt_t", df_gt_f, "Filtrado")
+                        if xlsx_gt:
+                            st.download_button(
+                                "Baixar Excel (completo + dashboard)" if _full_vista_t else "Baixar Excel (só filtrado)",
+                                data=xlsx_gt,
+                                file_name="relatorio_geral_terceiros.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_rep_geral_xlsx_t",
+                                width="stretch",
+                            )
+                        elif _full_vista_t:
+                            st.warning(_msg_sem_espaco_disco_garimpeiro())
+                        _painel_zip_xml_filtrado("rep_ger_t", df_gt_f, cnpj_limpo, df_ger)
+                    else:
+                        st.info("Nenhum documento de terceiros no relatório geral.")
 
         with _gcr:
             with st.container(border=True):
-                st.markdown("##### 📤 Uploads e validação")
+                st.markdown(
+                    f'<h5>{_garim_emoji("📤")} Uploads e validação</h5>',
+                    unsafe_allow_html=True,
+                )
                 st.caption(
                     "Configure **abaixo** os ficheiros, **inutilizações** e **canceladas** manuais; **um único botão** em baixo (**Processar Dados**) grava, aplica e recalcula tudo."
                 )
                 # MÓDULO: DOCUMENTOS XML/ZIP (carga incremental)
                 # =====================================================================
-                st.markdown("##### 📎 Documentos XML / ZIP para ler")
+                st.markdown(
+                    f'<h5>{_garim_emoji("📎")} Documentos XML / ZIP para ler</h5>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander("➕ Incluir mais ficheiros no lote (sem resetar)", expanded=False):
                     extra_files = st.file_uploader(
                         "Escolha os XML ou ZIP a acrescentar ao lote atual:",
                         accept_multiple_files=True,
                         key="extra_files",
                     )
+                    _garimpo_absorver_uploads_extra_no_lote(extra_files)
                     st.caption(
-                        "Os ficheiros escolhidos são **gravados na pasta de uploads** ao carregar em **Processar Dados**; em seguida o relatório é **relido a partir do disco**."
+                        "Os ficheiros passam **para o lote ao serem escolhidos** (e de novo em **Processar Dados** se ainda estiverem no campo); o relatório é recalculado a partir do lote completo."
                     )
 
                 # =====================================================================
                 # MÓDULO: AUTENTICIDADE — mesmo nível visual que Inutilizadas
                 # =====================================================================
-                st.markdown("##### 🔐 Validação de autenticidade")
+                st.markdown(
+                    f'<h5>{_garim_emoji("🔐")} Validação de autenticidade</h5>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander(
                     "Relatório exportado da Sefaz para confrontar com o lote de XML (opcional).",
                     expanded=False,
                 ):
                     st.caption(
-                        "Use o Excel ou relatório que o **portal da Sefaz** disponibiliza (autorizadas / emitidas, conforme o caso). "
-                        "O objetivo é cruzar essa lista com o que foi lido dos **XML** e assinalar **divergências** no painel fiscal (Excel/PDF). "
-                        "Quando o upload e o processamento estiverem ativos nesta app, o passo integra-se no **Processar Dados** como as outras secções."
+                        "Use o Excel ou CSV que o **portal da Sefaz** disponibiliza (lista de **autorizadas** / emitidas). "
+                        "Pode anexar **vários ficheiros** (ex.: uma planilha por série ou por período) — as linhas são **juntadas** antes da comparação. "
+                        "A app compara **Modelo**, **Série** e **Nota** com as NF **autorizadas** (NORMAIS) de **emissão própria** nos XML. "
+                        "As **divergências** aparecem aqui em baixo, no **Excel** do relatório geral e no **PDF** do dashboard. "
+                        "Depois de anexar, carregue em **Processar Dados** (pode ser só isto ou juntamente com XML / inutilizações)."
                     )
+                    st.file_uploader(
+                        "Anexar relatório(is) Sefaz (.csv, .xlsx ou .xls)",
+                        type=["csv", "xlsx", "xls"],
+                        accept_multiple_files=True,
+                        key="autent_sefaz_up",
+                    )
+                    st.caption(
+                        "Colunas reconhecidas (cabeçalho), iguais em todos os ficheiros: **Modelo** (55, 65, 57, 67, 58 ou NF-e…), **Série**, **Nota** / Número — "
+                        "o mesmo critério da planilha de inutilizadas. Linhas repetidas em ficheiros diferentes contam uma vez na comparação."
+                    )
+                    _bytes_m_aut = bytes_modelo_planilha_inutil_sem_xml_xlsx()
+                    if _bytes_m_aut:
+                        st.download_button(
+                            "Baixar modelo de colunas (Excel)",
+                            data=_bytes_m_aut,
+                            file_name="MODELO_autenticidade_Sefaz_garimpeiro.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_modelo_autent_xlsx",
+                            width="stretch",
+                        )
+                    else:
+                        st.warning(_msg_sem_espaco_disco_garimpeiro())
+                    _df_div_ui = st.session_state.get("df_divergencias")
+                    if _df_div_ui is not None and isinstance(_df_div_ui, pd.DataFrame) and not _df_div_ui.empty:
+                        st.caption(f"**{len(_df_div_ui)}** divergência(s) na última comparação.")
+                        st.dataframe(_df_div_ui, width="stretch", height=min(260, 40 + 24 * len(_df_div_ui)))
+                    elif st.session_state.get("validation_done"):
+                        st.success("Última comparação de autenticidade: **sem divergências** (ou planilha vazia após cruzamento).")
 
                 # =====================================================================
                 # MÓDULO: DECLARAR INUTILIZADAS MANUAIS
                 # =====================================================================
-                st.markdown("##### 🛠️ Inutilizadas")
+                st.markdown(
+                    f'<h5>{_garim_emoji("🛠️")} Inutilizadas</h5>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander(
                     "Inclua notas que a Sefaz mostra inutilizadas mas que não estão no lote de ficheiros.",
                     expanded=False,
@@ -6701,20 +8805,24 @@ if st.session_state['confirmado']:
                     with tab_p:
                         st.markdown("**Subir tabela** com inutilizadas a declarar")
                         st.caption(
-                            "Colunas (1.ª linha = cabeçalho): **Modelo** = código Sefaz (**55** NF-e, **65** NFC-e, **57** CT-e, **58** MDF-e) "
+                            "Colunas (1.ª linha = cabeçalho): **Modelo** = código Sefaz (**55** NF-e, **65** NFC-e, **57** CT-e, **67** CT-e OS, **58** MDF-e) "
                             "ou nome NF-e / NFC-e…; **Série**; **Nota** (ou Número / Num_Faltante). "
                             "Ideal para copiar/colar da Sefaz. Só entram linhas que já forem **buraco** no garimpeiro."
                         )
-                        st.download_button(
-                            "Baixar Excel",
-                            data=bytes_modelo_planilha_inutil_sem_xml_xlsx(),
-                            file_name="MODELO_inutilizadas_sem_XML_garimpeiro.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_modelo_inut_xlsx",
-                            use_container_width=True,
-                        )
+                        _bytes_m_inut = bytes_modelo_planilha_inutil_sem_xml_xlsx()
+                        if _bytes_m_inut:
+                            st.download_button(
+                                "Baixar Excel",
+                                data=_bytes_m_inut,
+                                file_name="MODELO_inutilizadas_sem_XML_garimpeiro.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_modelo_inut_xlsx",
+                                width="stretch",
+                            )
+                        else:
+                            st.warning(_msg_sem_espaco_disco_garimpeiro())
                         st.caption(
-                            "No modelo: **Modelo** em número (55, 65, 57, 58) como na Sefaz; **Série** e **Nota**. "
+                            "No modelo: **Modelo** em número (55, 65, 57, 67, 58) como na Sefaz; **Série** e **Nota**. "
                             "Substitua ou apague as linhas de exemplo e guarde antes de importar."
                         )
                         _up_inut = st.file_uploader(
@@ -6724,7 +8832,11 @@ if st.session_state['confirmado']:
                         )
 
                     with tab_f:
-                        _mf = st.selectbox("Modelo", ["NF-e", "NFC-e", "CT-e", "MDF-e"], key="inut_f_mod")
+                        _mf = st.selectbox(
+                            "Modelo",
+                            ["NF-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e"],
+                            key="inut_f_mod",
+                        )
                         _sf = st.text_input("Série", value="1", key="inut_f_ser").strip()
                         _c1f, _c2f = st.columns(2)
                         _n0 = _c1f.number_input("Nota inicial", min_value=1, value=1, step=1, key="inut_f_i")
@@ -6752,7 +8864,10 @@ if st.session_state['confirmado']:
                 # =====================================================================
                 # MÓDULO: DECLARAR CANCELADAS MANUAIS (sem XML de cancelamento)
                 # =====================================================================
-                st.markdown("##### ❌ Canceladas")
+                st.markdown(
+                    f'<h5>{_garim_emoji("❌")} Canceladas</h5>',
+                    unsafe_allow_html=True,
+                )
                 with st.expander(
                     "Inclua notas que sabe estar canceladas na Sefaz mas não tem o XML de cancelamento no lote.",
                     expanded=False,
@@ -6793,17 +8908,21 @@ if st.session_state['confirmado']:
                     with tab_cp:
                         st.markdown("**Subir tabela** com canceladas a declarar")
                         st.caption(
-                            "Colunas: **Modelo** (55, 65, 57, 58 ou NF-e…), **Série**, **Nota**. "
+                            "Colunas: **Modelo** (55, 65, 57, 67, 58 ou NF-e…), **Série**, **Nota**. "
                             "Só entram linhas que já forem **buraco** no garimpeiro."
                         )
-                        st.download_button(
-                            "Baixar modelo Excel",
-                            data=bytes_modelo_planilha_cancel_sem_xml_xlsx(),
-                            file_name="MODELO_canceladas_sem_XML_garimpeiro.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_modelo_canc_xlsx",
-                            use_container_width=True,
-                        )
+                        _bytes_m_canc = bytes_modelo_planilha_cancel_sem_xml_xlsx()
+                        if _bytes_m_canc:
+                            st.download_button(
+                                "Baixar modelo Excel",
+                                data=_bytes_m_canc,
+                                file_name="MODELO_canceladas_sem_XML_garimpeiro.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_modelo_canc_xlsx",
+                                width="stretch",
+                            )
+                        else:
+                            st.warning(_msg_sem_espaco_disco_garimpeiro())
                         st.file_uploader(
                             "Ficheiro .csv, .xlsx ou .xls",
                             type=["csv", "xlsx", "xls"],
@@ -6811,7 +8930,11 @@ if st.session_state['confirmado']:
                         )
 
                     with tab_cf:
-                        _mfc_ui = st.selectbox("Modelo", ["NF-e", "NFC-e", "CT-e", "MDF-e"], key="canc_f_mod")
+                        _mfc_ui = st.selectbox(
+                            "Modelo",
+                            ["NF-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e"],
+                            key="canc_f_mod",
+                        )
                         _sfc_ui = st.text_input("Série", value="1", key="canc_f_ser").strip()
                         _c1fc, _c2fc = st.columns(2)
                         _c1fc.number_input("Nota inicial", min_value=1, value=1, step=1, key="canc_f_i")
@@ -6890,13 +9013,18 @@ if st.session_state['confirmado']:
 
                 st.divider()
 
-                st.markdown("##### 🔁 Processar Dados")
+                st.markdown(
+                    f'<h5>{_garim_emoji("🔁")} Processar Dados</h5>',
+                    unsafe_allow_html=True,
+                )
                 if st.button(
                     "Processar Dados",
                     key="btn_reprocessar_garimpo",
-                    use_container_width=True,
+                    width="stretch",
                 ):
-                    _ef = st.session_state.get("extra_files")
+                    # Usar o retorno do file_uploader (variável `extra_files`): em alguns Streamlit,
+                    # `st.session_state["extra_files"]` fica vazio no mesmo run do clique e os XML extra não entram no lote.
+                    _ef = extra_files if extra_files else st.session_state.get("extra_files")
                     if _ef is not None and not isinstance(_ef, (list, tuple)):
                         _ef = [_ef]
                     _pick = list(st.session_state.get("inut_b_pick") or [])
@@ -6915,6 +9043,9 @@ if st.session_state['confirmado']:
                     _sfc = st.session_state.get("canc_f_ser", "1")
                     _n0c = int(st.session_state.get("canc_f_i", 1))
                     _n1c = int(st.session_state.get("canc_f_f", 1))
+                    _up_aut = st.session_state.get("autent_sefaz_up")
+                    if _up_aut is not None and not isinstance(_up_aut, (list, tuple)):
+                        _up_aut = [_up_aut]
                     with st.spinner("A gravar, aplicar inutilizações / canceladas e a recalcular…"):
                         _ok_all, _msg_all, _ = processar_painel_lateral_direito(
                             cnpj_limpo,
@@ -6935,6 +9066,7 @@ if st.session_state['confirmado']:
                             sf_canc_f=_sfc,
                             n0_canc_f=_n0c,
                             n1_canc_f=_n1c,
+                            up_autent_sefaz=_up_aut,
                         )
                     if _ok_all:
                         st.success(_msg_all)
@@ -6959,7 +9091,10 @@ if st.session_state['confirmado']:
         # BLOCO 4: EXPORTAR LISTA ESPECÍFICA
         # =====================================================================
         st.divider()
-        st.markdown("### 🔎 EXPORTAR LISTA ESPECÍFICA")
+        st.markdown(
+            f'<h3>{_garim_emoji("🔎")} EXPORTAR LISTA ESPECÍFICA</h3>',
+            unsafe_allow_html=True,
+        )
         with st.expander(
             "Excel (chaves ou inicial/final/série), período, faixa ou uma nota — gera ZIP(s) com XML do lote"
         ):
@@ -7009,7 +9144,7 @@ if st.session_state['confirmado']:
                 )
                 mod_ns = st.selectbox(
                     "Modelo no relatório geral",
-                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    ["NF-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e"],
                     index=0,
                     key="dom_ns_modelo",
                     help="Deve coincidir com o tipo das linhas no garimpo (coluna Modelo).",
@@ -7043,9 +9178,9 @@ if st.session_state['confirmado']:
                                     st.warning(
                                         "Nenhuma chave encontrada no relatório geral para essas faixas/modelo/série."
                                     )
-                                elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                elif not _garimpo_existem_fontes_xml_lote():
                                     st.error(
-                                        "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                        "Não há ficheiros do lote (memória ou pasta). Volte a correr o garimpo ou **Incluir mais XML**."
                                     )
                                 else:
                                     partes, n_xml = escrever_zip_dominio_por_chaves(
@@ -7061,7 +9196,7 @@ if st.session_state['confirmado']:
                                         )
                                     else:
                                         st.warning(
-                                            "⚠️ Há chaves no relatório, mas **nenhum XML** correspondente no lote em disco."
+                                            "⚠️ Há chaves no relatório, mas **nenhum XML** correspondente no lote atual."
                                         )
 
             with tab_periodo:
@@ -7089,9 +9224,9 @@ if st.session_state['confirmado']:
                             st.warning(
                                 "Nenhuma chave de 44 dígitos no relatório geral para esse intervalo de datas."
                             )
-                        elif not os.path.exists(TEMP_UPLOADS_DIR):
+                        elif not _garimpo_existem_fontes_xml_lote():
                             st.error(
-                                "A pasta dos XML carregados não existe. Volte a correr o garimpo ou **Incluir mais XML**."
+                                "Não há ficheiros do lote (memória ou pasta). Volte a correr o garimpo ou **Incluir mais XML**."
                             )
                         else:
                             partes, n_xml = escrever_zip_dominio_por_chaves(
@@ -7107,14 +9242,14 @@ if st.session_state['confirmado']:
                                 )
                             else:
                                 st.warning(
-                                    "⚠️ Há chaves no relatório, mas **nenhum XML** foi encontrado em disco "
+                                    "⚠️ Há chaves no relatório, mas **nenhum XML** no lote atual "
                                     f"para esse período. Confira se o lote contém esses ficheiros."
                                 )
 
             with tab_faixa:
                 mod_f = st.selectbox(
                     "Modelo",
-                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    ["NF-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e"],
                     index=0,
                     key="dom_faixa_modelo",
                     help="Igual à coluna Modelo do relatório geral (não use 55/65 — isso é o código Sefaz).",
@@ -7151,9 +9286,9 @@ if st.session_state['confirmado']:
                                     st.warning(
                                         "Nenhuma nota nessa faixa/modelo/série no relatório geral."
                                     )
-                                elif not os.path.exists(TEMP_UPLOADS_DIR):
+                                elif not _garimpo_existem_fontes_xml_lote():
                                     st.error(
-                                        "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                        "Não há ficheiros do lote (memória ou pasta). Volte a correr o garimpo."
                                     )
                                 else:
                                     partes, n_xml = escrever_zip_dominio_por_chaves(
@@ -7169,13 +9304,13 @@ if st.session_state['confirmado']:
                                         )
                                     else:
                                         st.warning(
-                                            "⚠️ Chaves encontradas no relatório, mas **nenhum XML** no lote em disco."
+                                            "⚠️ Chaves encontradas no relatório, mas **nenhum XML** no lote atual."
                                         )
 
             with tab_unica:
                 mod_u = st.selectbox(
                     "Modelo",
-                    ["NF-e", "NFC-e", "CT-e", "MDF-e"],
+                    ["NF-e", "NFC-e", "CT-e", "CT-e OS", "MDF-e"],
                     index=0,
                     key="dom_unica_modelo",
                     help="Igual à coluna Modelo do relatório geral.",
@@ -7210,9 +9345,9 @@ if st.session_state['confirmado']:
                                     "Confirme **Modelo** (NF-e, NFC-e…) como na tabela do garimpo, **série** e **número**; "
                                     "a série no relatório vem sem zeros à esquerda (ex. **1**, não 001)."
                                 )
-                            elif not os.path.exists(TEMP_UPLOADS_DIR):
+                            elif not _garimpo_existem_fontes_xml_lote():
                                 st.error(
-                                    "A pasta dos XML carregados não existe. Volte a correr o garimpo."
+                                    "Não há ficheiros do lote (memória ou pasta). Volte a correr o garimpo."
                                 )
                             else:
                                 partes, n_xml = escrever_zip_dominio_por_chaves(
@@ -7228,7 +9363,7 @@ if st.session_state['confirmado']:
                                     )
                                 else:
                                     st.warning(
-                                        "⚠️ Chave no relatório, mas **nenhum XML** correspondente no lote em disco."
+                                        "⚠️ Chave no relatório, mas **nenhum XML** correspondente no lote atual."
                                     )
 
             if st.session_state.get("zip_dom_parts"):
@@ -7247,9 +9382,8 @@ if st.session_state['confirmado']:
                                     file_name=os.path.basename(part),
                                     mime="application/zip",
                                     key=f"btn_dl_dom_{part}",
-                                    use_container_width=True,
+                                    width="stretch",
                                 )
 else:
     st.warning("👈 Insira o CNPJ lateral para começar.")
-
 
