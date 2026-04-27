@@ -10589,7 +10589,8 @@ if (__name__ == "__main__") and (not os.environ.get("GARIMPEIRO_HEADLESS")):
                 st.session_state["mariana_zip_save_dir"] = ""
             if "mariana_zip_basename" not in st.session_state:
                 st.session_state["mariana_zip_basename"] = ""
-            _extracao_lote_expander_md = """
+            if not _streamlit_likely_community_cloud():
+                _extracao_lote_expander_md = """
 **O que esperar de cada modelo:**
 
 | | **Recursivo** (o normal) | **Domínio** |
@@ -10599,8 +10600,7 @@ if (__name__ == "__main__") and (not os.environ.get("GARIMPEIRO_HEADLESS")):
 | ZIP «mais arrumado» em gavetas (pastas por partes) | **Sim** | Não |
 | ZIP «mais simples» (tudo na mesma vista no início) | Não | **Sim** |
 | Parte o lote em **mais de um** ZIP se for muito grande | Sim — até **10 000** XML em cada ZIP | Sim — até **10 000** XML em cada ZIP |
-            """.strip()
-            if not _streamlit_likely_community_cloud():
+                """.strip()
                 st.markdown(
                     f'<p style="margin:1rem 0 0.25rem 0;font-weight:700;color:#5D1B36;font-size:0.98rem;line-height:1.35;">'
                     f'<span style="display:inline-block;background:linear-gradient(180deg,#ff8cc8,#ff69b4);color:#fff;'
@@ -10647,25 +10647,7 @@ if (__name__ == "__main__") and (not os.environ.get("GARIMPEIRO_HEADLESS")):
                 )
                 with st.expander("Detalhes de cada Modelo de extração", expanded=False):
                     st.markdown(_extracao_lote_expander_md)
-            else:
-                st.caption(
-                    "Na **Cloud** não há pasta no PC. Isto só muda o **ZIP** da contabilidade ao gerar/descarregar, se aplicável."
-                )
-                st.selectbox(
-                    "Como os arquivos serão extraídos caso opte por salvá-los",
-                    options=("matriosca", "dominio"),
-                    key=SESSION_KEY_GARIMPO_EXTRACAO_LOTE,
-                    format_func=lambda v: (
-                        "Recursivo — ZIP **com pastinhas** (por partes, tipo Lote_001…); use na dúvida."
-                        if v == "matriosca"
-                        else "Domínio — ZIP **sem pastinhas**, notas **soltas** no início do ficheiro."
-                    ),
-                    help=(
-                        "**Ler** o lote é **igual** nos dois. Só mexe se a contabilidade pedir ZIP **sem pastas**; senão **Recursivo**."
-                    ),
-                )
-                with st.expander("Detalhes de cada Modelo de extração", expanded=False):
-                    st.markdown(_extracao_lote_expander_md)
+            # Community Cloud: PASSO 3 (pasta no disco) já está oculto; modo ZIP = «matriosca» (definido ao entrar neste fluxo, se ausente).
             if st.button("INICIAR GRANDE GARIMPO"):
                 _ui_scroll_to_top()
                 # No mesmo rerun do clique o file_uploader por vezes devolve vazio — usar session_state (igual ao «Processar Dados»).
