@@ -86,6 +86,7 @@ def run_garimpeiro_local(
     codigo_sped: str | None,
     stem_zip: str | None,
     extracao: str | None = None,
+    extracao_pasta: str | None = None,
 ) -> dict:
     import app as ap
 
@@ -102,9 +103,17 @@ def run_garimpeiro_local(
     modo_n = (modo or "pasta").strip().lower()
     if modo_n not in ("pasta", "sped"):
         return {"ok": False, "erro": "modo deve ser 'pasta' ou 'sped'."}
-    extr_n = (extracao or "matriosca").strip().lower()
-    if extr_n not in ("matriosca", "dominio"):
-        return {"ok": False, "erro": "extracao deve ser 'matriosca' ou 'dominio'."}
+    extr_zip = (extracao or "matriosca").strip().lower()
+    extr_pasta = (extracao_pasta or extracao or "matriosca").strip().lower()
+    if extr_zip not in ("matriosca", "dominio"):
+        return {"ok": False, "erro": "extracao (ZIP) deve ser 'matriosca' ou 'dominio'."}
+    if extr_pasta not in ("matriosca", "dominio", "apenas_zip"):
+        return {
+            "ok": False,
+            "erro": "extracao_pasta deve ser 'matriosca', 'dominio' ou 'apenas_zip' (sem espelho XML em pastas).",
+        }
+    if extr_pasta != "apenas_zip" and extr_pasta != extr_zip:
+        extr_pasta = extr_zip
 
     skip_paths: set[Path] = set()
     texto_sped = ""
@@ -173,7 +182,7 @@ def run_garimpeiro_local(
     _cli_log(
         f"Modo:     {modo_n}"
         + (f"  (código SPED: {codigo_sped})" if modo_n == "sped" else "")
-        + f"  |  extração: {extr_n}"
+        + f"  |  extração ZIP: {extr_zip}  |  extração pastas: {extr_pasta}"
     )
     _cli_log(f"Ficheiros .xml/.zip encontrados na entrada: {len(arquivos)}  →  a copiar para área temporária…")
 
@@ -202,7 +211,9 @@ def run_garimpeiro_local(
     st.session_state["mariana_zip_basename"] = u_stem if u_stem else "pacote_apuracao"
     st.session_state["cnpj_widget"] = ap.format_cnpj_visual(cnpj_limpo)
     st.session_state.pop("garimpo_espelho_indice_td", None)
-    st.session_state[ap.SESSION_KEY_GARIMPO_EXTRACAO_LOTE] = extr_n
+    st.session_state[ap.SESSION_KEY_GARIMPO_EXTRACAO_ZIP] = extr_zip
+    st.session_state[ap.SESSION_KEY_GARIMPO_EXTRACAO_PASTA] = extr_pasta
+    st.session_state[ap.SESSION_KEY_GARIMPO_EXTRACAO_LOTE] = extr_zip
 
     lote_dict: dict = {}
     _falhas_leitura = 0
@@ -432,7 +443,13 @@ def run_garimpeiro_local(
         }
 
     _cli_log(
-        f"A gravar pacote contabilidade em {espelho.name}/ dentro da saída (pastas + ZIP + Excel)…"
+        f"A gravar pacote contabilidade em {espelho.name}/ dentro da saída ("
+        + (
+            "ZIP + Excel — sem pastas de XML no disco"
+            if extr_pasta == "apenas_zip"
+            else "pastas + ZIP + Excel"
+        )
+        + ")…"
     )
     ap._garimpo_gravar_espelho_layout_contabilidade(cnpj_limpo)
 

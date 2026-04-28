@@ -4,6 +4,8 @@ Garimpeiro local — linha de comandos (sem servidor Streamlit).
 Uso: py -3 garimpeiro_cli.py --entrada "D:\\lote" --saida "D:\\out" --cnpj 12345678000199 --modo pasta
      py -3 garimpeiro_cli.py --entrada "D:\\lote" --saida "D:\\out" --cnpj ... --modo sped --codigo 578
      py -3 garimpeiro_cli.py --entrada "D:\\lote" ... --extracao dominio
+     py -3 garimpeiro_cli.py ... --extracao matriosca --extracao-pasta dominio
+     py -3 garimpeiro_cli.py ... --extracao-pasta apenas_zip
 """
 from __future__ import annotations
 
@@ -136,7 +138,16 @@ def main() -> int:
         "--extracao",
         choices=("matriosca", "dominio"),
         default="matriosca",
-        help="matriosca=omissão; dominio=ZIP pacote contab: XML+Excel na raiz, até 10000 XML/ficheiro, nome com _notas_min_max da faixa dentro do zip; relatório completo solto na saída.",
+        help="Layout dos ficheiros .zip do pacote (matriosca=XML/Lote_… dentro do zip; dominio=XML na raiz do zip).",
+    )
+    p.add_argument(
+        "--extracao-pasta",
+        choices=("matriosca", "dominio", "apenas_zip"),
+        default=None,
+        help=(
+            "Espelho: matriosca/dominio deve coincidir com --extracao (Recursivo/Domínio alinhados); "
+            "apenas_zip = só .zip e Excel sem pastas de XML (omissão = mesmo valor que --extracao)."
+        ),
     )
     p.add_argument(
         "--quiet",
@@ -163,6 +174,7 @@ def main() -> int:
         codigo_sped=args.codigo.strip() or None,
         stem_zip=args.stem.strip() or None,
         extracao=args.extracao,
+        extracao_pasta=args.extracao_pasta,
     )
     if not r.get("ok"):
         print("ERRO:", r.get("erro", "desconhecido"), file=sys.stderr)
